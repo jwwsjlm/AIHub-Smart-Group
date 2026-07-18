@@ -1,15 +1,16 @@
 // ==UserScript==
-// @name         AIHub Smart Group
-// @name:zh-CN   AIHub 智能分组
+// @name         AIHub + ShuaiAPI Smart Group
+// @name:zh-CN   AIHub + 帅API 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.1.6
-// @description  Recommend the cheapest reliable AIHub group and switch an existing API key safely.
-// @description:zh-CN 按倍率和可用性推荐 AIHub 分组，并切换已有 API Key
+// @version      0.2.1
+// @description  Recommend reliable low-cost groups on AIHub and ShuaiAPI.
+// @description:zh-CN 按倍率、模型和可用性推荐 AIHub 与帅API分组
 // @license      MIT
 // @homepageURL   https://github.com/jwwsjlm/AIHub-Smart-Group
 // @supportURL    https://github.com/jwwsjlm/AIHub-Smart-Group/issues
 // @match        https://aihub.top/providers*
 // @match        https://aihub.top/keys*
+// @match        https://api.shuaiapi.com/performance*
 // @grant        GM_addStyle
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
@@ -27,7 +28,9 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.1.6';
+  const SHUAI_ROOT_ID = 'shuai-smart-group-panel';
+  const SHUAI_TOGGLE_ID = 'shuai-smart-group-toggle';
+  const SCRIPT_VERSION = '0.2.1';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const DEFAULT_CONFIG = Object.freeze({
     minSuccess6h: 0.95,
@@ -37,6 +40,12 @@
     pollIntervalSeconds: 30,
     cooldownMinutes: 10,
     autoSwitch: false,
+  });
+  const SHUAI_DEFAULT_CONFIG = Object.freeze({
+    hours: 24,
+    minSuccessRate: 99,
+    excludeWarnings: true,
+    pollIntervalSeconds: 60,
   });
 
   function numberOr(value, fallback) {
@@ -224,6 +233,86 @@
     return apiRequest('/public/monitor/summary');
   }
 
+  function shuaiRequestHeaders() {
+    const headers = { Accept: 'application/json' };
+    try {
+      const uid = getPageWindow().localStorage.getItem('uid');
+      if (uid) headers['New-Api-User'] = uid;
+    } catch {
+      // The session cookie is sufficient when the optional user hint is unavailable.
+    }
+    return headers;
+  }
+
+  async function fetchShuaiJson(path, options = {}) {
+    const response = await getPageWindow().fetch(path, {
+      credentials: 'include',
+      ...options,
+      headers: { ...shuaiRequestHeaders(), ...(options.headers || {}) },
+    });
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch {
+      payload = null;
+    }
+    if (!response.ok) {
+      const detail = payload && (payload.detail || payload.message);
+      const error = new Error(detail ? String(detail) : `请求失败 (${response.status})`);
+      error.status = response.status;
+      throw error;
+    }
+    return payload;
+  }
+
+  async function fetchShuaiGroups(hours = 24) {
+    const query = new URLSearchParams({ hours: String(hours) });
+    return extractShuaiGroups(await fetchShuaiJson(`/api/perf-metrics/groups?${query}`));
+  }
+
+  async function fetchShuaiGroupCatalog() {
+    const payload = await fetchShuaiJson('/api/user/self/groups');
+    const data = payload?.data && typeof payload.data === 'object' ? payload.data : {};
+    return Object.entries(data).map(([name, value]) => ({
+      name: String(name),
+      description: String(value?.desc || value?.description || name),
+      ratio: Number(value?.ratio),
+      customChain: value?.custom_chain === true,
+    }));
+  }
+
+  function normalizeShuaiToken(token) {
+    const source = token && typeof token === 'object' ? token : {};
+    return {
+      id: source.id,
+      name: String(source.name || source.key_name || `Key ${source.id ?? ''}`).trim(),
+      group: String(source.group || source.group_name || '').trim(),
+      status: String(source.status || '').trim(),
+      crossGroupRetry: source.cross_group_retry === true,
+    };
+  }
+
+  function extractShuaiTokens(payload) {
+    const data = payload?.data ?? payload;
+    const items = Array.isArray(data)
+      ? data
+      : (Array.isArray(data?.items) ? data.items : (Array.isArray(data?.tokens) ? data.tokens : []));
+    return items.map(normalizeShuaiToken).filter((token) => token.id != null);
+  }
+
+  async function fetchShuaiTokens() {
+    const payload = await fetchShuaiJson('/api/token/?p=1&size=100');
+    return extractShuaiTokens(payload);
+  }
+
+  async function updateShuaiTokenGroup(tokenId, group, crossGroupRetry = false) {
+    return fetchShuaiJson('/api/token/?group_only=true', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: tokenId, group, cross_group_retry: Boolean(crossGroupRetry) }),
+    });
+  }
+
   async function fetchAllKeys() {
     const pages = [];
     let page = 1;
@@ -283,6 +372,46 @@
     #${TOGGLE_ID}:hover{background:#0f46b6}
   `;
 
+  const SHUAI_STYLE = `
+    #${SHUAI_ROOT_ID}{position:fixed;right:16px;bottom:16px;z-index:2147483646;width:390px;max-width:calc(100vw - 32px);color:#182230;background:#fff;border:1px solid #d7dde7;border-radius:8px;box-shadow:0 8px 30px rgba(16,24,40,.18);font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    #${SHUAI_ROOT_ID}[hidden]{display:none}
+    #${SHUAI_ROOT_ID} *{box-sizing:border-box}
+    #${SHUAI_ROOT_ID} .ssg-head{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #e4e7ec}
+    #${SHUAI_ROOT_ID} .ssg-head strong{font-size:14px}
+    #${SHUAI_ROOT_ID} button{font:inherit;cursor:pointer;border:1px solid #cfd5df;border-radius:6px;background:#fff;color:#182230;padding:5px 9px}
+    #${SHUAI_ROOT_ID} button:hover:not(:disabled){background:#f3f5f8}
+    #${SHUAI_ROOT_ID} button:disabled{cursor:not-allowed;opacity:.5}
+    #${SHUAI_ROOT_ID} .ssg-icon{border:0;padding:2px 5px;font-size:18px;line-height:1}
+    #${SHUAI_ROOT_ID} .ssg-body{padding:10px 12px}
+    #${SHUAI_ROOT_ID} .ssg-status{color:#667085;font-size:12px;margin-bottom:8px}
+    #${SHUAI_ROOT_ID} .ssg-status.ssg-error{color:#b42318;background:#fff4f2;border:1px solid #fecdca;border-radius:6px;padding:6px}
+    #${SHUAI_ROOT_ID} label{display:block;color:#475467;font-size:12px;margin:8px 0 4px}
+    #${SHUAI_ROOT_ID} select,#${SHUAI_ROOT_ID} input[type=number]{width:100%;border:1px solid #cfd5df;border-radius:6px;padding:6px;background:#fff;color:#182230;font:inherit}
+    #${SHUAI_ROOT_ID} .ssg-controls{display:grid;grid-template-columns:1fr 90px;gap:8px}
+    #${SHUAI_ROOT_ID} .ssg-recommend{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:10px 0}
+    #${SHUAI_ROOT_ID} .ssg-box{padding:9px;background:#f7f9fc;border:1px solid #e1e6ef;border-radius:6px;min-width:0}
+    #${SHUAI_ROOT_ID} .ssg-box.ssg-primary{background:#f4f8ff;border-color:#cfe0ff}
+    #${SHUAI_ROOT_ID} .ssg-box strong{display:block;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    #${SHUAI_ROOT_ID} .ssg-label{color:#667085;font-size:11px;margin-bottom:3px}
+    #${SHUAI_ROOT_ID} .ssg-metrics{display:flex;flex-wrap:wrap;gap:4px 8px;color:#475467;font-size:11px;margin-top:5px}
+    #${SHUAI_ROOT_ID} .ssg-muted{color:#667085}
+    #${SHUAI_ROOT_ID} .ssg-options{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;color:#475467;font-size:12px}
+    #${SHUAI_ROOT_ID} .ssg-options input{margin:0 4px 0 0}
+    #${SHUAI_ROOT_ID} .ssg-actions{display:flex;gap:7px;margin-top:9px}
+    #${SHUAI_ROOT_ID} .ssg-actions button:last-child{flex:1;background:#1456d9;color:#fff;border-color:#1456d9}
+    #${SHUAI_ROOT_ID} .ssg-switch{border-top:1px solid #e4e7ec;margin-top:10px;padding-top:8px}
+    #${SHUAI_ROOT_ID} .ssg-switch-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    #${SHUAI_ROOT_ID} .ssg-switch button{width:100%;margin-top:7px;background:#0f766e;color:#fff;border-color:#0f766e}
+    #${SHUAI_ROOT_ID} .ssg-list{margin:8px 0 0;padding:0;list-style:none;max-height:190px;overflow:auto;border-top:1px solid #eef0f3}
+    #${SHUAI_ROOT_ID} .ssg-list li{display:flex;justify-content:space-between;gap:8px;padding:7px 0;border-bottom:1px solid #eef0f3}
+    #${SHUAI_ROOT_ID} .ssg-list li span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    #${SHUAI_ROOT_ID} .ssg-list li span:last-child{text-align:right;color:#475467;white-space:nowrap;font-size:11px}
+    #${SHUAI_TOGGLE_ID}{position:fixed;right:16px;bottom:16px;z-index:2147483646;width:42px;height:42px;padding:0;border:1px solid #1456d9;border-radius:50%;background:#1456d9;color:#fff;box-shadow:0 8px 24px rgba(16,24,40,.2);font:600 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:pointer}
+    #${SHUAI_TOGGLE_ID}[hidden]{display:none}
+    #${SHUAI_TOGGLE_ID}:hover{background:#0f46b6}
+    @media (max-width:520px){#${SHUAI_ROOT_ID} .ssg-recommend{grid-template-columns:1fr}}
+  `;
+
   function addStyle(css) {
     if (typeof GM_addStyle === 'function') GM_addStyle(css);
     else {
@@ -298,6 +427,148 @@
 
   function formatLatency(value) {
     return Number.isFinite(value) ? `${Math.round(value)} ms` : '-';
+  }
+
+  function normalizeShuaiPercent(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return Number.NaN;
+    return number >= 0 && number <= 1 ? number * 100 : number;
+  }
+
+  function shuaiWarningText(group) {
+    return [group?.description, group?.warning, group?.warning_reason, group?.status]
+      .filter((value) => value != null)
+      .map(String)
+      .join(' ');
+  }
+
+  function hasShuaiWarning(group) {
+    return /不稳定|警告|故障|建议使用其他|unstable|warning|degraded|critical/i.test(shuaiWarningText(group));
+  }
+
+  function normalizeShuaiModel(model) {
+    const source = model && typeof model === 'object' ? model : {};
+    return {
+      name: String(source.model_name || source.model || source.name || '').trim(),
+      requestCount: Number(source.request_count ?? source.requests ?? 0),
+      successRate: normalizeShuaiPercent(source.success_rate ?? source.availability),
+      cacheHitRate: normalizeShuaiPercent(source.cache_hit_rate),
+      avgTtftMs: Number(source.avg_ttft_ms ?? source.avg_ttft ?? Number.NaN),
+      avgLatencyMs: Number(source.avg_latency_ms ?? source.avg_latency ?? Number.NaN),
+      avgTps: Number(source.avg_tps ?? source.tps ?? Number.NaN),
+    };
+  }
+
+  function normalizeShuaiGroup(group) {
+    const source = group && typeof group === 'object' ? group : {};
+    const models = (Array.isArray(source.models) ? source.models : [])
+      .map(normalizeShuaiModel)
+      .filter((model) => model.name);
+    return {
+      name: String(source.group ?? source.group_name ?? source.name ?? '').trim(),
+      ratio: Number(source.ratio ?? source.group_ratio ?? Number.NaN),
+      requestCount: Number(source.request_count ?? source.requests ?? 0),
+      successRate: normalizeShuaiPercent(source.success_rate ?? source.availability),
+      cacheHitRate: normalizeShuaiPercent(source.cache_hit_rate),
+      avgTtftMs: Number(source.avg_ttft_ms ?? source.avg_ttft ?? Number.NaN),
+      avgLatencyMs: Number(source.avg_latency_ms ?? source.avg_latency ?? Number.NaN),
+      avgTps: Number(source.avg_tps ?? source.tps ?? Number.NaN),
+      description: String(source.description || '').trim(),
+      warning: hasShuaiWarning(source),
+      models,
+    };
+  }
+
+  function extractShuaiGroups(payload) {
+    const data = payload?.data ?? payload;
+    const groups = Array.isArray(data) ? data : data?.groups;
+    return (Array.isArray(groups) ? groups : []).map(normalizeShuaiGroup).filter((group) => group.name);
+  }
+
+  function classifyShuaiModel(modelName) {
+    const name = String(modelName || '').toLowerCase();
+    if (name.includes('claude')) return 'claude';
+    if (name.includes('grok')) return 'grok';
+    if (name.includes('codex')) return 'codex';
+    if (name.includes('gpt')) return 'gpt';
+    if (name.includes('gemini')) return 'gemini';
+    if (name.includes('deepseek')) return 'deepseek';
+    if (name.includes('qwen') || name.includes('通义')) return 'qwen';
+    return 'other';
+  }
+
+  function buildShuaiModelOptions(groups) {
+    return [...new Set((Array.isArray(groups) ? groups : [])
+      .flatMap((group) => (Array.isArray(group.models) ? group.models : []))
+      .map((model) => String(model.name || '').trim())
+      .filter(Boolean))].sort((left, right) => left.localeCompare(right));
+  }
+
+  function matchesShuaiModel(group, modelFilter) {
+    if (!modelFilter || modelFilter === 'all') return true;
+    const models = Array.isArray(group.models) ? group.models : [];
+    if (modelFilter.startsWith('category:')) {
+      const category = modelFilter.slice('category:'.length);
+      return models.some((model) => classifyShuaiModel(model.name) === category);
+    }
+    return models.some((model) => model.name === modelFilter);
+  }
+
+  function projectShuaiCandidate(group, modelFilter) {
+    const model = modelFilter && !modelFilter.startsWith('category:')
+      ? group.models.find((item) => item.name === modelFilter)
+      : null;
+    const source = model || group;
+    return {
+      ...group,
+      modelName: model?.name || null,
+      requestCount: Number(source.requestCount),
+      successRate: Number(source.successRate),
+      cacheHitRate: Number(source.cacheHitRate),
+      avgTtftMs: Number(source.avgTtftMs),
+      avgLatencyMs: Number(source.avgLatencyMs),
+      avgTps: Number(source.avgTps),
+    };
+  }
+
+  function rankShuaiGroups(groups, modelFilter = 'all', config = SHUAI_DEFAULT_CONFIG, options = {}) {
+    const minSuccessRate = clamp(numberOr(config?.minSuccessRate, SHUAI_DEFAULT_CONFIG.minSuccessRate), 0, 100);
+    const excludeWarnings = config?.excludeWarnings !== false;
+    const reliableOnly = options.reliableOnly !== false;
+    return (Array.isArray(groups) ? groups : [])
+      .filter((group) => group && Number.isFinite(Number(group.ratio)) && Number(group.ratio) >= 0)
+      .filter((group) => matchesShuaiModel(group, modelFilter))
+      .map((group) => projectShuaiCandidate(group, modelFilter))
+      .filter((candidate) => candidate.requestCount > 0 && Number.isFinite(candidate.successRate))
+      .filter((candidate) => !reliableOnly || candidate.successRate >= minSuccessRate)
+      .filter((candidate) => !reliableOnly || !excludeWarnings || !candidate.warning)
+      .sort((left, right) => (
+        left.ratio - right.ratio
+        || right.successRate - left.successRate
+        || (Number.isFinite(left.avgTtftMs) ? left.avgTtftMs : Number.POSITIVE_INFINITY)
+          - (Number.isFinite(right.avgTtftMs) ? right.avgTtftMs : Number.POSITIVE_INFINITY)
+        || (Number.isFinite(left.avgLatencyMs) ? left.avgLatencyMs : Number.POSITIVE_INFINITY)
+          - (Number.isFinite(right.avgLatencyMs) ? right.avgLatencyMs : Number.POSITIVE_INFINITY)
+        || left.name.localeCompare(right.name)
+      ));
+  }
+
+  function getShuaiRecommendations(groups, modelFilter = 'all', config = SHUAI_DEFAULT_CONFIG) {
+    return {
+      cheapest: rankShuaiGroups(groups, modelFilter, config, { reliableOnly: false })[0] || null,
+      recommended: rankShuaiGroups(groups, modelFilter, config, { reliableOnly: true })[0] || null,
+      candidates: rankShuaiGroups(groups, modelFilter, config, { reliableOnly: true }),
+    };
+  }
+
+  function normalizeShuaiConfig(input = {}) {
+    const source = input && typeof input === 'object' ? input : {};
+    return {
+      hours: Number(source.hours) === 168 ? 168 : 24,
+      minSuccessRate: clamp(numberOr(source.minSuccessRate, SHUAI_DEFAULT_CONFIG.minSuccessRate), 0, 100),
+      excludeWarnings: source.excludeWarnings !== false,
+      pollIntervalSeconds: Math.round(clamp(numberOr(source.pollIntervalSeconds, SHUAI_DEFAULT_CONFIG.pollIntervalSeconds), 30, 3600)),
+    };
   }
 
   class Controller {
@@ -587,6 +858,383 @@
     }
   }
 
+  function formatShuaiPercent(value) {
+    return Number.isFinite(value) ? `${value.toFixed(2)}%` : '-';
+  }
+
+  function formatShuaiMetric(value, suffix = '') {
+    if (!Number.isFinite(value)) return '-';
+    if (suffix === 'ms') return value >= 1000 ? `${(value / 1000).toFixed(2)}s` : `${Math.round(value)}ms`;
+    if (suffix === 'tps') return `${value.toFixed(value < 10 ? 2 : 1)} t/s`;
+    return `${value}${suffix}`;
+  }
+
+  class ShuaiController {
+    constructor() {
+      this.config = normalizeShuaiConfig(storageGet('shuai-config', SHUAI_DEFAULT_CONFIG));
+      this.groups = [];
+      this.groupCatalog = [];
+      this.tokens = [];
+      this.modelFilter = storageGet('shuai-model-filter', 'all');
+      this.selectedTokenId = storageGet('shuai-token-id', null);
+      this.targetGroup = storageGet('shuai-target-group', '');
+      this.loading = false;
+      this.switching = false;
+      this.error = '';
+      this.tokenError = '';
+      this.lastUpdated = null;
+      this.minimized = storageGet('shuai-minimized', false) === true;
+      this.timer = null;
+      this.panel = null;
+      this.toggleButton = null;
+    }
+
+    start() {
+      const existing = document.getElementById(SHUAI_ROOT_ID);
+      if (existing?.dataset.version === SCRIPT_VERSION) return;
+      existing?.remove();
+      document.getElementById(SHUAI_TOGGLE_ID)?.remove();
+      addStyle(SHUAI_STYLE);
+      this.renderShell();
+      this.bindEvents();
+      if (typeof GM_registerMenuCommand === 'function') {
+        GM_registerMenuCommand('显示帅API智能分组', () => this.setMinimized(false));
+      }
+      this.refresh();
+      this.timer = window.setInterval(() => this.refresh(), this.config.pollIntervalSeconds * 1000);
+    }
+
+    renderShell() {
+      const panel = document.createElement('section');
+      panel.id = SHUAI_ROOT_ID;
+      panel.dataset.version = SCRIPT_VERSION;
+      panel.innerHTML = `
+        <div class="ssg-head"><strong>帅API 智能分组</strong><button class="ssg-icon" data-action="minimize" title="最小化">−</button></div>
+        <div class="ssg-body">
+          <div class="ssg-status" data-field="status">准备读取性能数据</div>
+          <div class="ssg-controls">
+            <label>模型或类型<select data-field="model"><option value="all">全部模型</option></select></label>
+            <label>时间窗<select data-field="hours"><option value="24">24h</option><option value="168">7d</option></select></label>
+          </div>
+          <div class="ssg-recommend" data-field="recommend"><div class="ssg-muted">正在读取性能数据...</div></div>
+          <div class="ssg-options"><label><input type="checkbox" data-setting="excludeWarnings">排除不稳定分组</label><label>最低成功率 <input type="number" min="0" max="100" step="0.1" data-setting="minSuccessRate" style="width:72px"></label></div>
+          <div class="ssg-actions"><button data-action="refresh">刷新</button><button data-action="save-settings">保存设置</button></div>
+          <div class="ssg-switch">
+            <div class="ssg-switch-grid">
+              <label>目标密钥<select data-field="token"><option value="">未读取到密钥</option></select></label>
+              <label>目标分组<select data-field="target-group"><option value="">暂无推荐</option></select></label>
+            </div>
+            <button data-action="switch" disabled>切换选中密钥分组</button>
+          </div>
+          <ul class="ssg-list" data-field="list"></ul>
+        </div>`;
+      document.body.appendChild(panel);
+      this.panel = panel;
+      const toggle = document.createElement('button');
+      toggle.id = SHUAI_TOGGLE_ID;
+      toggle.type = 'button';
+      toggle.textContent = '帅';
+      toggle.title = '打开帅API智能分组';
+      toggle.setAttribute('aria-label', '打开帅API智能分组');
+      document.body.appendChild(toggle);
+      this.toggleButton = toggle;
+      this.syncSettingsInputs();
+      this.setMinimized(this.minimized);
+    }
+
+    bindEvents() {
+      this.panel.addEventListener('click', (event) => {
+        const action = event.target.closest('[data-action]')?.dataset.action;
+        if (action === 'minimize') this.setMinimized(true);
+        if (action === 'refresh') this.refresh();
+        if (action === 'save-settings') this.saveSettings();
+        if (action === 'switch') this.switchSelectedToken();
+      });
+      this.toggleButton.addEventListener('click', () => this.setMinimized(false));
+      this.panel.querySelector('[data-field="model"]').addEventListener('change', (event) => {
+        this.modelFilter = event.target.value || 'all';
+        storageSet('shuai-model-filter', this.modelFilter);
+        this.renderData();
+      });
+      this.panel.querySelector('[data-field="hours"]').addEventListener('change', (event) => {
+        this.config.hours = Number(event.target.value) === 168 ? 168 : 24;
+        storageSet('shuai-config', this.config);
+        this.refresh();
+      });
+      this.panel.querySelector('[data-field="token"]').addEventListener('change', (event) => {
+        this.selectedTokenId = event.target.value || null;
+        storageSet('shuai-token-id', this.selectedTokenId);
+        this.renderActionState();
+      });
+      this.panel.querySelector('[data-field="target-group"]').addEventListener('change', (event) => {
+        this.targetGroup = event.target.value || '';
+        storageSet('shuai-target-group', this.targetGroup);
+        this.renderActionState();
+      });
+    }
+
+    setMinimized(value) {
+      this.minimized = value === true;
+      if (this.panel) this.panel.hidden = this.minimized;
+      if (this.toggleButton) this.toggleButton.hidden = !this.minimized;
+      storageSet('shuai-minimized', this.minimized);
+    }
+
+    syncSettingsInputs() {
+      this.panel.querySelector('[data-field="hours"]').value = String(this.config.hours);
+      this.panel.querySelector('[data-setting="minSuccessRate"]').value = this.config.minSuccessRate;
+      this.panel.querySelector('[data-setting="excludeWarnings"]').checked = this.config.excludeWarnings;
+    }
+
+    saveSettings() {
+      const input = this.panel.querySelector('[data-setting="minSuccessRate"]');
+      const excludeWarnings = this.panel.querySelector('[data-setting="excludeWarnings"]');
+      this.config = normalizeShuaiConfig({
+        ...this.config,
+        minSuccessRate: input.value,
+        excludeWarnings: excludeWarnings.checked,
+      });
+      storageSet('shuai-config', this.config);
+      this.syncSettingsInputs();
+      if (this.timer) window.clearInterval(this.timer);
+      this.timer = window.setInterval(() => this.refresh(), this.config.pollIntervalSeconds * 1000);
+      this.setStatus('设置已保存');
+      this.renderData();
+    }
+
+    async refresh() {
+      if (this.loading) return;
+      this.loading = true;
+      this.error = '';
+      this.setStatus('读取性能数据中...');
+      try {
+        this.groups = await fetchShuaiGroups(this.config.hours);
+        this.tokenError = '';
+        try {
+          [this.tokens, this.groupCatalog] = await Promise.all([
+            fetchShuaiTokens(),
+            fetchShuaiGroupCatalog(),
+          ]);
+          if (!this.tokens.some((token) => String(token.id) === String(this.selectedTokenId))) {
+            this.selectedTokenId = this.tokens.length === 1 ? this.tokens[0].id : null;
+            storageSet('shuai-token-id', this.selectedTokenId);
+          }
+        } catch (error) {
+          this.tokens = [];
+          this.groupCatalog = [];
+          this.tokenError = error instanceof Error ? error.message : '密钥读取失败';
+        }
+        const models = buildShuaiModelOptions(this.groups);
+        const valid = this.modelFilter === 'all'
+          || this.modelFilter.startsWith('category:')
+          || models.includes(this.modelFilter);
+        if (!valid) this.modelFilter = 'all';
+        storageSet('shuai-model-filter', this.modelFilter);
+        this.lastUpdated = new Date();
+        this.renderData();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : '性能数据读取失败';
+        this.setStatus(this.error, true);
+        this.renderData();
+      } finally {
+        this.loading = false;
+      }
+    }
+
+    setStatus(text, error = false) {
+      const node = this.panel?.querySelector('[data-field="status"]');
+      if (node) {
+        node.textContent = text;
+        node.classList.toggle('ssg-error', error);
+      }
+    }
+
+    renderModelOptions() {
+      const select = this.panel.querySelector('[data-field="model"]');
+      const current = this.modelFilter;
+      select.replaceChildren();
+      const all = document.createElement('option');
+      all.value = 'all';
+      all.textContent = '全部模型';
+      select.appendChild(all);
+      const models = buildShuaiModelOptions(this.groups);
+      const categories = [...new Set(models.map(classifyShuaiModel))];
+      const labels = { gpt: 'GPT 类型', claude: 'Claude 类型', grok: 'Grok 类型', codex: 'Codex 类型', gemini: 'Gemini 类型', deepseek: 'DeepSeek 类型', qwen: 'Qwen 类型', other: '其他类型' };
+      for (const category of categories) {
+        const option = document.createElement('option');
+        option.value = `category:${category}`;
+        option.textContent = labels[category] || category;
+        option.selected = current === option.value;
+        select.appendChild(option);
+      }
+      for (const model of models) {
+        const option = document.createElement('option');
+        option.value = model;
+        option.textContent = model;
+        option.selected = current === model;
+        select.appendChild(option);
+      }
+      select.value = current;
+    }
+
+    selectedToken() {
+      return this.tokens.find((token) => String(token.id) === String(this.selectedTokenId)) || null;
+    }
+
+    renderTokenOptions() {
+      const select = this.panel.querySelector('[data-field="token"]');
+      const current = this.selectedTokenId;
+      select.replaceChildren();
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = this.tokens.length ? '选择要切换的密钥' : (this.tokenError || '未读取到密钥');
+      select.appendChild(placeholder);
+      for (const token of this.tokens) {
+        const option = document.createElement('option');
+        option.value = token.id;
+        option.textContent = `${token.name} · ${token.group || '未分组'}`;
+        option.selected = String(token.id) === String(current);
+        select.appendChild(option);
+      }
+      select.disabled = this.tokens.length === 0;
+    }
+
+    renderTargetGroupOptions(recommendations) {
+      const select = this.panel.querySelector('[data-field="target-group"]');
+      const options = new Map();
+      for (const group of this.groupCatalog) options.set(group.name, group);
+      for (const group of this.groups) {
+        if (!options.has(group.name)) options.set(group.name, { name: group.name, ratio: group.ratio, description: group.description });
+      }
+      const rows = [...options.values()].sort((left, right) => (
+        (Number.isFinite(left.ratio) ? left.ratio : Number.POSITIVE_INFINITY)
+          - (Number.isFinite(right.ratio) ? right.ratio : Number.POSITIVE_INFINITY)
+        || left.name.localeCompare(right.name)
+      ));
+      const recommendedName = recommendations.recommended?.name || recommendations.cheapest?.name || '';
+      if (!this.targetGroup || !options.has(this.targetGroup)) this.targetGroup = recommendedName;
+      storageSet('shuai-target-group', this.targetGroup);
+      select.replaceChildren();
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = rows.length ? '选择目标分组' : '暂无可用分组';
+      select.appendChild(placeholder);
+      for (const row of rows) {
+        const option = document.createElement('option');
+        option.value = row.name;
+        option.textContent = Number.isFinite(row.ratio) ? `${row.name} · ×${row.ratio}` : row.name;
+        option.selected = row.name === this.targetGroup;
+        select.appendChild(option);
+      }
+      select.disabled = rows.length === 0;
+    }
+
+    renderRecommendation(candidate, label, primary) {
+      const box = document.createElement('div');
+      box.className = `ssg-box${primary ? ' ssg-primary' : ''}`;
+      const title = document.createElement('div');
+      title.className = 'ssg-label';
+      title.textContent = label;
+      box.appendChild(title);
+      if (!candidate) {
+        const empty = document.createElement('div');
+        empty.className = 'ssg-muted';
+        empty.textContent = '没有符合条件的分组';
+        box.appendChild(empty);
+        return box;
+      }
+      const name = document.createElement('strong');
+      name.textContent = `${candidate.name} · ×${candidate.ratio}`;
+      box.appendChild(name);
+      const metrics = document.createElement('div');
+      metrics.className = 'ssg-metrics';
+      metrics.textContent = `${formatShuaiPercent(candidate.successRate)} · TTFT ${formatShuaiMetric(candidate.avgTtftMs, 'ms')} · 延迟 ${formatShuaiMetric(candidate.avgLatencyMs, 'ms')}`;
+      box.appendChild(metrics);
+      if (candidate.warning) {
+        const warning = document.createElement('div');
+        warning.className = 'ssg-muted';
+        warning.textContent = '页面标记为不稳定';
+        box.appendChild(warning);
+      }
+      return box;
+    }
+
+    renderData() {
+      this.renderModelOptions();
+      const recommendations = getShuaiRecommendations(this.groups, this.modelFilter, this.config);
+      this.renderTokenOptions();
+      this.renderTargetGroupOptions(recommendations);
+      const recommend = this.panel.querySelector('[data-field="recommend"]');
+      recommend.replaceChildren(
+        this.renderRecommendation(recommendations.cheapest, '最低倍率', false),
+        this.renderRecommendation(recommendations.recommended, '可靠推荐', true),
+      );
+      const list = this.panel.querySelector('[data-field="list"]');
+      list.replaceChildren();
+      const candidates = recommendations.candidates.slice(0, 5);
+      if (!candidates.length) {
+        const empty = document.createElement('li');
+        empty.className = 'ssg-muted';
+        empty.textContent = '暂无达到可靠性条件的候选分组';
+        list.appendChild(empty);
+      }
+      for (const candidate of candidates) {
+        const item = document.createElement('li');
+        const name = document.createElement('span');
+        name.textContent = candidate.modelName ? `${candidate.name} · ${candidate.modelName}` : candidate.name;
+        const metrics = document.createElement('span');
+        metrics.textContent = `×${candidate.ratio} · ${formatShuaiPercent(candidate.successRate)}`;
+        item.append(name, metrics);
+        list.appendChild(item);
+      }
+      if (!this.error) {
+        const usable = this.groups.filter((group) => group.requestCount > 0).length;
+        const tokenStatus = this.tokenError ? ` · 密钥读取失败：${this.tokenError}` : '';
+        this.setStatus(this.lastUpdated
+          ? `已读取 ${this.groups.length} 个分组，${usable} 个有数据 · ${this.lastUpdated.toLocaleTimeString()}${tokenStatus}`
+          : `准备读取性能数据${tokenStatus}`, Boolean(this.tokenError));
+      }
+      this.renderActionState();
+    }
+
+    renderActionState() {
+      const button = this.panel.querySelector('[data-action="switch"]');
+      const token = this.selectedToken();
+      let reason = '';
+      if (this.loading || this.switching) reason = this.switching ? '正在切换' : '正在读取数据';
+      else if (!token) reason = '请选择目标密钥';
+      else if (!this.targetGroup) reason = '请选择目标分组';
+      else if (token.group === this.targetGroup) reason = '密钥已经在该分组';
+      button.disabled = Boolean(reason);
+      button.textContent = this.switching ? '切换中...' : '切换选中密钥分组';
+      button.title = reason || `切换到 ${this.targetGroup}`;
+    }
+
+    async switchSelectedToken() {
+      const token = this.selectedToken();
+      if (!token || !this.targetGroup || this.switching || token.group === this.targetGroup) return false;
+      const catalogEntry = this.groupCatalog.find((group) => group.name === this.targetGroup);
+      const crossGroupRetry = this.targetGroup === 'auto' || catalogEntry?.customChain === true;
+      if (!window.confirm(`将密钥“${token.name}”从“${token.group || '未分组'}”切换到“${this.targetGroup}”，是否继续？`)) return false;
+      this.switching = true;
+      this.renderActionState();
+      try {
+        await updateShuaiTokenGroup(token.id, this.targetGroup, crossGroupRetry);
+        token.group = this.targetGroup;
+        token.crossGroupRetry = crossGroupRetry;
+        this.setStatus(`已将“${token.name}”切换到 ${this.targetGroup}`);
+        this.renderData();
+        return true;
+      } catch (error) {
+        this.setStatus(error instanceof Error ? error.message : '分组切换失败', true);
+        return false;
+      } finally {
+        this.switching = false;
+        this.renderActionState();
+      }
+    }
+  }
+
   return {
     DEFAULT_CONFIG,
     normalizeConfig,
@@ -598,9 +1246,26 @@
     buildAuthHeaders,
     buildApiHeaders,
     mergeKeyPages,
+    SHUAI_DEFAULT_CONFIG,
+    normalizeShuaiConfig,
+    normalizeShuaiModel,
+    normalizeShuaiGroup,
+    extractShuaiGroups,
+    normalizeShuaiToken,
+    extractShuaiTokens,
+    classifyShuaiModel,
+    buildShuaiModelOptions,
+    matchesShuaiModel,
+    rankShuaiGroups,
+    getShuaiRecommendations,
     start() {
-      if (location.hostname !== 'aihub.top') return;
-      new Controller().start();
+      if (location.hostname === 'aihub.top') {
+        new Controller().start();
+        return;
+      }
+      if (location.hostname === 'api.shuaiapi.com' && location.pathname.startsWith('/performance')) {
+        new ShuaiController().start();
+      }
     },
   };
 });

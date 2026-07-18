@@ -89,3 +89,58 @@ test('merges paginated API key responses without duplicates', () => {
   ]);
   assert.deepEqual(merged.map((key) => key.id), [1, 2, 3]);
 });
+
+test('normalizes ShuaiAPI group payloads and extracts model options', () => {
+  const groups = core.extractShuaiGroups({ data: { groups: [
+    {
+      group: 'cheap-gpt',
+      ratio: 0.04,
+      request_count: 20,
+      success_rate: 99.5,
+      models: [{ model_name: 'gpt-5.6-sol', request_count: 20, success_rate: 99.5 }],
+    },
+  ] } });
+
+  assert.equal(groups[0].name, 'cheap-gpt');
+  assert.equal(groups[0].ratio, 0.04);
+  assert.deepEqual(core.buildShuaiModelOptions(groups), ['gpt-5.6-sol']);
+});
+
+test('ranks ShuaiAPI groups by selected model, reliability, and ratio', () => {
+  const groups = core.extractShuaiGroups({ groups: [
+    { group: 'wrong-model', ratio: 0.01, request_count: 100, success_rate: 100, models: [{ model_name: 'grok-4.5', request_count: 100, success_rate: 100 }] },
+    { group: 'cheap-gpt', ratio: 0.04, request_count: 100, success_rate: 99.8, models: [{ model_name: 'gpt-5.6-sol', request_count: 100, success_rate: 99.8, avg_ttft_ms: 900 }] },
+    { group: 'stable-gpt', ratio: 0.06, request_count: 100, success_rate: 100, models: [{ model_name: 'gpt-5.6-sol', request_count: 100, success_rate: 100, avg_ttft_ms: 1200 }] },
+  ] });
+
+  const ranked = core.rankShuaiGroups(groups, 'gpt-5.6-sol', core.SHUAI_DEFAULT_CONFIG);
+  assert.deepEqual(ranked.map((group) => group.name), ['cheap-gpt', 'stable-gpt']);
+  assert.equal(core.getShuaiRecommendations(groups, 'gpt-5.6-sol').cheapest.name, 'cheap-gpt');
+});
+
+test('excludes explicitly unstable ShuaiAPI groups from reliable recommendations', () => {
+  const groups = core.extractShuaiGroups({ groups: [
+    { group: 'warning-cheap', ratio: 0.01, request_count: 10, success_rate: 100, description: '不稳定，建议使用其他分组', models: [{ model_name: 'gpt-x', request_count: 10, success_rate: 100 }] },
+    { group: 'stable', ratio: 0.1, request_count: 10, success_rate: 99.2, models: [{ model_name: 'gpt-x', request_count: 10, success_rate: 99.2 }] },
+  ] });
+
+  const result = core.getShuaiRecommendations(groups, 'gpt-x');
+  assert.equal(result.cheapest.name, 'warning-cheap');
+  assert.equal(result.recommended.name, 'stable');
+});
+
+test('classifies model filters without changing original model names', () => {
+  assert.equal(core.classifyShuaiModel('claude-sonnet'), 'claude');
+  assert.equal(core.classifyShuaiModel('grok-4.5'), 'grok');
+  assert.equal(core.matchesShuaiModel({ models: [{ name: 'gpt-5' }] }, 'category:gpt'), true);
+  assert.equal(core.matchesShuaiModel({ models: [{ name: 'gpt-5' }] }, 'claude-sonnet'), false);
+});
+
+test('projects ShuaiAPI token metadata without exposing the key value', () => {
+  const tokens = core.extractShuaiTokens({ data: { items: [
+    { id: 9, name: 'main', key: 'sk-secret-value', group: 'gpt001', status: 'enabled', cross_group_retry: false },
+  ] } });
+
+  assert.deepEqual(tokens, [{ id: 9, name: 'main', group: 'gpt001', status: 'enabled', crossGroupRetry: false }]);
+  assert.equal(JSON.stringify(tokens).includes('sk-secret-value'), false);
+});

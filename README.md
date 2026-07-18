@@ -1,16 +1,25 @@
 # AIHub Smart Group
 
 这是一个 Tampermonkey 油猴脚本，用于在 AIHub 的供应商监控页和 API 密钥页
-推荐倍率最低且可靠性达标的分组，并把已有 API 密钥切换到该分组。
+推荐倍率最低且可靠性达标的分组，并把已有 API 密钥切换到该分组；同时在帅API
+性能页按模型查看最低倍率和可靠推荐分组。
 
 ## 安装
 
 1. 安装 Tampermonkey。
 2. 新建脚本，把 [aihub-smart-group.user.js](./aihub-smart-group.user.js) 的
    全部内容粘贴进去并保存。
-3. 登录 `https://aihub.top`，打开 `/providers` 或 `/keys`。
+3. 登录 `https://aihub.top`，打开 `/providers` 或 `/keys`；或登录
+   `https://api.shuaiapi.com` 后打开 `/performance`。
 
-脚本只匹配 `aihub.top`，不会向其他站点发送请求。
+脚本只匹配 AIHub 和帅API指定页面，不会向其他站点发送请求。
+
+## 帅API功能
+
+性能页右下角会出现“帅”悬浮按钮。打开后可以选择 24h/7d、具体模型或模型类型，
+分别查看“最低倍率”和“可靠推荐”。可靠推荐默认要求成功率至少 99%，并排除页面
+标记为不稳定的分组；没有请求数据的分组不会参与推荐。卡片下方可以选择已有密钥和
+目标分组，确认后调用帅API原生更新接口切换分组；不会显示或保存完整密钥。
 
 ## Greasy Fork 发布与同步
 
