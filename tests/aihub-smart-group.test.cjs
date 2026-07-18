@@ -144,3 +144,52 @@ test('projects ShuaiAPI token metadata without exposing the key value', () => {
   assert.deepEqual(tokens, [{ id: 9, name: 'main', group: 'gpt001', status: 'enabled', crossGroupRetry: false }]);
   assert.equal(JSON.stringify(tokens).includes('sk-secret-value'), false);
 });
+
+test('does not recommend a group whose latest performance bucket has no requests', () => {
+  const groups = core.extractShuaiGroups({ groups: [
+    {
+      group: 'gpt001',
+      ratio: 0.01,
+      request_count: 500,
+      success_rate: 99.99,
+      start_ts: 1000,
+      end_ts: 3000,
+      bucket_seconds: 1000,
+      series: [
+        { ts: 1000, request_count: 500, success_rate: 99.99 },
+        { ts: 2000, request_count: 0, success_rate: 0 },
+      ],
+      models: [{ model_name: 'gpt-5', request_count: 500, success_rate: 99.99 }],
+    },
+    {
+      group: 'active',
+      ratio: 0.05,
+      request_count: 20,
+      success_rate: 99.5,
+      series: [{ ts: 2000, request_count: 20, success_rate: 99.5 }],
+      models: [{ model_name: 'gpt-5', request_count: 20, success_rate: 99.5 }],
+    },
+  ] });
+
+  assert.equal(core.hasRecentShuaiActivity(groups[0]), false);
+  assert.equal(core.getShuaiRecommendations(groups, 'gpt-5').cheapest.name, 'active');
+});
+
+test('allows opting out of the recent-data requirement', () => {
+  const groups = core.extractShuaiGroups({ groups: [
+    {
+      group: 'historical-only',
+      ratio: 0.01,
+      request_count: 50,
+      success_rate: 100,
+      series: [{ ts: 1000, request_count: 0 }],
+      models: [{ model_name: 'gpt-5', request_count: 50, success_rate: 100 }],
+    },
+  ] });
+
+  assert.equal(core.getShuaiRecommendations(groups, 'gpt-5').cheapest, null);
+  assert.equal(core.getShuaiRecommendations(groups, 'gpt-5', {
+    ...core.SHUAI_DEFAULT_CONFIG,
+    requireRecentData: false,
+  }).cheapest.name, 'historical-only');
+});

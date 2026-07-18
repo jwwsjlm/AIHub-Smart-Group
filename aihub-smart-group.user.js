@@ -45,6 +45,7 @@
     hours: 24,
     minSuccessRate: 99,
     excludeWarnings: true,
+    requireRecentData: true,
     pollIntervalSeconds: 60,
   });
 
@@ -395,7 +396,7 @@
     #${SHUAI_ROOT_ID} .ssg-label{color:#667085;font-size:11px;margin-bottom:3px}
     #${SHUAI_ROOT_ID} .ssg-metrics{display:flex;flex-wrap:wrap;gap:4px 8px;color:#475467;font-size:11px;margin-top:5px}
     #${SHUAI_ROOT_ID} .ssg-muted{color:#667085}
-    #${SHUAI_ROOT_ID} .ssg-options{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px;color:#475467;font-size:12px}
+    #${SHUAI_ROOT_ID} .ssg-options{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px 8px;margin-top:8px;color:#475467;font-size:12px}
     #${SHUAI_ROOT_ID} .ssg-options input{margin:0 4px 0 0}
     #${SHUAI_ROOT_ID} .ssg-actions{display:flex;gap:7px;margin-top:9px}
     #${SHUAI_ROOT_ID} .ssg-actions button:last-child{flex:1;background:#1456d9;color:#fff;border-color:#1456d9}
@@ -459,6 +460,15 @@
     };
   }
 
+  function normalizeShuaiSeriesPoint(point) {
+    const source = point && typeof point === 'object' ? point : {};
+    return {
+      ts: Number(source.ts ?? source.timestamp ?? 0),
+      requestCount: Number(source.request_count ?? source.requests ?? 0),
+      successRate: normalizeShuaiPercent(source.success_rate ?? source.availability),
+    };
+  }
+
   function normalizeShuaiGroup(group) {
     const source = group && typeof group === 'object' ? group : {};
     const models = (Array.isArray(source.models) ? source.models : [])
@@ -476,6 +486,10 @@
       description: String(source.description || '').trim(),
       warning: hasShuaiWarning(source),
       models,
+      series: (Array.isArray(source.series) ? source.series : []).map(normalizeShuaiSeriesPoint),
+      startTs: Number(source.start_ts ?? source.startTs ?? 0),
+      endTs: Number(source.end_ts ?? source.endTs ?? 0),
+      bucketSeconds: Number(source.bucket_seconds ?? source.bucketSeconds ?? 3600),
     };
   }
 
@@ -514,6 +528,13 @@
     return models.some((model) => model.name === modelFilter);
   }
 
+  function hasRecentShuaiActivity(group) {
+    const series = Array.isArray(group?.series) ? group.series.filter((point) => Number.isFinite(point.ts)) : [];
+    if (!series.length) return true;
+    const latest = series.reduce((current, point) => point.ts > current.ts ? point : current, series[0]);
+    return latest.requestCount > 0;
+  }
+
   function projectShuaiCandidate(group, modelFilter) {
     const model = modelFilter && !modelFilter.startsWith('category:')
       ? group.models.find((item) => item.name === modelFilter)
@@ -538,6 +559,7 @@
     return (Array.isArray(groups) ? groups : [])
       .filter((group) => group && Number.isFinite(Number(group.ratio)) && Number(group.ratio) >= 0)
       .filter((group) => matchesShuaiModel(group, modelFilter))
+      .filter((group) => config?.requireRecentData === false || hasRecentShuaiActivity(group))
       .map((group) => projectShuaiCandidate(group, modelFilter))
       .filter((candidate) => candidate.requestCount > 0 && Number.isFinite(candidate.successRate))
       .filter((candidate) => !reliableOnly || candidate.successRate >= minSuccessRate)
@@ -567,6 +589,7 @@
       hours: Number(source.hours) === 168 ? 168 : 24,
       minSuccessRate: clamp(numberOr(source.minSuccessRate, SHUAI_DEFAULT_CONFIG.minSuccessRate), 0, 100),
       excludeWarnings: source.excludeWarnings !== false,
+      requireRecentData: source.requireRecentData !== false,
       pollIntervalSeconds: Math.round(clamp(numberOr(source.pollIntervalSeconds, SHUAI_DEFAULT_CONFIG.pollIntervalSeconds), 30, 3600)),
     };
   }
@@ -917,7 +940,7 @@
             <label>时间窗<select data-field="hours"><option value="24">24h</option><option value="168">7d</option></select></label>
           </div>
           <div class="ssg-recommend" data-field="recommend"><div class="ssg-muted">正在读取性能数据...</div></div>
-          <div class="ssg-options"><label><input type="checkbox" data-setting="excludeWarnings">排除不稳定分组</label><label>最低成功率 <input type="number" min="0" max="100" step="0.1" data-setting="minSuccessRate" style="width:72px"></label></div>
+          <div class="ssg-options"><label><input type="checkbox" data-setting="excludeWarnings">排除不稳定分组</label><label><input type="checkbox" data-setting="requireRecentData">要求最近有数据</label><label>最低成功率 <input type="number" min="0" max="100" step="0.1" data-setting="minSuccessRate" style="width:72px"></label></div>
           <div class="ssg-actions"><button data-action="refresh">刷新</button><button data-action="save-settings">保存设置</button></div>
           <div class="ssg-switch">
             <div class="ssg-switch-grid">
@@ -984,15 +1007,18 @@
       this.panel.querySelector('[data-field="hours"]').value = String(this.config.hours);
       this.panel.querySelector('[data-setting="minSuccessRate"]').value = this.config.minSuccessRate;
       this.panel.querySelector('[data-setting="excludeWarnings"]').checked = this.config.excludeWarnings;
+      this.panel.querySelector('[data-setting="requireRecentData"]').checked = this.config.requireRecentData;
     }
 
     saveSettings() {
       const input = this.panel.querySelector('[data-setting="minSuccessRate"]');
       const excludeWarnings = this.panel.querySelector('[data-setting="excludeWarnings"]');
+      const requireRecentData = this.panel.querySelector('[data-setting="requireRecentData"]');
       this.config = normalizeShuaiConfig({
         ...this.config,
         minSuccessRate: input.value,
         excludeWarnings: excludeWarnings.checked,
+        requireRecentData: requireRecentData.checked,
       });
       storageSet('shuai-config', this.config);
       this.syncSettingsInputs();
@@ -1188,7 +1214,7 @@
         list.appendChild(item);
       }
       if (!this.error) {
-        const usable = this.groups.filter((group) => group.requestCount > 0).length;
+        const usable = this.groups.filter((group) => hasRecentShuaiActivity(group)).length;
         const tokenStatus = this.tokenError ? ` · 密钥读取失败：${this.tokenError}` : '';
         this.setStatus(this.lastUpdated
           ? `已读取 ${this.groups.length} 个分组，${usable} 个有数据 · ${this.lastUpdated.toLocaleTimeString()}${tokenStatus}`
@@ -1249,6 +1275,7 @@
     SHUAI_DEFAULT_CONFIG,
     normalizeShuaiConfig,
     normalizeShuaiModel,
+    normalizeShuaiSeriesPoint,
     normalizeShuaiGroup,
     extractShuaiGroups,
     normalizeShuaiToken,
@@ -1256,6 +1283,7 @@
     classifyShuaiModel,
     buildShuaiModelOptions,
     matchesShuaiModel,
+    hasRecentShuaiActivity,
     rankShuaiGroups,
     getShuaiRecommendations,
     start() {
