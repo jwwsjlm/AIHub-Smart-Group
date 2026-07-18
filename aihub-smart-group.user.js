@@ -1,9 +1,13 @@
 // ==UserScript==
 // @name         AIHub Smart Group
+// @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.1.5
+// @version      0.1.6
 // @description  Recommend the cheapest reliable AIHub group and switch an existing API key safely.
+// @description:zh-CN 按倍率和可用性推荐 AIHub 分组，并切换已有 API Key
 // @license      MIT
+// @homepageURL   https://github.com/jwwsjlm/AIHub-Smart-Group
+// @supportURL    https://github.com/jwwsjlm/AIHub-Smart-Group/issues
 // @match        https://aihub.top/providers*
 // @match        https://aihub.top/keys*
 // @grant        GM_addStyle
@@ -23,7 +27,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.1.5';
+  const SCRIPT_VERSION = '0.1.6';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const DEFAULT_CONFIG = Object.freeze({
     minSuccess6h: 0.95,
