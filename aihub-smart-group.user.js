@@ -2,7 +2,7 @@
 // @name         AIHub + ShuaiAPI Smart Group
 // @name:zh-CN   AIHub + 帅API 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.2.2
+// @version      0.2.3
 // @description  Recommend reliable low-cost groups on AIHub and ShuaiAPI.
 // @description:zh-CN 按倍率、模型和可用性推荐 AIHub 与帅API分组
 // @license      MIT
@@ -487,8 +487,8 @@
       warning: hasShuaiWarning(source),
       models,
       series: (Array.isArray(source.series) ? source.series : []).map(normalizeShuaiSeriesPoint),
-      startTs: Number(source.start_ts ?? source.startTs ?? 0),
-      endTs: Number(source.end_ts ?? source.endTs ?? 0),
+      startTs: Number(source.start_ts ?? source.startTs ?? Number.NaN),
+      endTs: Number(source.end_ts ?? source.endTs ?? Number.NaN),
       bucketSeconds: Number(source.bucket_seconds ?? source.bucketSeconds ?? 3600),
     };
   }
@@ -496,7 +496,16 @@
   function extractShuaiGroups(payload) {
     const data = payload?.data ?? payload;
     const groups = Array.isArray(data) ? data : data?.groups;
-    return (Array.isArray(groups) ? groups : []).map(normalizeShuaiGroup).filter((group) => group.name);
+    const period = data && !Array.isArray(data) ? data : {};
+    const startTs = Number(period.start_ts ?? period.startTs ?? Number.NaN);
+    const endTs = Number(period.end_ts ?? period.endTs ?? Number.NaN);
+    const bucketSeconds = Number(period.bucket_seconds ?? period.bucketSeconds ?? 3600);
+    return (Array.isArray(groups) ? groups : []).map((group) => normalizeShuaiGroup({
+      ...group,
+      start_ts: group?.start_ts ?? group?.startTs ?? startTs,
+      end_ts: group?.end_ts ?? group?.endTs ?? endTs,
+      bucket_seconds: group?.bucket_seconds ?? group?.bucketSeconds ?? bucketSeconds,
+    })).filter((group) => group.name);
   }
 
   function classifyShuaiModel(modelName) {
@@ -530,6 +539,23 @@
 
   function hasRecentShuaiActivity(group) {
     const series = Array.isArray(group?.series) ? group.series.filter((point) => Number.isFinite(point.ts)) : [];
+    const bucketSeconds = Number(group?.bucketSeconds);
+    const startTs = Number(group?.startTs);
+    const endTs = Number(group?.endTs);
+    if (Number.isFinite(bucketSeconds) && bucketSeconds > 0 && Number.isFinite(startTs) && Number.isFinite(endTs)) {
+      // The native page omits empty buckets, so rebuild its latest display window before checking traffic.
+      const firstBucket = Math.ceil(startTs / bucketSeconds) * bucketSeconds;
+      const lastBucket = Math.floor(endTs / bucketSeconds) * bucketSeconds;
+      if (lastBucket < firstBucket) return false;
+      const bucketCount = Math.floor((lastBucket - firstBucket) / bucketSeconds) + 1;
+      const bucketSpan = Math.max(1, Math.ceil(bucketCount / 48)) * bucketSeconds;
+      const latestWindowStart = lastBucket - bucketSpan + bucketSeconds;
+      return series.some((point) => (
+        point.ts >= latestWindowStart
+        && point.ts <= lastBucket
+        && point.requestCount > 0
+      ));
+    }
     if (!series.length) return true;
     const latest = series.reduce((current, point) => point.ts > current.ts ? point : current, series[0]);
     return latest.requestCount > 0;

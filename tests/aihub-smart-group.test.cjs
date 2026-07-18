@@ -193,3 +193,24 @@ test('allows opting out of the recent-data requirement', () => {
     requireRecentData: false,
   }).cheapest.name, 'historical-only');
 });
+
+test('treats omitted latest buckets as no recent activity', () => {
+  const groups = core.extractShuaiGroups({ data: {
+    start_ts: 1000,
+    end_ts: 3000,
+    bucket_seconds: 1000,
+    groups: [{
+      group: 'omitted-latest-bucket',
+      ratio: 0.01,
+      request_count: 50,
+      success_rate: 100,
+      series: [{ ts: 1000, request_count: 50, success_rate: 100 }],
+      models: [{ model_name: 'gpt-5', request_count: 50, success_rate: 100 }],
+    }],
+  } });
+
+  assert.equal(groups[0].startTs, 1000);
+  assert.equal(groups[0].endTs, 3000);
+  assert.equal(core.hasRecentShuaiActivity(groups[0]), false);
+  assert.equal(core.getShuaiRecommendations(groups, 'gpt-5').cheapest, null);
+});
