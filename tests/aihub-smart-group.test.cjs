@@ -214,3 +214,9 @@ test('treats omitted latest buckets as no recent activity', () => {
   assert.equal(core.hasRecentShuaiActivity(groups[0]), false);
   assert.equal(core.getShuaiRecommendations(groups, 'gpt-5').cheapest, null);
 });
+
+test('resolves a clicked recommendation only when it is an available target group', () => {
+  assert.equal(core.pickShuaiTargetGroup({ name: 'cheap' }, [{ name: 'cheap' }]), 'cheap');
+  assert.equal(core.pickShuaiTargetGroup({ name: 'missing' }, [{ name: 'cheap' }]), '');
+  assert.equal(core.pickShuaiTargetGroup(null, [{ name: 'cheap' }]), '');
+});

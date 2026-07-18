@@ -2,7 +2,7 @@
 // @name         AIHub + ShuaiAPI Smart Group
 // @name:zh-CN   AIHub + 帅API 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.2.4
+// @version      0.2.5
 // @description  Recommend reliable low-cost groups on AIHub and ShuaiAPI.
 // @description:zh-CN 按倍率、模型和可用性推荐 AIHub 与帅API分组
 // @license      MIT
@@ -392,6 +392,9 @@
     #${SHUAI_ROOT_ID} .ssg-recommend{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:10px 0}
     #${SHUAI_ROOT_ID} .ssg-box{padding:9px;background:#f7f9fc;border:1px solid #e1e6ef;border-radius:6px;min-width:0}
     #${SHUAI_ROOT_ID} .ssg-box.ssg-primary{background:#f4f8ff;border-color:#cfe0ff}
+    #${SHUAI_ROOT_ID} .ssg-box.ssg-clickable{cursor:pointer;transition:border-color .15s,box-shadow .15s,background .15s}
+    #${SHUAI_ROOT_ID} .ssg-box.ssg-clickable:hover{border-color:#1456d9;box-shadow:0 2px 8px rgba(20,86,217,.12)}
+    #${SHUAI_ROOT_ID} .ssg-box.ssg-clickable:focus-visible{outline:2px solid #1456d9;outline-offset:1px}
     #${SHUAI_ROOT_ID} .ssg-box strong{display:block;font-size:14px;min-width:0;overflow-wrap:anywhere;white-space:normal}
     #${SHUAI_ROOT_ID} .ssg-recommend-title{display:flex;align-items:flex-start;gap:6px;min-width:0}
     #${SHUAI_ROOT_ID} .ssg-recommend-title strong{flex:1}
@@ -610,6 +613,13 @@
       recommended: rankShuaiGroups(groups, modelFilter, config, { reliableOnly: true })[0] || null,
       candidates: rankShuaiGroups(groups, modelFilter, config, { reliableOnly: true }),
     };
+  }
+
+  function pickShuaiTargetGroup(candidate, availableGroups) {
+    const name = String(candidate?.name || '').trim();
+    if (!name) return '';
+    return (Array.isArray(availableGroups) ? availableGroups : [])
+      .some((group) => String(group?.name || '').trim() === name) ? name : '';
   }
 
   function normalizeShuaiConfig(input = {}) {
@@ -1001,6 +1011,16 @@
         if (action === 'refresh') this.refresh();
         if (action === 'save-settings') this.saveSettings();
         if (action === 'switch') this.switchSelectedToken();
+        if (action === 'select-recommendation') {
+          const card = event.target.closest('[data-action="select-recommendation"]');
+          this.selectTargetGroup(card?.dataset.group || '');
+        }
+      });
+      this.panel.addEventListener('keydown', (event) => {
+        if ((event.key === 'Enter' || event.key === ' ') && event.target.closest('[data-action="select-recommendation"]')) {
+          event.preventDefault();
+          this.selectTargetGroup(event.target.closest('[data-action="select-recommendation"]').dataset.group || '');
+        }
       });
       this.toggleButton.addEventListener('click', () => this.setMinimized(false));
       this.panel.querySelector('[data-field="model"]').addEventListener('change', (event) => {
@@ -1198,6 +1218,12 @@
         box.appendChild(empty);
         return box;
       }
+      box.classList.add('ssg-clickable');
+      box.dataset.action = 'select-recommendation';
+      box.dataset.group = candidate.name;
+      box.tabIndex = 0;
+      box.setAttribute('role', 'button');
+      box.setAttribute('aria-label', `选择${label}：${candidate.name}`);
       const heading = document.createElement('div');
       heading.className = 'ssg-recommend-title';
       const name = document.createElement('strong');
@@ -1218,6 +1244,17 @@
         box.appendChild(warning);
       }
       return box;
+    }
+
+    selectTargetGroup(name) {
+      const target = pickShuaiTargetGroup({ name }, this.groupCatalog.length ? this.groupCatalog : this.groups);
+      if (!target) return;
+      this.targetGroup = target;
+      storageSet('shuai-target-group', this.targetGroup);
+      const select = this.panel.querySelector('[data-field="target-group"]');
+      if (select) select.value = target;
+      this.renderActionState();
+      this.setStatus(`已选择目标分组：${target}`);
     }
 
     renderData() {
@@ -1319,6 +1356,7 @@
     buildShuaiModelOptions,
     matchesShuaiModel,
     hasRecentShuaiActivity,
+    pickShuaiTargetGroup,
     rankShuaiGroups,
     getShuaiRecommendations,
     start() {
