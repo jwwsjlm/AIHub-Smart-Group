@@ -12,6 +12,14 @@
 
 脚本只匹配 `aihub.top`，不会向其他站点发送请求。
 
+## Greasy Fork 发布与同步
+
+Greasy Fork 同步源：
+
+`https://raw.githubusercontent.com/jwwsjlm/AIHub-Smart-Group/main/aihub-smart-group.user.js`
+
+GitHub 仓库已配置 Greasy Fork webhook。向 `main` 分支推送新版本后，Greasy Fork 会自动检查并同步脚本。
+
 ## 默认规则
 
 - 当前监测状态必须为可用。
