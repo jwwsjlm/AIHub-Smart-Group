@@ -2,7 +2,7 @@
 // @name         AIHub + ShuaiAPI Smart Group
 // @name:zh-CN   AIHub + 帅API 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.2.1
+// @version      0.2.2
 // @description  Recommend reliable low-cost groups on AIHub and ShuaiAPI.
 // @description:zh-CN 按倍率、模型和可用性推荐 AIHub 与帅API分组
 // @license      MIT
