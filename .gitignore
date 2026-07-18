@@ -1,0 +1,16 @@
+# Local editor and operating-system files
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini
+
+# Local secrets and environment files
+.env
+.env.*
+!.env.example
+
+# Generated reports and temporary exports
+coverage/
+dist/
+tmp/
