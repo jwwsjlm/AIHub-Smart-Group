@@ -2,7 +2,7 @@
 // @name         AIHub + ShuaiAPI Smart Group
 // @name:zh-CN   AIHub + 帅API 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.2.3
+// @version      0.2.4
 // @description  Recommend reliable low-cost groups on AIHub and ShuaiAPI.
 // @description:zh-CN 按倍率、模型和可用性推荐 AIHub 与帅API分组
 // @license      MIT
@@ -392,7 +392,10 @@
     #${SHUAI_ROOT_ID} .ssg-recommend{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:10px 0}
     #${SHUAI_ROOT_ID} .ssg-box{padding:9px;background:#f7f9fc;border:1px solid #e1e6ef;border-radius:6px;min-width:0}
     #${SHUAI_ROOT_ID} .ssg-box.ssg-primary{background:#f4f8ff;border-color:#cfe0ff}
-    #${SHUAI_ROOT_ID} .ssg-box strong{display:block;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    #${SHUAI_ROOT_ID} .ssg-box strong{display:block;font-size:14px;min-width:0;overflow-wrap:anywhere;white-space:normal}
+    #${SHUAI_ROOT_ID} .ssg-recommend-title{display:flex;align-items:flex-start;gap:6px;min-width:0}
+    #${SHUAI_ROOT_ID} .ssg-recommend-title strong{flex:1}
+    #${SHUAI_ROOT_ID} .ssg-recommend-ratio{flex:0 0 auto;color:#475467;font-size:13px;line-height:20px;white-space:nowrap}
     #${SHUAI_ROOT_ID} .ssg-label{color:#667085;font-size:11px;margin-bottom:3px}
     #${SHUAI_ROOT_ID} .ssg-metrics{display:flex;flex-wrap:wrap;gap:4px 8px;color:#475467;font-size:11px;margin-top:5px}
     #${SHUAI_ROOT_ID} .ssg-muted{color:#667085}
@@ -1195,9 +1198,15 @@
         box.appendChild(empty);
         return box;
       }
+      const heading = document.createElement('div');
+      heading.className = 'ssg-recommend-title';
       const name = document.createElement('strong');
-      name.textContent = `${candidate.name} · ×${candidate.ratio}`;
-      box.appendChild(name);
+      name.textContent = candidate.name;
+      const ratio = document.createElement('span');
+      ratio.className = 'ssg-recommend-ratio';
+      ratio.textContent = `×${candidate.ratio}`;
+      heading.append(name, ratio);
+      box.appendChild(heading);
       const metrics = document.createElement('div');
       metrics.className = 'ssg-metrics';
       metrics.textContent = `${formatShuaiPercent(candidate.successRate)} · TTFT ${formatShuaiMetric(candidate.avgTtftMs, 'ms')} · 延迟 ${formatShuaiMetric(candidate.avgLatencyMs, 'ms')}`;
