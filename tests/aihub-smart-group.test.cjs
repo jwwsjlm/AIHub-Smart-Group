@@ -64,6 +64,22 @@ test('normalizes adjustable AIHub mode settings', () => {
   assert.equal(core.normalizeConfig({ mode: 'unknown', balancePricePercent: 999 }).balancePricePercent, 500);
 });
 
+test('keeps bounded, sanitized runtime logs', () => {
+  const logs = core.appendLogEntries([], {
+    at: 1,
+    scope: 'aihub',
+    level: 'error',
+    message: '请求失败 sk-secret-value',
+  }, 2);
+  const next = core.appendLogEntries(logs, { at: 2, scope: 'aihub', level: 'info', message: '已切换' }, 2);
+  const bounded = core.appendLogEntries(next, { at: 3, scope: 'aihub', level: 'info', message: '第三条' }, 2);
+
+  assert.equal(bounded.length, 2);
+  assert.equal(bounded[0].message, '第三条');
+  assert.equal(bounded[1].message.includes('sk-secret-value'), false);
+  assert.match(core.formatLogLine(bounded[0]), /第三条/);
+});
+
 test('requires the same winner for the configured number of checks', () => {
   let state = core.createStabilityState();
   state = core.advanceStability(state, 14, 2);

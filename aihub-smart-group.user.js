@@ -2,7 +2,7 @@
 // @name         AIHub + ShuaiAPI Smart Group
 // @name:zh-CN   AIHub + 帅API 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.2.8
+// @version      0.2.9
 // @description  Recommend reliable low-cost groups on AIHub and ShuaiAPI.
 // @description:zh-CN 按倍率、模型和可用性推荐 AIHub 与帅API分组
 // @license      MIT
@@ -30,7 +30,7 @@
   const TOGGLE_ID = 'aihub-smart-group-toggle';
   const SHUAI_ROOT_ID = 'shuai-smart-group-panel';
   const SHUAI_TOGGLE_ID = 'shuai-smart-group-toggle';
-  const SCRIPT_VERSION = '0.2.8';
+  const SCRIPT_VERSION = '0.2.9';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -222,6 +222,38 @@
     }
   }
 
+  function sanitizeLogText(value) {
+    return String(value ?? '')
+      .replace(/(?:sk-|key-|token[=:])[^\s,'"]{8,}/gi, '[已隐藏]')
+      .slice(0, 180);
+  }
+
+  function appendLogEntries(logs, entry, limit = 100) {
+    const safeEntry = {
+      at: Number(entry?.at) || Date.now(),
+      scope: String(entry?.scope || 'general'),
+      level: String(entry?.level || 'info'),
+      message: sanitizeLogText(entry?.message),
+    };
+    return [safeEntry, ...(Array.isArray(logs) ? logs : [])]
+      .slice(0, Math.max(1, Number(limit) || 100));
+  }
+
+  function formatLogLine(entry) {
+    const time = new Date(Number(entry?.at) || Date.now()).toLocaleString();
+    return `[${time}] ${entry?.level === 'error' ? '错误' : entry?.level === 'warn' ? '警告' : '信息'}：${sanitizeLogText(entry?.message)}`;
+  }
+
+  function readScopeLogs(scope) {
+    return storageGet('runtime-logs', []).filter((entry) => entry?.scope === scope).slice(0, 30);
+  }
+
+  function writeRuntimeLog(scope, level, message) {
+    const logs = appendLogEntries(storageGet('runtime-logs', []), { scope, level, message });
+    storageSet('runtime-logs', logs);
+    return logs;
+  }
+
   function getAuthToken() {
     try {
       // Tampermonkey may expose page storage through the isolated world or
@@ -394,12 +426,19 @@
     #${ROOT_ID} .asg-actions button:last-child:hover:not(:disabled){background:#0f46b6}
     #${ROOT_ID} .asg-auto{display:flex;align-items:center;gap:6px;margin-top:9px;color:#475467}
     #${ROOT_ID} .asg-auto input{margin:0}
+    #${ROOT_ID} .asg-guide{margin-top:8px;color:#475467;font-size:12px}
+    #${ROOT_ID} .asg-guide ol{margin:6px 0 0;padding-left:20px}
     #${ROOT_ID} details{margin-top:9px;border-top:1px solid #e4e7ec;padding-top:7px}
     #${ROOT_ID} summary{cursor:pointer;color:#475467}
     #${ROOT_ID} .asg-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px 9px;margin-top:7px}
     #${ROOT_ID} .asg-grid label{margin:0}
     #${ROOT_ID} .asg-grid input{margin-top:3px}
     #${ROOT_ID} .asg-save{margin-top:8px}
+    #${ROOT_ID} .asg-log-details{margin-top:9px;border-top:1px solid #e4e7ec;padding-top:7px}
+    #${ROOT_ID} .asg-log-actions{display:flex;justify-content:flex-end;margin-top:6px}
+    #${ROOT_ID} .asg-logs{margin:6px 0 0;padding:0;list-style:none;max-height:150px;overflow:auto;border-top:1px solid #eef0f3}
+    #${ROOT_ID} .asg-logs li{padding:5px 0;border-bottom:1px solid #eef0f3;font-size:11px;overflow-wrap:anywhere}
+    #${ROOT_ID} .asg-logs .asg-log-error{color:#b42318}
     #${ROOT_ID} .asg-list{margin:8px 0 0;padding:0;list-style:none;max-height:132px;overflow:auto;border-top:1px solid #eef0f3}
     #${ROOT_ID} .asg-list li{display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px solid #eef0f3}
     #${ROOT_ID} .asg-list li span:last-child{text-align:right;color:#475467;white-space:nowrap}
@@ -440,11 +479,18 @@
     #${SHUAI_ROOT_ID} .ssg-muted{color:#667085}
     #${SHUAI_ROOT_ID} .ssg-options{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px 8px;margin-top:8px;color:#475467;font-size:12px}
     #${SHUAI_ROOT_ID} .ssg-options input{margin:0 4px 0 0}
+    #${SHUAI_ROOT_ID} .ssg-guide{margin-top:8px;color:#475467;font-size:12px}
+    #${SHUAI_ROOT_ID} .ssg-guide ol{margin:6px 0 0;padding-left:20px}
     #${SHUAI_ROOT_ID} .ssg-actions{display:flex;gap:7px;margin-top:9px}
     #${SHUAI_ROOT_ID} .ssg-actions button:last-child{flex:1;background:#1456d9;color:#fff;border-color:#1456d9}
     #${SHUAI_ROOT_ID} .ssg-switch{border-top:1px solid #e4e7ec;margin-top:10px;padding-top:8px}
     #${SHUAI_ROOT_ID} .ssg-switch-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
     #${SHUAI_ROOT_ID} .ssg-switch button{width:100%;margin-top:7px;background:#0f766e;color:#fff;border-color:#0f766e}
+    #${SHUAI_ROOT_ID} .ssg-log-details{margin-top:9px;border-top:1px solid #e4e7ec;padding-top:7px}
+    #${SHUAI_ROOT_ID} .ssg-log-actions{display:flex;justify-content:flex-end;margin-top:6px}
+    #${SHUAI_ROOT_ID} .ssg-logs{margin:6px 0 0;padding:0;list-style:none;max-height:150px;overflow:auto;border-top:1px solid #eef0f3}
+    #${SHUAI_ROOT_ID} .ssg-logs li{padding:5px 0;border-bottom:1px solid #eef0f3;font-size:11px;overflow-wrap:anywhere}
+    #${SHUAI_ROOT_ID} .ssg-logs .ssg-log-error{color:#b42318}
     #${SHUAI_ROOT_ID} .ssg-list{margin:8px 0 0;padding:0;list-style:none;max-height:190px;overflow:auto;border-top:1px solid #eef0f3}
     #${SHUAI_ROOT_ID} .ssg-list li{display:flex;justify-content:space-between;gap:8px;padding:7px 0;border-bottom:1px solid #eef0f3}
     #${SHUAI_ROOT_ID} .ssg-list li span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -749,6 +795,7 @@
           <select id="asg-key-select" data-field="key"></select>
           <div class="asg-actions"><button data-action="refresh">检测</button><button data-action="switch" disabled>切换到推荐分组</button></div>
           <label class="asg-auto"><input type="checkbox" data-field="auto"> 自动切换（默认关闭）</label>
+          <details class="asg-guide"><summary>快速开始</summary><ol><li>选择价格、平衡或速度模式。</li><li>选择目标密钥并点击“检测”。</li><li>确认推荐分组后点击切换；自动切换可在设置中开启。</li></ol></details>
           <details><summary>设置</summary>
             <div class="asg-grid">
               <label>6h 最低可用率<input type="number" min="0" max="1" step="0.01" data-setting="minSuccess6h"></label>
@@ -761,6 +808,7 @@
             <label class="asg-auto"><input type="checkbox" data-setting="requireNoWarnings"> 排除监控警告</label>
             <button class="asg-save" data-action="save-settings">保存设置</button>
           </details>
+          <details class="asg-log-details"><summary>使用日志</summary><div class="asg-log-actions"><button data-action="clear-logs">清空日志</button></div><ul class="asg-logs" data-field="logs"></ul></details>
           <ul class="asg-list" data-field="list"></ul>
         </div>`;
       document.body.appendChild(panel);
@@ -784,6 +832,7 @@
         if (action === 'refresh') this.refresh();
         if (action === 'switch') this.switchToRecommendation(false);
         if (action === 'save-settings') this.saveSettings();
+        if (action === 'clear-logs') this.clearLogs();
       });
       this.toggleButton.addEventListener('click', () => this.setMinimized(false));
       this.panel.querySelector('[data-field="key"]').addEventListener('change', (event) => {
@@ -794,6 +843,7 @@
       this.panel.querySelector('[data-field="mode"]').addEventListener('change', (event) => {
         this.config.mode = normalizeGroupMode(event.target.value);
         storageSet('config', this.config);
+        this.log('info', `模式改为${GROUP_MODE_LABELS[this.config.mode]}`);
         this.refresh();
       });
       this.panel.querySelector('[data-field="auto"]').addEventListener('change', (event) => {
@@ -803,6 +853,7 @@
         }
         this.config.autoSwitch = event.target.checked;
         storageSet('config', this.config);
+        this.log('info', event.target.checked ? '已开启自动切换' : '已关闭自动切换');
         this.refresh();
       });
     }
@@ -837,7 +888,38 @@
       if (this.timer) window.clearInterval(this.timer);
       this.timer = window.setInterval(() => this.refresh(), this.config.pollIntervalSeconds * 1000);
       this.setStatus('设置已保存');
+      this.log('info', '设置已保存');
       this.refresh();
+    }
+
+    log(level, message) {
+      writeRuntimeLog('aihub', level, message);
+      this.renderLogs();
+    }
+
+    clearLogs() {
+      storageSet('runtime-logs', storageGet('runtime-logs', []).filter((entry) => entry?.scope !== 'aihub'));
+      this.renderLogs();
+    }
+
+    renderLogs() {
+      const list = this.panel?.querySelector('[data-field="logs"]');
+      if (!list) return;
+      list.replaceChildren();
+      const logs = readScopeLogs('aihub');
+      if (!logs.length) {
+        const empty = document.createElement('li');
+        empty.className = 'asg-muted';
+        empty.textContent = '暂无日志';
+        list.appendChild(empty);
+        return;
+      }
+      for (const entry of logs) {
+        const item = document.createElement('li');
+        item.className = `asg-log-${entry.level}`;
+        item.textContent = formatLogLine(entry);
+        list.appendChild(item);
+      }
     }
 
     async refresh() {
@@ -871,9 +953,11 @@
         this.lastUpdated = new Date();
         this.error = '';
         this.renderData();
+        this.log('info', `检测完成，推荐${this.ranked[0]?.name || '暂无分组'}`);
         if (this.config.autoSwitch) await this.switchToRecommendation(true);
       } catch (error) {
         this.error = error instanceof Error ? error.message : '检测失败';
+        this.log('error', this.error);
         this.setStatus(this.error, true);
         this.renderActionState();
       } finally {
@@ -910,10 +994,12 @@
         this.lastSwitch = { at: Date.now(), keyId: key.id, groupId: winner.groupId };
         storageSet('lastSwitch', this.lastSwitch);
         this.setStatus(`已切换到 ${winner.name}`);
+        this.log('info', `已切换到${winner.name}`);
         this.renderData();
         return true;
       } catch (error) {
         this.setStatus(error instanceof Error ? error.message : '切换失败', true);
+        this.log('error', error instanceof Error ? error.message : '切换失败');
         return false;
       }
     }
@@ -947,6 +1033,7 @@
       this.setStatus(this.error || keyInfo || (this.lastUpdated ? `最近检测：${this.lastUpdated.toLocaleTimeString()}` : '准备检测'), Boolean(this.error || this.authError));
       this.renderKeys();
       this.renderCandidates();
+      this.renderLogs();
       this.renderActionState();
     }
 
@@ -1058,6 +1145,7 @@
             <label>模式<select data-field="mode"><option value="price">价格（最低倍率）</option><option value="balance">平衡（低价范围内最快首字）</option><option value="speed">速度（最快首字）</option></select></label>
           </div>
           <div class="ssg-recommend" data-field="recommend"><div class="ssg-muted">正在读取性能数据...</div></div>
+          <details class="ssg-guide"><summary>快速开始</summary><ol><li>选择模式和模型。</li><li>点击推荐卡片选择目标分组。</li><li>选择密钥后点击确认切换。</li></ol></details>
           <div class="ssg-options">
             <label><input type="checkbox" data-setting="excludeWarnings">排除不稳定分组</label>
             <label><input type="checkbox" data-setting="requireRecentData">要求最近有数据</label>
@@ -1067,6 +1155,7 @@
             <label>刷新间隔 <input type="number" min="30" max="3600" step="1" data-setting="pollIntervalSeconds" style="width:68px">秒</label>
           </div>
           <div class="ssg-actions"><button data-action="refresh">刷新</button><button data-action="save-settings">保存设置</button></div>
+          <details class="ssg-log-details"><summary>使用日志</summary><div class="ssg-log-actions"><button data-action="clear-logs">清空日志</button></div><ul class="ssg-logs" data-field="logs"></ul></details>
           <div class="ssg-switch">
             <div class="ssg-switch-grid">
               <label>目标密钥<select data-field="token"><option value="">未读取到密钥</option></select></label>
@@ -1097,6 +1186,7 @@
         if (action === 'refresh') this.refresh();
         if (action === 'save-settings') this.saveSettings();
         if (action === 'switch') this.switchSelectedToken();
+        if (action === 'clear-logs') this.clearLogs();
         if (action === 'select-recommendation') {
           const card = event.target.closest('[data-action="select-recommendation"]');
           this.selectTargetGroup(card?.dataset.group || '');
@@ -1112,6 +1202,7 @@
       this.panel.querySelector('[data-field="model"]').addEventListener('change', (event) => {
         this.modelFilter = event.target.value || 'all';
         storageSet('shuai-model-filter', this.modelFilter);
+        this.log('info', `模型筛选改为${this.modelFilter}`);
         this.renderData();
       });
       this.panel.querySelector('[data-field="hours"]').addEventListener('change', (event) => {
@@ -1123,6 +1214,7 @@
         this.config.mode = normalizeShuaiMode(event.target.value);
         if (this.config.autoSelectTarget) this.targetGroup = '';
         storageSet('shuai-config', this.config);
+        this.log('info', `模式改为${SHUAI_MODE_LABELS[this.config.mode]}`);
         this.renderData();
       });
       this.panel.querySelector('[data-field="token"]').addEventListener('change', (event) => {
@@ -1133,6 +1225,7 @@
       this.panel.querySelector('[data-field="target-group"]').addEventListener('change', (event) => {
         this.targetGroup = event.target.value || '';
         storageSet('shuai-target-group', this.targetGroup);
+        if (this.targetGroup) this.log('info', `目标分组改为${this.targetGroup}`);
         this.renderActionState();
       });
     }
@@ -1177,7 +1270,38 @@
       if (this.timer) window.clearInterval(this.timer);
       this.timer = window.setInterval(() => this.refresh(), this.config.pollIntervalSeconds * 1000);
       this.setStatus('设置已保存');
+      this.log('info', '设置已保存');
       this.renderData();
+    }
+
+    log(level, message) {
+      writeRuntimeLog('shuai', level, message);
+      this.renderLogs();
+    }
+
+    clearLogs() {
+      storageSet('runtime-logs', storageGet('runtime-logs', []).filter((entry) => entry?.scope !== 'shuai'));
+      this.renderLogs();
+    }
+
+    renderLogs() {
+      const list = this.panel?.querySelector('[data-field="logs"]');
+      if (!list) return;
+      list.replaceChildren();
+      const logs = readScopeLogs('shuai');
+      if (!logs.length) {
+        const empty = document.createElement('li');
+        empty.className = 'ssg-muted';
+        empty.textContent = '暂无日志';
+        list.appendChild(empty);
+        return;
+      }
+      for (const entry of logs) {
+        const item = document.createElement('li');
+        item.className = `ssg-log-${entry.level}`;
+        item.textContent = formatLogLine(entry);
+        list.appendChild(item);
+      }
     }
 
     async refresh() {
@@ -1210,8 +1334,10 @@
         storageSet('shuai-model-filter', this.modelFilter);
         this.lastUpdated = new Date();
         this.renderData();
+        this.log('info', `性能读取完成，推荐${getShuaiRecommendations(this.groups, this.modelFilter, this.config).modeCandidate?.name || '暂无分组'}`);
       } catch (error) {
         this.error = error instanceof Error ? error.message : '性能数据读取失败';
+        this.log('error', this.error);
         this.setStatus(this.error, true);
         this.renderData();
       } finally {
@@ -1358,7 +1484,9 @@
       const select = this.panel.querySelector('[data-field="target-group"]');
       if (select) select.value = target;
       this.renderActionState();
+      this.renderLogs();
       this.setStatus(`已选择目标分组：${target}`);
+      this.log('info', `选择目标分组${target}`);
     }
 
     renderData() {
@@ -1397,6 +1525,7 @@
           : `准备读取性能数据${tokenStatus}`, Boolean(this.tokenError));
       }
       this.renderActionState();
+      this.renderLogs();
     }
 
     renderActionState() {
@@ -1425,10 +1554,12 @@
         token.group = this.targetGroup;
         token.crossGroupRetry = crossGroupRetry;
         this.setStatus(`已将“${token.name}”切换到 ${this.targetGroup}`);
+        this.log('info', `已将${token.name}切换到${this.targetGroup}`);
         this.renderData();
         return true;
       } catch (error) {
         this.setStatus(error instanceof Error ? error.message : '分组切换失败', true);
+        this.log('error', error instanceof Error ? error.message : '分组切换失败');
         return false;
       } finally {
         this.switching = false;
@@ -1450,6 +1581,8 @@
     buildAuthHeaders,
     buildApiHeaders,
     mergeKeyPages,
+    appendLogEntries,
+    formatLogLine,
     SHUAI_DEFAULT_CONFIG,
     SHUAI_MODE_LABELS,
     normalizeShuaiConfig,
