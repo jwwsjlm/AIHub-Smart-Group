@@ -220,3 +220,20 @@ test('resolves a clicked recommendation only when it is an available target grou
   assert.equal(core.pickShuaiTargetGroup({ name: 'missing' }, [{ name: 'cheap' }]), '');
   assert.equal(core.pickShuaiTargetGroup(null, [{ name: 'cheap' }]), '');
 });
+
+test('selects ShuaiAPI candidates for price, balance, and speed modes', () => {
+  const groups = core.extractShuaiGroups({ groups: [
+    { group: 'cheap', ratio: 0.04, request_count: 10, success_rate: 100, avg_ttft_ms: 500, models: [{ model_name: 'gpt-5', request_count: 10, success_rate: 100, avg_ttft_ms: 500 }] },
+    { group: 'balanced', ratio: 0.045, request_count: 10, success_rate: 100, avg_ttft_ms: 100, models: [{ model_name: 'gpt-5', request_count: 10, success_rate: 100, avg_ttft_ms: 100 }] },
+    { group: 'fast', ratio: 0.08, request_count: 10, success_rate: 100, avg_ttft_ms: 50, models: [{ model_name: 'gpt-5', request_count: 10, success_rate: 100, avg_ttft_ms: 50 }] },
+  ] });
+
+  assert.equal(core.getShuaiRecommendations(groups, 'gpt-5', { ...core.SHUAI_DEFAULT_CONFIG, mode: 'price' }).modeCandidate.name, 'cheap');
+  assert.equal(core.getShuaiRecommendations(groups, 'gpt-5', { ...core.SHUAI_DEFAULT_CONFIG, mode: 'balance' }).modeCandidate.name, 'balanced');
+  assert.equal(core.getShuaiRecommendations(groups, 'gpt-5', { ...core.SHUAI_DEFAULT_CONFIG, mode: 'speed' }).modeCandidate.name, 'fast');
+});
+
+test('normalizes unsupported ShuaiAPI modes to price', () => {
+  assert.equal(core.normalizeShuaiConfig({ mode: 'unknown' }).mode, 'price');
+  assert.equal(core.normalizeShuaiConfig({ mode: 'speed' }).mode, 'speed');
+});

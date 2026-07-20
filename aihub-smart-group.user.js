@@ -2,7 +2,7 @@
 // @name         AIHub + ShuaiAPI Smart Group
 // @name:zh-CN   AIHub + 帅API 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.2.5
+// @version      0.2.6
 // @description  Recommend reliable low-cost groups on AIHub and ShuaiAPI.
 // @description:zh-CN 按倍率、模型和可用性推荐 AIHub 与帅API分组
 // @license      MIT
@@ -30,7 +30,7 @@
   const TOGGLE_ID = 'aihub-smart-group-toggle';
   const SHUAI_ROOT_ID = 'shuai-smart-group-panel';
   const SHUAI_TOGGLE_ID = 'shuai-smart-group-toggle';
-  const SCRIPT_VERSION = '0.2.1';
+  const SCRIPT_VERSION = '0.2.6';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const DEFAULT_CONFIG = Object.freeze({
     minSuccess6h: 0.95,
@@ -46,7 +46,13 @@
     minSuccessRate: 99,
     excludeWarnings: true,
     requireRecentData: true,
+    mode: 'price',
     pollIntervalSeconds: 60,
+  });
+  const SHUAI_MODE_LABELS = Object.freeze({
+    price: '价格',
+    balance: '平衡',
+    speed: '速度',
   });
 
   function numberOr(value, fallback) {
@@ -608,11 +614,35 @@
   }
 
   function getShuaiRecommendations(groups, modelFilter = 'all', config = SHUAI_DEFAULT_CONFIG) {
+    const cheapest = rankShuaiGroups(groups, modelFilter, config, { reliableOnly: false })[0] || null;
+    const recommended = rankShuaiGroups(groups, modelFilter, config, { reliableOnly: true })[0] || null;
+    const candidates = rankShuaiGroups(groups, modelFilter, config, { reliableOnly: true });
+    const mode = normalizeShuaiMode(config?.mode);
+    let modeCandidate = cheapest;
+    if (mode === 'speed') {
+      modeCandidate = [...candidates].sort(compareShuaiSpeed)[0] || recommended || cheapest;
+    } else if (mode === 'balance' && cheapest) {
+      const maxRatio = cheapest.ratio * 1.2;
+      const balanced = candidates.filter((candidate) => candidate.ratio <= maxRatio);
+      modeCandidate = [...balanced].sort(compareShuaiSpeed)[0] || recommended || cheapest;
+    }
     return {
-      cheapest: rankShuaiGroups(groups, modelFilter, config, { reliableOnly: false })[0] || null,
-      recommended: rankShuaiGroups(groups, modelFilter, config, { reliableOnly: true })[0] || null,
-      candidates: rankShuaiGroups(groups, modelFilter, config, { reliableOnly: true }),
+      cheapest,
+      recommended,
+      candidates,
+      modeCandidate,
     };
+  }
+
+  function compareShuaiSpeed(left, right) {
+    return (
+      (Number.isFinite(left.avgTtftMs) ? left.avgTtftMs : Number.POSITIVE_INFINITY)
+        - (Number.isFinite(right.avgTtftMs) ? right.avgTtftMs : Number.POSITIVE_INFINITY)
+      || (Number.isFinite(left.avgLatencyMs) ? left.avgLatencyMs : Number.POSITIVE_INFINITY)
+        - (Number.isFinite(right.avgLatencyMs) ? right.avgLatencyMs : Number.POSITIVE_INFINITY)
+      || left.ratio - right.ratio
+      || left.name.localeCompare(right.name)
+    );
   }
 
   function pickShuaiTargetGroup(candidate, availableGroups) {
@@ -629,8 +659,13 @@
       minSuccessRate: clamp(numberOr(source.minSuccessRate, SHUAI_DEFAULT_CONFIG.minSuccessRate), 0, 100),
       excludeWarnings: source.excludeWarnings !== false,
       requireRecentData: source.requireRecentData !== false,
+      mode: normalizeShuaiMode(source.mode),
       pollIntervalSeconds: Math.round(clamp(numberOr(source.pollIntervalSeconds, SHUAI_DEFAULT_CONFIG.pollIntervalSeconds), 30, 3600)),
     };
+  }
+
+  function normalizeShuaiMode(value) {
+    return Object.prototype.hasOwnProperty.call(SHUAI_MODE_LABELS, value) ? value : 'price';
   }
 
   class Controller {
@@ -977,6 +1012,7 @@
           <div class="ssg-controls">
             <label>模型或类型<select data-field="model"><option value="all">全部模型</option></select></label>
             <label>时间窗<select data-field="hours"><option value="24">24h</option><option value="168">7d</option></select></label>
+            <label>模式<select data-field="mode"><option value="price">价格（最低倍率）</option><option value="balance">平衡（低价范围内最快首字）</option><option value="speed">速度（最快首字）</option></select></label>
           </div>
           <div class="ssg-recommend" data-field="recommend"><div class="ssg-muted">正在读取性能数据...</div></div>
           <div class="ssg-options"><label><input type="checkbox" data-setting="excludeWarnings">排除不稳定分组</label><label><input type="checkbox" data-setting="requireRecentData">要求最近有数据</label><label>最低成功率 <input type="number" min="0" max="100" step="0.1" data-setting="minSuccessRate" style="width:72px"></label></div>
@@ -1033,6 +1069,12 @@
         storageSet('shuai-config', this.config);
         this.refresh();
       });
+      this.panel.querySelector('[data-field="mode"]').addEventListener('change', (event) => {
+        this.config.mode = normalizeShuaiMode(event.target.value);
+        this.targetGroup = '';
+        storageSet('shuai-config', this.config);
+        this.renderData();
+      });
       this.panel.querySelector('[data-field="token"]').addEventListener('change', (event) => {
         this.selectedTokenId = event.target.value || null;
         storageSet('shuai-token-id', this.selectedTokenId);
@@ -1054,6 +1096,7 @@
 
     syncSettingsInputs() {
       this.panel.querySelector('[data-field="hours"]').value = String(this.config.hours);
+      this.panel.querySelector('[data-field="mode"]').value = this.config.mode;
       this.panel.querySelector('[data-setting="minSuccessRate"]').value = this.config.minSuccessRate;
       this.panel.querySelector('[data-setting="excludeWarnings"]').checked = this.config.excludeWarnings;
       this.panel.querySelector('[data-setting="requireRecentData"]').checked = this.config.requireRecentData;
@@ -1186,7 +1229,10 @@
           - (Number.isFinite(right.ratio) ? right.ratio : Number.POSITIVE_INFINITY)
         || left.name.localeCompare(right.name)
       ));
-      const recommendedName = recommendations.recommended?.name || recommendations.cheapest?.name || '';
+      const recommendedName = recommendations.modeCandidate?.name
+        || recommendations.recommended?.name
+        || recommendations.cheapest?.name
+        || '';
       if (!this.targetGroup || !options.has(this.targetGroup)) this.targetGroup = recommendedName;
       storageSet('shuai-target-group', this.targetGroup);
       select.replaceChildren();
@@ -1345,7 +1391,9 @@
     buildApiHeaders,
     mergeKeyPages,
     SHUAI_DEFAULT_CONFIG,
+    SHUAI_MODE_LABELS,
     normalizeShuaiConfig,
+    normalizeShuaiMode,
     normalizeShuaiModel,
     normalizeShuaiSeriesPoint,
     normalizeShuaiGroup,
@@ -1358,6 +1406,7 @@
     hasRecentShuaiActivity,
     pickShuaiTargetGroup,
     rankShuaiGroups,
+    compareShuaiSpeed,
     getShuaiRecommendations,
     start() {
       if (location.hostname === 'aihub.top') {
