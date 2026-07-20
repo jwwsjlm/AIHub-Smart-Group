@@ -44,6 +44,26 @@ test('uses reliability and latency as deterministic tie breakers', () => {
   assert.equal(core.rankCandidates(rows, core.DEFAULT_CONFIG)[0].planType, 'fast');
 });
 
+test('selects AIHub candidates for price, balance, and speed modes', () => {
+  const rows = [
+    { planType: 'cheap', group_id: 1, priceMultiplier: 0.04, available: true, successRates: { '6h': 1, '24h': 1 }, firstTokenLatencyMs: 500, warningReasons: [] },
+    { planType: 'balanced', group_id: 2, priceMultiplier: 0.045, available: true, successRates: { '6h': 1, '24h': 1 }, firstTokenLatencyMs: 100, warningReasons: [] },
+    { planType: 'fast', group_id: 3, priceMultiplier: 0.08, available: true, successRates: { '6h': 1, '24h': 1 }, firstTokenLatencyMs: 50, warningReasons: [] },
+  ];
+
+  assert.equal(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'price' })[0].planType, 'cheap');
+  assert.equal(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'balance', balancePricePercent: 20 })[0].planType, 'balanced');
+  assert.equal(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'speed' })[0].planType, 'fast');
+});
+
+test('normalizes adjustable AIHub mode settings', () => {
+  const config = core.normalizeConfig({ mode: 'balance', balancePricePercent: '35' });
+  assert.equal(config.mode, 'balance');
+  assert.equal(config.balancePricePercent, 35);
+  assert.equal(core.normalizeConfig({ mode: 'unknown', balancePricePercent: 999 }).mode, 'price');
+  assert.equal(core.normalizeConfig({ mode: 'unknown', balancePricePercent: 999 }).balancePricePercent, 500);
+});
+
 test('requires the same winner for the configured number of checks', () => {
   let state = core.createStabilityState();
   state = core.advanceStability(state, 14, 2);

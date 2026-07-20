@@ -2,7 +2,7 @@
 // @name         AIHub + ShuaiAPI Smart Group
 // @name:zh-CN   AIHub + 帅API 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.2.7
+// @version      0.2.8
 // @description  Recommend reliable low-cost groups on AIHub and ShuaiAPI.
 // @description:zh-CN 按倍率、模型和可用性推荐 AIHub 与帅API分组
 // @license      MIT
@@ -30,8 +30,13 @@
   const TOGGLE_ID = 'aihub-smart-group-toggle';
   const SHUAI_ROOT_ID = 'shuai-smart-group-panel';
   const SHUAI_TOGGLE_ID = 'shuai-smart-group-toggle';
-  const SCRIPT_VERSION = '0.2.7';
+  const SCRIPT_VERSION = '0.2.8';
   const STORAGE_PREFIX = 'aihub-smart-group:';
+  const GROUP_MODE_LABELS = Object.freeze({
+    price: '价格',
+    balance: '平衡',
+    speed: '速度',
+  });
   const DEFAULT_CONFIG = Object.freeze({
     minSuccess6h: 0.95,
     minSuccess24h: 0.90,
@@ -40,6 +45,8 @@
     pollIntervalSeconds: 30,
     cooldownMinutes: 10,
     autoSwitch: false,
+    mode: 'price',
+    balancePricePercent: 20,
   });
   const SHUAI_DEFAULT_CONFIG = Object.freeze({
     hours: 24,
@@ -51,11 +58,7 @@
     autoSelectTarget: true,
     pollIntervalSeconds: 60,
   });
-  const SHUAI_MODE_LABELS = Object.freeze({
-    price: '价格',
-    balance: '平衡',
-    speed: '速度',
-  });
+  const SHUAI_MODE_LABELS = GROUP_MODE_LABELS;
 
   function numberOr(value, fallback) {
     const number = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
@@ -76,12 +79,18 @@
       pollIntervalSeconds: Math.round(clamp(numberOr(source.pollIntervalSeconds, DEFAULT_CONFIG.pollIntervalSeconds), 10, 3600)),
       cooldownMinutes: Math.round(clamp(numberOr(source.cooldownMinutes, DEFAULT_CONFIG.cooldownMinutes), 0, 1440)),
       autoSwitch: source.autoSwitch === true,
+      mode: normalizeGroupMode(source.mode),
+      balancePricePercent: clamp(numberOr(source.balancePricePercent, DEFAULT_CONFIG.balancePricePercent), 0, 500),
     };
+  }
+
+  function normalizeGroupMode(value) {
+    return Object.prototype.hasOwnProperty.call(GROUP_MODE_LABELS, value) ? value : 'price';
   }
 
   function rankCandidates(rows, config = DEFAULT_CONFIG) {
     const normalizedConfig = normalizeConfig(config);
-    return (Array.isArray(rows) ? rows : [])
+    const candidates = (Array.isArray(rows) ? rows : [])
       .filter((row) => {
         if (!row || row.enabled === false || row.available !== true) return false;
         const groupId = Number(row.group_id);
@@ -102,14 +111,33 @@
         success24h: Number(row.successRates['24h']),
         latency: Number.isFinite(Number(row.firstTokenLatencyMs)) ? Number(row.firstTokenLatencyMs) : Number.POSITIVE_INFINITY,
         name: String(row.planType || row.name || `Group ${row.group_id}`),
-      }))
-      .sort((left, right) => (
-        left.price - right.price
-        || right.success6h - left.success6h
-        || right.success24h - left.success24h
-        || left.latency - right.latency
-        || left.name.localeCompare(right.name)
-      ));
+      }));
+    const comparePrice = (left, right) => (
+      left.price - right.price
+      || right.success6h - left.success6h
+      || right.success24h - left.success24h
+      || left.latency - right.latency
+      || left.name.localeCompare(right.name)
+    );
+    const compareSpeed = (left, right) => (
+      left.latency - right.latency
+      || left.price - right.price
+      || right.success6h - left.success6h
+      || right.success24h - left.success24h
+      || left.name.localeCompare(right.name)
+    );
+    if (normalizedConfig.mode === 'speed') return candidates.sort(compareSpeed);
+    const cheapest = [...candidates].sort(comparePrice)[0];
+    if (normalizedConfig.mode === 'balance' && cheapest) {
+      const maxPrice = cheapest.price * (1 + normalizedConfig.balancePricePercent / 100);
+      return candidates.sort((left, right) => {
+        const leftInRange = left.price <= maxPrice;
+        const rightInRange = right.price <= maxPrice;
+        if (leftInRange !== rightInRange) return leftInRange ? -1 : 1;
+        return leftInRange ? compareSpeed(left, right) : comparePrice(left, right);
+      });
+    }
+    return candidates.sort(comparePrice);
   }
 
   function createStabilityState() {
@@ -355,7 +383,7 @@
     #${ROOT_ID} .asg-icon{border:0;padding:2px 5px;font-size:18px;line-height:1}
     #${ROOT_ID} .asg-body{padding:10px 12px}
     #${ROOT_ID} .asg-status{color:#667085;font-size:12px;margin-bottom:8px}
-    #${ROOT_ID} .asg-recommend{padding:9px;background:#f4f8ff;border:1px solid #cfe0ff;border-radius:6px;margin-bottom:9px}
+    #${ROOT_ID} .asg-recommend{padding:9px;background:#f4f8ff;border:1px solid #cfe0ff;border-radius:6px;margin:9px 0}
     #${ROOT_ID} .asg-recommend strong{font-size:15px}
     #${ROOT_ID} .asg-muted{color:#667085}
     #${ROOT_ID} .asg-metrics{display:flex;flex-wrap:wrap;gap:6px 12px;color:#475467;font-size:12px;margin-top:4px}
@@ -714,6 +742,8 @@
         <div class="asg-head"><strong>AIHub 智能分组 v${SCRIPT_VERSION}</strong><button class="asg-icon" data-action="minimize" title="最小化">−</button></div>
         <div class="asg-body">
           <div class="asg-status" data-field="status">准备检测</div>
+          <label for="asg-mode-select">模式</label>
+          <select id="asg-mode-select" data-field="mode"><option value="price">价格（最低价格）</option><option value="balance">平衡（低价范围内最快首字）</option><option value="speed">速度（最快首字）</option></select>
           <div class="asg-recommend" data-field="recommend"><div class="asg-muted">正在读取监控数据...</div></div>
           <label for="asg-key-select">目标密钥</label>
           <select id="asg-key-select" data-field="key"></select>
@@ -726,6 +756,7 @@
               <label>连续通过次数<input type="number" min="1" max="5" step="1" data-setting="consecutiveChecks"></label>
               <label>检测间隔（秒）<input type="number" min="10" max="3600" step="1" data-setting="pollIntervalSeconds"></label>
               <label>切换冷却（分钟）<input type="number" min="0" max="1440" step="1" data-setting="cooldownMinutes"></label>
+              <label>平衡价格范围（%）<input type="number" min="0" max="500" step="1" data-setting="balancePricePercent"></label>
             </div>
             <label class="asg-auto"><input type="checkbox" data-setting="requireNoWarnings"> 排除监控警告</label>
             <button class="asg-save" data-action="save-settings">保存设置</button>
@@ -760,6 +791,11 @@
         storageSet('selectedKeyId', this.selectedKeyId);
         this.renderActionState();
       });
+      this.panel.querySelector('[data-field="mode"]').addEventListener('change', (event) => {
+        this.config.mode = normalizeGroupMode(event.target.value);
+        storageSet('config', this.config);
+        this.refresh();
+      });
       this.panel.querySelector('[data-field="auto"]').addEventListener('change', (event) => {
         if (event.target.checked && !window.confirm('自动切换会在检测通过后修改选中 API 密钥的分组，是否启用？')) {
           event.target.checked = false;
@@ -785,6 +821,7 @@
         else input.value = this.config[key];
       }
       this.panel.querySelector('[data-field="auto"]').checked = this.config.autoSwitch;
+      this.panel.querySelector('[data-field="mode"]').value = this.config.mode;
     }
 
     saveSettings() {
@@ -793,6 +830,7 @@
         next[input.dataset.setting] = input.type === 'checkbox' ? input.checked : input.value;
       }
       next.autoSwitch = this.config.autoSwitch;
+      next.mode = this.config.mode;
       this.config = normalizeConfig(next);
       storageSet('config', this.config);
       this.syncSettingsInputs();
@@ -899,7 +937,7 @@
         recommend.appendChild(empty);
       } else {
         const title = document.createElement('strong');
-        title.textContent = `${winner.name} · ${winner.price}x`;
+        title.textContent = `${GROUP_MODE_LABELS[this.config.mode]}模式 · ${winner.name} · ${winner.price}x`;
         const metrics = document.createElement('div');
         metrics.className = 'asg-metrics';
         metrics.textContent = `6h ${formatPercent(winner.success6h)} · 24h ${formatPercent(winner.success24h)} · 首Token ${formatLatency(winner.latency)}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
@@ -1401,7 +1439,9 @@
 
   return {
     DEFAULT_CONFIG,
+    GROUP_MODE_LABELS,
     normalizeConfig,
+    normalizeGroupMode,
     rankCandidates,
     createStabilityState,
     advanceStability,
