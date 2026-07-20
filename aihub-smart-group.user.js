@@ -2,7 +2,7 @@
 // @name         AIHub + ShuaiAPI Smart Group
 // @name:zh-CN   AIHub + 帅API 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.2.6
+// @version      0.2.7
 // @description  Recommend reliable low-cost groups on AIHub and ShuaiAPI.
 // @description:zh-CN 按倍率、模型和可用性推荐 AIHub 与帅API分组
 // @license      MIT
@@ -30,7 +30,7 @@
   const TOGGLE_ID = 'aihub-smart-group-toggle';
   const SHUAI_ROOT_ID = 'shuai-smart-group-panel';
   const SHUAI_TOGGLE_ID = 'shuai-smart-group-toggle';
-  const SCRIPT_VERSION = '0.2.6';
+  const SCRIPT_VERSION = '0.2.7';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const DEFAULT_CONFIG = Object.freeze({
     minSuccess6h: 0.95,
@@ -47,6 +47,8 @@
     excludeWarnings: true,
     requireRecentData: true,
     mode: 'price',
+    balancePricePercent: 20,
+    autoSelectTarget: true,
     pollIntervalSeconds: 60,
   });
   const SHUAI_MODE_LABELS = Object.freeze({
@@ -622,7 +624,8 @@
     if (mode === 'speed') {
       modeCandidate = [...candidates].sort(compareShuaiSpeed)[0] || recommended || cheapest;
     } else if (mode === 'balance' && cheapest) {
-      const maxRatio = cheapest.ratio * 1.2;
+      const pricePercent = clamp(numberOr(config?.balancePricePercent, SHUAI_DEFAULT_CONFIG.balancePricePercent), 0, 500);
+      const maxRatio = cheapest.ratio * (1 + pricePercent / 100);
       const balanced = candidates.filter((candidate) => candidate.ratio <= maxRatio);
       modeCandidate = [...balanced].sort(compareShuaiSpeed)[0] || recommended || cheapest;
     }
@@ -660,6 +663,8 @@
       excludeWarnings: source.excludeWarnings !== false,
       requireRecentData: source.requireRecentData !== false,
       mode: normalizeShuaiMode(source.mode),
+      balancePricePercent: clamp(numberOr(source.balancePricePercent, SHUAI_DEFAULT_CONFIG.balancePricePercent), 0, 500),
+      autoSelectTarget: source.autoSelectTarget !== false,
       pollIntervalSeconds: Math.round(clamp(numberOr(source.pollIntervalSeconds, SHUAI_DEFAULT_CONFIG.pollIntervalSeconds), 30, 3600)),
     };
   }
@@ -1015,7 +1020,14 @@
             <label>模式<select data-field="mode"><option value="price">价格（最低倍率）</option><option value="balance">平衡（低价范围内最快首字）</option><option value="speed">速度（最快首字）</option></select></label>
           </div>
           <div class="ssg-recommend" data-field="recommend"><div class="ssg-muted">正在读取性能数据...</div></div>
-          <div class="ssg-options"><label><input type="checkbox" data-setting="excludeWarnings">排除不稳定分组</label><label><input type="checkbox" data-setting="requireRecentData">要求最近有数据</label><label>最低成功率 <input type="number" min="0" max="100" step="0.1" data-setting="minSuccessRate" style="width:72px"></label></div>
+          <div class="ssg-options">
+            <label><input type="checkbox" data-setting="excludeWarnings">排除不稳定分组</label>
+            <label><input type="checkbox" data-setting="requireRecentData">要求最近有数据</label>
+            <label><input type="checkbox" data-setting="autoSelectTarget">模式自动选择目标</label>
+            <label>最低成功率 <input type="number" min="0" max="100" step="0.1" data-setting="minSuccessRate" style="width:72px"></label>
+            <label>平衡价格范围 <input type="number" min="0" max="500" step="1" data-setting="balancePricePercent" style="width:64px">%</label>
+            <label>刷新间隔 <input type="number" min="30" max="3600" step="1" data-setting="pollIntervalSeconds" style="width:68px">秒</label>
+          </div>
           <div class="ssg-actions"><button data-action="refresh">刷新</button><button data-action="save-settings">保存设置</button></div>
           <div class="ssg-switch">
             <div class="ssg-switch-grid">
@@ -1071,7 +1083,7 @@
       });
       this.panel.querySelector('[data-field="mode"]').addEventListener('change', (event) => {
         this.config.mode = normalizeShuaiMode(event.target.value);
-        this.targetGroup = '';
+        if (this.config.autoSelectTarget) this.targetGroup = '';
         storageSet('shuai-config', this.config);
         this.renderData();
       });
@@ -1100,18 +1112,28 @@
       this.panel.querySelector('[data-setting="minSuccessRate"]').value = this.config.minSuccessRate;
       this.panel.querySelector('[data-setting="excludeWarnings"]').checked = this.config.excludeWarnings;
       this.panel.querySelector('[data-setting="requireRecentData"]').checked = this.config.requireRecentData;
+      this.panel.querySelector('[data-setting="autoSelectTarget"]').checked = this.config.autoSelectTarget;
+      this.panel.querySelector('[data-setting="balancePricePercent"]').value = this.config.balancePricePercent;
+      this.panel.querySelector('[data-setting="pollIntervalSeconds"]').value = this.config.pollIntervalSeconds;
     }
 
     saveSettings() {
       const input = this.panel.querySelector('[data-setting="minSuccessRate"]');
       const excludeWarnings = this.panel.querySelector('[data-setting="excludeWarnings"]');
       const requireRecentData = this.panel.querySelector('[data-setting="requireRecentData"]');
+      const autoSelectTarget = this.panel.querySelector('[data-setting="autoSelectTarget"]');
+      const balancePricePercent = this.panel.querySelector('[data-setting="balancePricePercent"]');
+      const pollIntervalSeconds = this.panel.querySelector('[data-setting="pollIntervalSeconds"]');
       this.config = normalizeShuaiConfig({
         ...this.config,
         minSuccessRate: input.value,
         excludeWarnings: excludeWarnings.checked,
         requireRecentData: requireRecentData.checked,
+        autoSelectTarget: autoSelectTarget.checked,
+        balancePricePercent: balancePricePercent.value,
+        pollIntervalSeconds: pollIntervalSeconds.value,
       });
+      if (this.config.autoSelectTarget) this.targetGroup = '';
       storageSet('shuai-config', this.config);
       this.syncSettingsInputs();
       if (this.timer) window.clearInterval(this.timer);
@@ -1229,10 +1251,8 @@
           - (Number.isFinite(right.ratio) ? right.ratio : Number.POSITIVE_INFINITY)
         || left.name.localeCompare(right.name)
       ));
-      const recommendedName = recommendations.modeCandidate?.name
-        || recommendations.recommended?.name
-        || recommendations.cheapest?.name
-        || '';
+      const modeName = this.config.autoSelectTarget ? recommendations.modeCandidate?.name : '';
+      const recommendedName = modeName || recommendations.recommended?.name || recommendations.cheapest?.name || '';
       if (!this.targetGroup || !options.has(this.targetGroup)) this.targetGroup = recommendedName;
       storageSet('shuai-target-group', this.targetGroup);
       select.replaceChildren();

@@ -237,3 +237,35 @@ test('normalizes unsupported ShuaiAPI modes to price', () => {
   assert.equal(core.normalizeShuaiConfig({ mode: 'unknown' }).mode, 'price');
   assert.equal(core.normalizeShuaiConfig({ mode: 'speed' }).mode, 'speed');
 });
+
+test('normalizes and persists adjustable ShuaiAPI mode settings', () => {
+  const config = core.normalizeShuaiConfig({
+    mode: 'balance',
+    balancePricePercent: '35',
+    autoSelectTarget: false,
+    pollIntervalSeconds: '10',
+  });
+
+  assert.equal(config.mode, 'balance');
+  assert.equal(config.balancePricePercent, 35);
+  assert.equal(config.autoSelectTarget, false);
+  assert.equal(config.pollIntervalSeconds, 30);
+});
+
+test('uses the configured price range for balance mode', () => {
+  const groups = core.extractShuaiGroups({ groups: [
+    { group: 'cheap', ratio: 0.04, request_count: 10, success_rate: 100, avg_ttft_ms: 500, models: [{ model_name: 'gpt-5', request_count: 10, success_rate: 100, avg_ttft_ms: 500 }] },
+    { group: 'near-fast', ratio: 0.045, request_count: 10, success_rate: 100, avg_ttft_ms: 100, models: [{ model_name: 'gpt-5', request_count: 10, success_rate: 100, avg_ttft_ms: 100 }] },
+  ] });
+
+  assert.equal(core.getShuaiRecommendations(groups, 'gpt-5', {
+    ...core.SHUAI_DEFAULT_CONFIG,
+    mode: 'balance',
+    balancePricePercent: 5,
+  }).modeCandidate.name, 'cheap');
+  assert.equal(core.getShuaiRecommendations(groups, 'gpt-5', {
+    ...core.SHUAI_DEFAULT_CONFIG,
+    mode: 'balance',
+    balancePricePercent: 20,
+  }).modeCandidate.name, 'near-fast');
+});
