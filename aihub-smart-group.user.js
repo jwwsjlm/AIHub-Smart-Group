@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.4.0
+// @version      0.4.1
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.4.0';
+  const SCRIPT_VERSION = '0.4.1';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -147,11 +147,13 @@
     return `×${multiplier.toFixed(6).replace(/\.?0+$/, '')}`;
   }
 
-  function getPageMode(pathname) {
+  function getPageFeatures(pathname, loggedIn) {
     const path = String(pathname || '').split('?')[0];
-    if (path === '/providers' || path.startsWith('/providers/') || path === '/keys' || path.startsWith('/keys/')) return 'recommend';
-    if (path === '/usage' || path.startsWith('/usage/')) return 'usage';
-    return null;
+    if (!loggedIn) return { panel: false, usage: false };
+    return {
+      panel: true,
+      usage: path === '/usage' || path.startsWith('/usage/'),
+    };
   }
 
   function createStabilityState() {
@@ -427,7 +429,7 @@
   }
 
   class Controller {
-    constructor() {
+    constructor(options = {}) {
       this.config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
       this.selectedKeyId = storageGet('selectedKeyId', null);
       this.lastSwitch = storageGet('lastSwitch', { at: null, keyId: null, groupId: null });
@@ -449,6 +451,7 @@
       this.lastAuthLogSignature = '';
       this.lastErrorLogSignature = '';
       this.lastAutoSkipLogSignature = '';
+      this.onAuthInvalid = typeof options.onAuthInvalid === 'function' ? options.onAuthInvalid : null;
     }
 
     start(registerMenu = true) {
@@ -633,6 +636,10 @@
           if (!this.active) return;
         } catch (error) {
           if (!this.active) return;
+          if (error?.status === 401 && this.onAuthInvalid) {
+            this.onAuthInvalid();
+            if (!this.active) return;
+          }
           this.keys = [];
           this.authError = error?.status === 401
             ? (getAuthToken() ? '密钥接口返回 401：当前登录已失效，请重新登录后刷新' : '未找到页面登录令牌，请在此 Chrome 配置中重新登录后刷新')
@@ -921,15 +928,16 @@
 
   class AppRouter {
     constructor() {
-      this.mode = null;
-      this.feature = null;
+      this.panel = null;
+      this.usage = null;
+      this.rejectedToken = '';
       this.timer = null;
     }
 
     start() {
       if (typeof GM_registerMenuCommand === 'function') {
         GM_registerMenuCommand('显示 AIHub 智能分组', () => {
-          if (this.feature instanceof Controller) this.feature.setMinimized(false);
+          this.panel?.setMinimized(false);
         });
       }
       this.sync();
@@ -937,15 +945,28 @@
     }
 
     sync() {
-      const nextMode = getPageMode(location.pathname);
-      if (nextMode === this.mode) return;
-      this.feature?.stop();
-      this.feature = nextMode === 'recommend'
-        ? new Controller()
-        : (nextMode === 'usage' ? new UsageMultiplierEnhancer() : null);
-      this.mode = nextMode;
-      if (this.feature instanceof Controller) this.feature.start(false);
-      else this.feature?.start();
+      const token = getAuthToken();
+      if (!token) this.rejectedToken = '';
+      const features = getPageFeatures(location.pathname, Boolean(token) && token !== this.rejectedToken);
+      if (features.panel && !this.panel) {
+        this.panel = new Controller({
+          onAuthInvalid: () => {
+            this.rejectedToken = token;
+            this.sync();
+          },
+        });
+        this.panel.start(false);
+      } else if (!features.panel && this.panel) {
+        this.panel.stop();
+        this.panel = null;
+      }
+      if (features.usage && !this.usage) {
+        this.usage = new UsageMultiplierEnhancer();
+        this.usage.start();
+      } else if (!features.usage && this.usage) {
+        this.usage.stop();
+        this.usage = null;
+      }
     }
   }
 
@@ -958,7 +979,7 @@
     normalizeGroupName,
     buildGroupMultiplierMap,
     formatMultiplier,
-    getPageMode,
+    getPageFeatures,
     createStabilityState,
     advanceStability,
     canAutoSwitch,

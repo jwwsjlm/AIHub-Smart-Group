@@ -198,9 +198,10 @@ test('formats usage multipliers without unnecessary zeroes', () => {
   assert.equal(core.formatMultiplier(Number.NaN), '');
 });
 
-test('routes AIHub pages to the appropriate feature', () => {
-  assert.equal(core.getPageMode('/providers'), 'recommend');
-  assert.equal(core.getPageMode('/keys?page=1'), 'recommend');
-  assert.equal(core.getPageMode('/usage'), 'usage');
-  assert.equal(core.getPageMode('/dashboard'), null);
+test('enables the panel on every AIHub page only while logged in', () => {
+  assert.deepEqual(core.getPageFeatures('/providers', true), { panel: true, usage: false });
+  assert.deepEqual(core.getPageFeatures('/keys?page=1', true), { panel: true, usage: false });
+  assert.deepEqual(core.getPageFeatures('/usage', true), { panel: true, usage: true });
+  assert.deepEqual(core.getPageFeatures('/dashboard', true), { panel: true, usage: false });
+  assert.deepEqual(core.getPageFeatures('/usage', false), { panel: false, usage: false });
 });

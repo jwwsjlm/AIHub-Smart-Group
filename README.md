@@ -8,11 +8,12 @@
 
 | 页面 | 功能 |
 | --- | --- |
+| `https://aihub.top/*` | 登录后在所有页面显示智能分组面板或右下角 `AI` 按钮 |
 | `https://aihub.top/providers` | 读取供应商监控并推荐分组 |
 | `https://aihub.top/keys` | 选择密钥、手动切换或开启自动切换 |
-| `https://aihub.top/usage` | 在分组名称旁显示当前倍率 |
+| `https://aihub.top/usage` | 额外在分组名称旁显示当前倍率 |
 
-脚本只在以上三个 AIHub 页面启用对应功能，不会在其他网站运行。
+脚本只在 AIHub 登录状态下启用，不会在其他网站运行。通过侧边栏切换页面时不需要手动刷新。
 
 ## 安装
 
@@ -47,7 +48,7 @@
 - 确认 Tampermonkey 和“AIHub 智能分组”脚本都已启用。
 - 确认当前域名是 `https://aihub.top/`。
 - 更新或重新安装脚本后，刷新 AIHub 页面。
-- 智能推荐面板只在“供应商大厅”和“API 密钥”页面显示；“使用记录”页面只会在分组名称旁显示绿色倍率。
+- 登录后，智能推荐面板或右下角 `AI` 按钮会在所有 AIHub 页面显示；“使用记录”页面还会在分组名称旁显示绿色倍率。
 
 ## 第一次使用
 
@@ -157,4 +158,4 @@ node --test tests/aihub-smart-group.test.cjs
 npx --yes eslint@9.39.2 aihub-smart-group.user.js
 ```
 
-当前版本：`0.4.0`
+当前版本：`0.4.1`
