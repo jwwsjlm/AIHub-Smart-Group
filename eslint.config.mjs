@@ -9,6 +9,7 @@ export default [
         GM_getValue: 'readonly',
         GM_registerMenuCommand: 'readonly',
         GM_setValue: 'readonly',
+        MutationObserver: 'readonly',
         URLSearchParams: 'readonly',
         document: 'readonly',
         localStorage: 'readonly',

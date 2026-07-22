@@ -10,8 +10,9 @@
 | --- | --- |
 | `https://aihub.top/providers` | 读取供应商监控并推荐分组 |
 | `https://aihub.top/keys` | 选择密钥、手动切换或开启自动切换 |
+| `https://aihub.top/usage` | 在分组名称旁显示当前倍率 |
 
-脚本只匹配这两个 AIHub 页面，不会在其他网站运行。
+脚本只在以上三个 AIHub 页面启用对应功能，不会在其他网站运行。
 
 ## 安装
 
@@ -134,4 +135,4 @@ node --test tests/aihub-smart-group.test.cjs
 npx --yes eslint@9.39.2 aihub-smart-group.user.js
 ```
 
-当前版本：`0.3.2`
+当前版本：`0.4.0`

@@ -2,14 +2,13 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.3.2
+// @version      0.4.0
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
 // @homepageURL   https://github.com/jwwsjlm/AIHub-Smart-Group
 // @supportURL    https://github.com/jwwsjlm/AIHub-Smart-Group/issues
-// @match        https://aihub.top/providers*
-// @match        https://aihub.top/keys*
+// @match        https://aihub.top/*
 // @grant        GM_addStyle
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
@@ -29,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.3.2';
+  const SCRIPT_VERSION = '0.4.0';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -126,6 +125,33 @@
       });
     }
     return candidates.sort(comparePrice);
+  }
+
+  function normalizeGroupName(value) {
+    return String(value ?? '').trim().toLocaleLowerCase();
+  }
+
+  function buildGroupMultiplierMap(rows) {
+    const result = new Map();
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const name = normalizeGroupName(row?.planType || row?.name);
+      const multiplier = Number(row?.priceMultiplier);
+      if (name && Number.isFinite(multiplier) && multiplier >= 0) result.set(name, multiplier);
+    }
+    return result;
+  }
+
+  function formatMultiplier(value) {
+    const multiplier = Number(value);
+    if (!Number.isFinite(multiplier) || multiplier < 0) return '';
+    return `×${multiplier.toFixed(6).replace(/\.?0+$/, '')}`;
+  }
+
+  function getPageMode(pathname) {
+    const path = String(pathname || '').split('?')[0];
+    if (path === '/providers' || path.startsWith('/providers/') || path === '/keys' || path.startsWith('/keys/')) return 'recommend';
+    if (path === '/usage' || path.startsWith('/usage/')) return 'usage';
+    return null;
   }
 
   function createStabilityState() {
@@ -379,6 +405,10 @@
     #${TOGGLE_ID}:hover{background:#0f46b6}
   `;
 
+  const USAGE_STYLE = `
+    .asg-usage-multiplier{margin-inline-start:6px;color:#15803d;font-weight:600;white-space:nowrap}
+  `;
+
   function addStyle(css) {
     if (typeof GM_addStyle === 'function') GM_addStyle(css);
     else {
@@ -414,13 +444,15 @@
       this.timer = null;
       this.panel = null;
       this.toggleButton = null;
+      this.active = false;
       this.lastDetectionLogSignature = null;
       this.lastAuthLogSignature = '';
       this.lastErrorLogSignature = '';
       this.lastAutoSkipLogSignature = '';
     }
 
-    start() {
+    start(registerMenu = true) {
+      this.active = true;
       const existing = document.getElementById(ROOT_ID);
       if (existing?.dataset.version === SCRIPT_VERSION) return;
       existing?.remove();
@@ -428,9 +460,19 @@
       addStyle(STYLE);
       this.renderShell();
       this.bindEvents();
-      if (typeof GM_registerMenuCommand === 'function') GM_registerMenuCommand('显示 AIHub 智能分组', () => this.setMinimized(false));
+      if (registerMenu && typeof GM_registerMenuCommand === 'function') GM_registerMenuCommand('显示 AIHub 智能分组', () => this.setMinimized(false));
       this.refresh();
       this.timer = window.setInterval(() => this.refresh(), this.config.pollIntervalSeconds * 1000);
+    }
+
+    stop() {
+      this.active = false;
+      if (this.timer) window.clearInterval(this.timer);
+      this.timer = null;
+      this.panel?.remove();
+      this.toggleButton?.remove();
+      this.panel = null;
+      this.toggleButton = null;
     }
 
     renderShell() {
@@ -584,10 +626,13 @@
       this.renderActionState();
       try {
         const summary = await fetchMonitorSummary();
+        if (!this.active) return;
         let keys = null;
         try {
           keys = await fetchAllKeys();
+          if (!this.active) return;
         } catch (error) {
+          if (!this.active) return;
           this.keys = [];
           this.authError = error?.status === 401
             ? (getAuthToken() ? '密钥接口返回 401：当前登录已失效，请重新登录后刷新' : '未找到页面登录令牌，请在此 Chrome 配置中重新登录后刷新')
@@ -623,6 +668,7 @@
         this.lastErrorLogSignature = '';
         if (this.config.autoSwitch) await this.switchToRecommendation(true);
       } catch (error) {
+        if (!this.active) return;
         this.error = error instanceof Error ? error.message : '检测失败';
         if (shouldLogTransition(this.lastErrorLogSignature, this.error, forceLog)) this.log('error', this.error);
         this.lastErrorLogSignature = this.error;
@@ -630,7 +676,7 @@
         this.renderActionState();
       } finally {
         this.loading = false;
-        this.renderActionState();
+        if (this.active) this.renderActionState();
       }
     }
 
@@ -684,6 +730,7 @@
       if (!fromAuto && !window.confirm(`将密钥“${key.name}”切换到 ${winner.name}（${winner.price}x），是否继续？`)) return false;
       try {
         await updateKeyGroup(key.id, winner.groupId);
+        if (!this.active) return false;
         key.groupId = winner.groupId;
         key.groupName = winner.name;
         this.lastSwitch = { at: Date.now(), keyId: key.id, groupId: winner.groupId };
@@ -694,6 +741,7 @@
         this.renderData();
         return true;
       } catch (error) {
+        if (!this.active) return false;
         this.setStatus(error instanceof Error ? error.message : '切换失败', true);
         this.log('error', error instanceof Error ? error.message : '切换失败');
         return false;
@@ -784,12 +832,133 @@
     }
   }
 
+  class UsageMultiplierEnhancer {
+    constructor() {
+      this.multiplierByGroup = new Map();
+      this.observer = null;
+      this.renderQueued = false;
+      this.active = false;
+      this.refreshTimer = null;
+      this.renderTimer = null;
+    }
+
+    start() {
+      this.active = true;
+      addStyle(USAGE_STYLE);
+      this.observer = new MutationObserver(() => this.queueRender());
+      this.observer.observe(document.body, { childList: true, subtree: true });
+      this.refresh();
+      this.refreshTimer = window.setInterval(() => this.refresh(), 5 * 60 * 1000);
+    }
+
+    stop() {
+      this.active = false;
+      this.observer?.disconnect();
+      this.observer = null;
+      if (this.refreshTimer) window.clearInterval(this.refreshTimer);
+      if (this.renderTimer) window.clearTimeout(this.renderTimer);
+      this.refreshTimer = null;
+      this.renderTimer = null;
+      document.querySelectorAll('.asg-usage-multiplier').forEach((node) => node.remove());
+    }
+
+    async refresh() {
+      try {
+        const summary = await fetchMonitorSummary();
+        if (!this.active) return;
+        this.multiplierByGroup = buildGroupMultiplierMap(summary?.apis);
+        this.render();
+      } catch {
+        // The usage page remains unchanged when current monitor data is unavailable.
+      }
+    }
+
+    queueRender() {
+      if (this.renderQueued) return;
+      this.renderQueued = true;
+      this.renderTimer = window.setTimeout(() => {
+        this.renderTimer = null;
+        this.renderQueued = false;
+        this.render();
+      }, 0);
+    }
+
+    render() {
+      if (!this.multiplierByGroup.size) return;
+      for (const table of document.querySelectorAll('table')) {
+        const headers = [...table.querySelectorAll('thead th')];
+        const groupColumnIndex = headers.findIndex((header) => header.textContent.trim() === '分组');
+        if (groupColumnIndex < 0) continue;
+        for (const row of table.querySelectorAll('tbody tr')) {
+          const cells = row.querySelectorAll('td');
+          const cell = cells[groupColumnIndex];
+          if (!cell) continue;
+          const existing = cell.querySelector('.asg-usage-multiplier');
+          const name = normalizeGroupName([...cell.childNodes]
+            .filter((node) => node !== existing)
+            .map((node) => node.textContent)
+            .join(' '));
+          const multiplier = this.multiplierByGroup.get(name);
+          if (multiplier == null) {
+            existing?.remove();
+            continue;
+          }
+          const text = formatMultiplier(multiplier);
+          if (existing) {
+            existing.dataset.groupName = name;
+            if (existing.textContent !== text) existing.textContent = text;
+          } else {
+            const badge = document.createElement('span');
+            badge.className = 'asg-usage-multiplier';
+            badge.dataset.groupName = name;
+            badge.textContent = text;
+            cell.appendChild(badge);
+          }
+        }
+      }
+    }
+  }
+
+  class AppRouter {
+    constructor() {
+      this.mode = null;
+      this.feature = null;
+      this.timer = null;
+    }
+
+    start() {
+      if (typeof GM_registerMenuCommand === 'function') {
+        GM_registerMenuCommand('显示 AIHub 智能分组', () => {
+          if (this.feature instanceof Controller) this.feature.setMinimized(false);
+        });
+      }
+      this.sync();
+      this.timer = window.setInterval(() => this.sync(), 500);
+    }
+
+    sync() {
+      const nextMode = getPageMode(location.pathname);
+      if (nextMode === this.mode) return;
+      this.feature?.stop();
+      this.feature = nextMode === 'recommend'
+        ? new Controller()
+        : (nextMode === 'usage' ? new UsageMultiplierEnhancer() : null);
+      this.mode = nextMode;
+      if (this.feature instanceof Controller) this.feature.start(false);
+      else this.feature?.start();
+    }
+  }
+
   return {
     DEFAULT_CONFIG,
     GROUP_MODE_LABELS,
     normalizeConfig,
     normalizeGroupMode,
     rankCandidates,
+    normalizeGroupName,
+    buildGroupMultiplierMap,
+    formatMultiplier,
+    getPageMode,
     createStabilityState,
     advanceStability,
     canAutoSwitch,
@@ -803,7 +972,8 @@
     appendLogEntries,
     formatLogLine,
     start() {
-      if (location.hostname === 'aihub.top') new Controller().start();
+      if (location.hostname !== 'aihub.top') return;
+      new AppRouter().start();
     },
   };
 });

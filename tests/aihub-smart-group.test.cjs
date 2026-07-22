@@ -178,3 +178,29 @@ test('blocks switching while loading or when key authentication failed', () => {
   assert.equal(core.getSwitchBlockReason({ ...ready, stability: { stable: false, count: 1 } }), '推荐尚未稳定（1/2 次）');
   assert.equal(core.getSwitchBlockReason({ ...ready, key: { groupId: 14 } }), '当前密钥已经在推荐分组');
 });
+
+test('builds current multiplier lookup by normalized group name', () => {
+  const lookup = core.buildGroupMultiplierMap([
+    { planType: ' A004-K12/BugTeam ', priceMultiplier: '0.04' },
+    { name: 'A013-K12', priceMultiplier: 0.01 },
+    { planType: 'invalid', priceMultiplier: 'unknown' },
+  ]);
+
+  assert.equal(lookup.get('a004-k12/bugteam'), 0.04);
+  assert.equal(lookup.get('a013-k12'), 0.01);
+  assert.equal(lookup.has('invalid'), false);
+});
+
+test('formats usage multipliers without unnecessary zeroes', () => {
+  assert.equal(core.formatMultiplier(0.04), '×0.04');
+  assert.equal(core.formatMultiplier(1), '×1');
+  assert.equal(core.formatMultiplier(0.0123456), '×0.012346');
+  assert.equal(core.formatMultiplier(Number.NaN), '');
+});
+
+test('routes AIHub pages to the appropriate feature', () => {
+  assert.equal(core.getPageMode('/providers'), 'recommend');
+  assert.equal(core.getPageMode('/keys?page=1'), 'recommend');
+  assert.equal(core.getPageMode('/usage'), 'usage');
+  assert.equal(core.getPageMode('/dashboard'), null);
+});
