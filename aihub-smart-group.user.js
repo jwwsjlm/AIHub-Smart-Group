@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.4.2
+// @version      0.4.3
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.4.2';
+  const SCRIPT_VERSION = '0.4.3';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -73,9 +73,8 @@
     return Object.prototype.hasOwnProperty.call(GROUP_MODE_LABELS, value) ? value : 'price';
   }
 
-  function rankCandidates(rows, config = DEFAULT_CONFIG) {
-    const normalizedConfig = normalizeConfig(config);
-    const candidates = (Array.isArray(rows) ? rows : [])
+  function getEligibleCandidates(rows, normalizedConfig) {
+    return (Array.isArray(rows) ? rows : [])
       .filter((row) => {
         if (!row || row.enabled === false || row.available !== true) return false;
         const groupId = Number(row.group_id);
@@ -94,18 +93,35 @@
         latency: Number.isFinite(Number(row.firstTokenLatencyMs)) ? Number(row.firstTokenLatencyMs) : Number.POSITIVE_INFINITY,
         name: String(row.planType || row.name || `Group ${row.group_id}`),
       }));
-    const comparePrice = (left, right) => (
-      left.price - right.price
+  }
+
+  function comparePrice(left, right) {
+    return left.price - right.price
       || right.success10m - left.success10m
       || left.latency - right.latency
-      || left.name.localeCompare(right.name)
-    );
-    const compareSpeed = (left, right) => (
-      left.latency - right.latency
+      || left.name.localeCompare(right.name);
+  }
+
+  function compareSpeed(left, right) {
+    return left.latency - right.latency
       || left.price - right.price
       || right.success10m - left.success10m
-      || left.name.localeCompare(right.name)
-    );
+      || left.name.localeCompare(right.name);
+  }
+
+  function getBalancePriceInfo(rows, config = DEFAULT_CONFIG) {
+    const normalizedConfig = normalizeConfig(config);
+    const cheapest = getEligibleCandidates(rows, normalizedConfig).sort(comparePrice)[0];
+    return {
+      minPrice: cheapest?.price ?? null,
+      percent: normalizedConfig.balancePricePercent,
+      maxPrice: cheapest ? cheapest.price * (1 + normalizedConfig.balancePricePercent / 100) : null,
+    };
+  }
+
+  function rankCandidates(rows, config = DEFAULT_CONFIG) {
+    const normalizedConfig = normalizeConfig(config);
+    const candidates = getEligibleCandidates(rows, normalizedConfig);
     if (normalizedConfig.mode === 'speed') return candidates.sort(compareSpeed);
     const cheapest = [...candidates].sort(comparePrice)[0];
     if (normalizedConfig.mode === 'balance' && cheapest) {
@@ -155,6 +171,34 @@
       if (name && Number.isFinite(multiplier) && multiplier >= 0) result.set(name, multiplier);
     }
     return result;
+  }
+
+  function nonNegativeNumberOrNull(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : null;
+  }
+
+  function buildGroupMetricMap(rows) {
+    const result = new Map();
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const groupId = Number(row?.group_id);
+      if (!Number.isInteger(groupId) || groupId <= 0) continue;
+      result.set(groupId, {
+        multiplier: nonNegativeNumberOrNull(row?.priceMultiplier),
+        latencyMs: nonNegativeNumberOrNull(row?.firstTokenLatencyMs),
+      });
+    }
+    return result;
+  }
+
+  function formatKeyOptionLabel(key, metric) {
+    const name = String(key?.name || `Key ${key?.id ?? ''}`).trim();
+    const groupName = String(key?.groupName || '未分组').trim();
+    const multiplier = nonNegativeNumberOrNull(metric?.multiplier);
+    const latencyMs = nonNegativeNumberOrNull(metric?.latencyMs);
+    const multiplierText = multiplier === null ? '倍率暂无数据' : formatMultiplier(multiplier);
+    const latencyText = latencyMs === null ? '首 Token 暂无数据' : `首 Token ${formatLatency(latencyMs)}`;
+    return `${name} · ${groupName} · ${multiplierText} · ${latencyText}`;
   }
 
   function formatMultiplier(value) {
@@ -400,6 +444,12 @@
     #${ROOT_ID} .asg-metrics{display:flex;flex-wrap:wrap;gap:6px 12px;color:#475467;font-size:12px;margin-top:4px}
     #${ROOT_ID} label{display:block;color:#475467;font-size:12px;margin:8px 0 4px}
     #${ROOT_ID} select,#${ROOT_ID} input[type=number]{width:100%;border:1px solid #cfd5df;border-radius:6px;padding:6px;background:#fff;color:#172033;font:inherit}
+    #${ROOT_ID} .asg-key-details[hidden]{display:none}
+    #${ROOT_ID} .asg-key-details{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px 10px;margin-top:5px;padding:6px 0 2px;border-bottom:1px solid #eef0f3}
+    #${ROOT_ID} .asg-key-detail{min-width:0}
+    #${ROOT_ID} .asg-key-detail span{display:block;color:#667085;font-size:10px}
+    #${ROOT_ID} .asg-key-detail strong{display:block;margin-top:1px;font-size:12px;line-height:1.35;overflow-wrap:anywhere}
+    #${ROOT_ID} .asg-key-metric{color:#15803d}
     #${ROOT_ID} .asg-actions{display:flex;gap:7px;margin-top:10px}
     #${ROOT_ID} .asg-actions button:last-child{flex:1;background:#1456d9;color:#fff;border-color:#1456d9}
     #${ROOT_ID} .asg-actions button:last-child:hover:not(:disabled){background:#0f46b6}
@@ -409,10 +459,20 @@
     #${ROOT_ID} .asg-guide ol{margin:6px 0 0;padding-left:20px}
     #${ROOT_ID} details{margin-top:9px;border-top:1px solid #e4e7ec;padding-top:7px}
     #${ROOT_ID} summary{cursor:pointer;color:#475467}
-    #${ROOT_ID} .asg-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px 9px;margin-top:7px}
-    #${ROOT_ID} .asg-grid label{margin:0}
-    #${ROOT_ID} .asg-grid input{margin-top:3px}
-    #${ROOT_ID} .asg-save{margin-top:8px}
+    #${ROOT_ID} .asg-settings-body{margin-top:7px}
+    #${ROOT_ID} .asg-settings-section{padding:7px 0}
+    #${ROOT_ID} .asg-settings-section+.asg-settings-section{border-top:1px solid #eef0f3}
+    #${ROOT_ID} .asg-settings-title{margin-bottom:6px;color:#344054;font-size:11px;font-weight:600}
+    #${ROOT_ID} .asg-settings-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:7px 9px}
+    #${ROOT_ID} .asg-settings-grid label{margin:0}
+    #${ROOT_ID} .asg-settings-grid input[type=number]{margin-top:3px}
+    #${ROOT_ID} .asg-setting-wide{grid-column:1/-1}
+    #${ROOT_ID} .asg-settings-grid .asg-auto{margin:1px 0 0}
+    #${ROOT_ID} .asg-balance-setting{grid-column:1/-1}
+    #${ROOT_ID} .asg-balance-preview,#${ROOT_ID} .asg-balance-reason{display:block;margin-top:4px;color:#15803d;font-size:11px;line-height:1.4;overflow-wrap:anywhere}
+    #${ROOT_ID} .asg-balance-preview.asg-preview-pending{color:#b54708}
+    #${ROOT_ID} .asg-save{width:100%;margin-top:5px;background:#1456d9;color:#fff;border-color:#1456d9;font-weight:600}
+    #${ROOT_ID} .asg-save:hover:not(:disabled){background:#0f46b6}
     #${ROOT_ID} .asg-log-details{margin-top:9px;border-top:1px solid #e4e7ec;padding-top:7px}
     #${ROOT_ID} .asg-log-actions{display:flex;justify-content:flex-end;margin-top:6px}
     #${ROOT_ID} .asg-logs{margin:6px 0 0;padding:0;list-style:none;max-height:150px;overflow:auto;border-top:1px solid #eef0f3}
@@ -511,19 +571,40 @@
           <div class="asg-recommend" data-field="recommend"><div class="asg-muted">正在读取监控数据...</div></div>
           <label for="asg-key-select">目标密钥</label>
           <select id="asg-key-select" data-field="key"></select>
+          <div class="asg-key-details" data-field="key-details" hidden>
+            <div class="asg-key-detail"><span>密钥名</span><strong data-key-detail="name"></strong></div>
+            <div class="asg-key-detail"><span>当前分组</span><strong data-key-detail="group"></strong></div>
+            <div class="asg-key-detail"><span>倍率</span><strong class="asg-key-metric" data-key-detail="multiplier"></strong></div>
+            <div class="asg-key-detail"><span>最新首 Token</span><strong class="asg-key-metric" data-key-detail="latency"></strong></div>
+          </div>
           <div class="asg-actions"><button data-action="refresh">检测</button><button data-action="switch" disabled>切换到推荐分组</button></div>
           <label class="asg-auto"><input type="checkbox" data-field="auto"> 自动切换（默认关闭）</label>
           <details class="asg-guide"><summary>快速开始</summary><ol><li>选择价格、平衡或速度模式。</li><li>选择目标密钥并点击“检测”。</li><li>确认推荐分组后点击切换；自动切换可在设置中开启。</li></ol></details>
-          <details><summary>设置</summary>
-            <div class="asg-grid">
-              <label title="可自行修改，0.1 表示 10%">最近10分钟最低可用率（默认10%）<input type="number" min="0" max="1" step="0.01" data-setting="minSuccess10m"></label>
-              <label>连续通过次数<input type="number" min="1" max="5" step="1" data-setting="consecutiveChecks"></label>
-              <label>检测间隔（秒）<input type="number" min="10" max="3600" step="1" data-setting="pollIntervalSeconds"></label>
-              <label>切换冷却（分钟）<input type="number" min="0" max="1440" step="1" data-setting="cooldownMinutes"></label>
-              <label>平衡价格范围（%）<input type="number" min="0" max="500" step="1" data-setting="balancePricePercent"></label>
+          <details class="asg-settings"><summary>设置</summary>
+            <div class="asg-settings-body">
+              <section class="asg-settings-section">
+                <div class="asg-settings-title">可靠性筛选</div>
+                <div class="asg-settings-grid">
+                  <label class="asg-setting-wide" title="可自行修改，0.1 表示 10%">最近10分钟最低可用率（默认10%）<input type="number" min="0" max="1" step="0.01" data-setting="minSuccess10m"></label>
+                  <label class="asg-setting-wide asg-auto"><input type="checkbox" data-setting="requireNoWarnings"> 排除监控警告</label>
+                </div>
+              </section>
+              <section class="asg-settings-section">
+                <div class="asg-settings-title">检测与切换</div>
+                <div class="asg-settings-grid">
+                  <label>连续通过次数<input type="number" min="1" max="5" step="1" data-setting="consecutiveChecks"></label>
+                  <label>检测间隔（秒）<input type="number" min="10" max="3600" step="1" data-setting="pollIntervalSeconds"></label>
+                  <label class="asg-setting-wide">切换冷却（分钟）<input type="number" min="0" max="1440" step="1" data-setting="cooldownMinutes"></label>
+                </div>
+              </section>
+              <section class="asg-settings-section">
+                <div class="asg-settings-title">平衡策略</div>
+                <div class="asg-settings-grid">
+                  <label class="asg-balance-setting">平衡价格范围（%）<input type="number" min="0" max="500" step="1" data-setting="balancePricePercent"><span class="asg-balance-preview" data-field="balance-preview" aria-live="polite"></span></label>
+                </div>
+              </section>
+              <button class="asg-save" data-action="save-settings">保存设置</button>
             </div>
-            <label class="asg-auto"><input type="checkbox" data-setting="requireNoWarnings"> 排除监控警告</label>
-            <button class="asg-save" data-action="save-settings">保存设置</button>
           </details>
           <details class="asg-log-details"><summary>使用日志</summary><div class="asg-log-actions"><button data-action="clear-logs">清空日志</button></div><ul class="asg-logs" data-field="logs"></ul></details>
           <ul class="asg-list" data-field="list"></ul>
@@ -555,6 +636,7 @@
       this.panel.querySelector('[data-field="key"]').addEventListener('change', (event) => {
         this.selectedKeyId = event.target.value || null;
         storageSet('selectedKeyId', this.selectedKeyId);
+        this.renderSelectedKeyDetails();
         this.renderActionState();
       });
       this.panel.querySelector('[data-field="mode"]').addEventListener('change', (event) => {
@@ -573,6 +655,9 @@
         this.log('info', event.target.checked ? '已开启自动切换' : '已关闭自动切换');
         this.refresh();
       });
+      this.panel.addEventListener('input', (event) => {
+        if (event.target.matches('[data-setting]')) this.renderBalancePreview();
+      });
     }
 
     setMinimized(value) {
@@ -590,6 +675,37 @@
       }
       this.panel.querySelector('[data-field="auto"]').checked = this.config.autoSwitch;
       this.panel.querySelector('[data-field="mode"]').value = this.config.mode;
+      this.renderBalancePreview();
+    }
+
+    renderBalancePreview() {
+      const preview = this.panel?.querySelector('[data-field="balance-preview"]');
+      const percentInput = this.panel?.querySelector('[data-setting="balancePricePercent"]');
+      if (!preview || !percentInput) return;
+      const rawPercent = percentInput.value.trim();
+      if (rawPercent === '' || !percentInput.checkValidity()) {
+        preview.textContent = '请输入 0–500 之间的百分比';
+        preview.classList.add('asg-preview-pending');
+        return;
+      }
+      const draft = { ...this.config };
+      for (const input of this.panel.querySelectorAll('[data-setting]')) {
+        draft[input.dataset.setting] = input.type === 'checkbox' ? input.checked : input.value;
+      }
+      const normalizedDraft = normalizeConfig(draft);
+      const info = getBalancePriceInfo(this.rows, normalizedDraft);
+      const hasUnsavedFilter = normalizedDraft.balancePricePercent !== this.config.balancePricePercent
+        || normalizedDraft.minSuccess10m !== this.config.minSuccess10m
+        || normalizedDraft.requireNoWarnings !== this.config.requireNoWarnings;
+      const suffix = hasUnsavedFilter ? ' · 未保存' : '';
+      if (!this.lastUpdated) {
+        preview.textContent = `当前输入 ${info.percent}% · 检测后显示预计上限${suffix}`;
+      } else if (info.minPrice === null) {
+        preview.textContent = `当前输入 ${info.percent}% · 当前条件下无可用分组${suffix}`;
+      } else {
+        preview.textContent = `当前输入 ${info.percent}% · 最低 ${formatMultiplier(info.minPrice)} · 预计上限 ${formatMultiplier(info.maxPrice)}${suffix}`;
+      }
+      preview.classList.toggle('asg-preview-pending', hasUnsavedFilter);
     }
 
     saveSettings() {
@@ -798,6 +914,15 @@
         metrics.className = 'asg-metrics';
         metrics.textContent = `10m ${formatPercent(winner.success10m)} · ${winner.recentSampleCount}次探测 · 首Token ${formatLatency(winner.latency)}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
         recommend.append(title, metrics);
+        if (this.config.mode === 'balance') {
+          const info = getBalancePriceInfo(this.rows, this.config);
+          if (info.minPrice !== null) {
+            const reason = document.createElement('div');
+            reason.className = 'asg-balance-reason';
+            reason.textContent = `范围内首 Token 最快 · 最低 ${formatMultiplier(info.minPrice)} · +${info.percent}% · 上限 ${formatMultiplier(info.maxPrice)}`;
+            recommend.appendChild(reason);
+          }
+        }
       }
       const keyInfo = this.authError || (this.keyCount !== null ? `已读取 ${this.keyCount} 个密钥` : '');
       this.setStatus(this.error || keyInfo || (this.lastUpdated ? `最近检测：${this.lastUpdated.toLocaleTimeString()}` : '准备检测'), Boolean(this.error || this.authError));
@@ -805,10 +930,12 @@
       this.renderCandidates();
       this.renderLogs();
       this.renderActionState();
+      this.renderBalancePreview();
     }
 
     renderKeys() {
       const select = this.panel.querySelector('[data-field="key"]');
+      const metricMap = buildGroupMetricMap(this.rows);
       select.replaceChildren();
       const placeholder = document.createElement('option');
       placeholder.value = '';
@@ -819,11 +946,27 @@
       for (const key of this.keys) {
         const option = document.createElement('option');
         option.value = key.id;
-        option.textContent = `${key.name} · ${key.groupName}`;
+        option.textContent = formatKeyOptionLabel(key, metricMap.get(key.groupId));
         option.selected = String(key.id) === String(this.selectedKeyId);
         select.appendChild(option);
       }
       select.disabled = this.keys.length === 0;
+      this.renderSelectedKeyDetails(metricMap);
+    }
+
+    renderSelectedKeyDetails(metricMap = buildGroupMetricMap(this.rows)) {
+      const details = this.panel?.querySelector('[data-field="key-details"]');
+      if (!details) return;
+      const key = this.selectedKey();
+      details.hidden = !key;
+      if (!key) return;
+      const metric = metricMap.get(key.groupId);
+      const multiplier = nonNegativeNumberOrNull(metric?.multiplier);
+      const latencyMs = nonNegativeNumberOrNull(metric?.latencyMs);
+      details.querySelector('[data-key-detail="name"]').textContent = key.name;
+      details.querySelector('[data-key-detail="group"]').textContent = key.groupName;
+      details.querySelector('[data-key-detail="multiplier"]').textContent = multiplier === null ? '暂无数据' : formatMultiplier(multiplier);
+      details.querySelector('[data-key-detail="latency"]').textContent = latencyMs === null ? '暂无数据' : formatLatency(latencyMs);
     }
 
     renderCandidates() {
@@ -994,10 +1137,13 @@
     GROUP_MODE_LABELS,
     normalizeConfig,
     normalizeGroupMode,
+    getBalancePriceInfo,
     rankCandidates,
     attachRecentAvailability,
     normalizeGroupName,
     buildGroupMultiplierMap,
+    buildGroupMetricMap,
+    formatKeyOptionLabel,
     formatMultiplier,
     getPageFeatures,
     createStabilityState,

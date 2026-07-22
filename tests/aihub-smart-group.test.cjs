@@ -93,6 +93,47 @@ test('normalizes adjustable AIHub mode settings', () => {
   assert.equal(core.normalizeConfig({ mode: 'unknown', balancePricePercent: 999 }).balancePricePercent, 500);
 });
 
+test('computes the balance price ceiling from the cheapest eligible group', () => {
+  const rows = [
+    { planType: 'eligible', group_id: 1, priceMultiplier: 0.04, available: true, successRates: { '10m': 1 }, warningReasons: [] },
+    { planType: 'faster', group_id: 2, priceMultiplier: 0.045, available: true, successRates: { '10m': 1 }, warningReasons: [] },
+    { planType: 'unavailable', group_id: 3, priceMultiplier: 0.001, available: false, successRates: { '10m': 1 }, warningReasons: [] },
+    { planType: 'low-success', group_id: 4, priceMultiplier: 0.01, available: true, successRates: { '10m': 0.05 }, warningReasons: [] },
+    { planType: 'warning', group_id: 5, priceMultiplier: 0.02, available: true, successRates: { '10m': 1 }, warningReasons: [{ type: 'unstable' }] },
+  ];
+
+  assert.deepEqual(core.getBalancePriceInfo(rows, {
+    ...core.DEFAULT_CONFIG,
+    mode: 'balance',
+    balancePricePercent: 20,
+  }), {
+    minPrice: 0.04,
+    percent: 20,
+    maxPrice: 0.048,
+  });
+});
+
+test('handles empty and boundary balance price previews without mutating saved settings', () => {
+  const savedConfig = Object.freeze({ ...core.DEFAULT_CONFIG, mode: 'price', balancePricePercent: 20 });
+  const rows = Object.freeze([
+    Object.freeze({ planType: 'eligible', group_id: 1, priceMultiplier: 0.125, available: true, successRates: { '10m': 1 }, warningReasons: [] }),
+  ]);
+
+  assert.deepEqual(core.getBalancePriceInfo([], savedConfig), {
+    minPrice: null,
+    percent: 20,
+    maxPrice: null,
+  });
+  assert.equal(core.getBalancePriceInfo(rows, { ...savedConfig, balancePricePercent: 0 }).maxPrice, 0.125);
+  assert.equal(core.getBalancePriceInfo(rows, { ...savedConfig, balancePricePercent: 500 }).maxPrice, 0.75);
+  assert.equal(core.formatMultiplier(core.getBalancePriceInfo(rows, {
+    ...savedConfig,
+    balancePricePercent: 12.5,
+  }).maxPrice), '×0.140625');
+  assert.equal(savedConfig.balancePricePercent, 20);
+  assert.equal(savedConfig.mode, 'price');
+});
+
 test('keeps bounded, sanitized runtime logs', () => {
   const logs = core.appendLogEntries([], {
     at: 1,
@@ -218,6 +259,35 @@ test('builds current multiplier lookup by normalized group name', () => {
   assert.equal(lookup.get('a004-k12/bugteam'), 0.04);
   assert.equal(lookup.get('a013-k12'), 0.01);
   assert.equal(lookup.has('invalid'), false);
+});
+
+test('maps current group metrics by group id without filtering unavailable rows', () => {
+  const metrics = core.buildGroupMetricMap([
+    { group_id: 14, planType: 'same-name', priceMultiplier: '0.04', firstTokenLatencyMs: '1141', available: false },
+    { group_id: 20, planType: 'same-name', priceMultiplier: 0.08, firstTokenLatencyMs: 320, available: true },
+    { group_id: 'invalid', priceMultiplier: 0.01, firstTokenLatencyMs: 10 },
+  ]);
+
+  assert.deepEqual(metrics.get(14), { multiplier: 0.04, latencyMs: 1141 });
+  assert.deepEqual(metrics.get(20), { multiplier: 0.08, latencyMs: 320 });
+  assert.equal(metrics.has('same-name'), false);
+  assert.equal(metrics.size, 2);
+});
+
+test('formats target key options with current group metrics and safe placeholders', () => {
+  const key = {
+    id: 7,
+    name: 'main',
+    groupId: 14,
+    groupName: 'A001-K12',
+    key: 'sk-must-not-appear',
+  };
+
+  assert.equal(core.formatKeyOptionLabel(key, { multiplier: 0.05, latencyMs: 1141 }), 'main · A001-K12 · ×0.05 · 首 Token 1141 ms');
+  assert.equal(core.formatKeyOptionLabel(key, null), 'main · A001-K12 · 倍率暂无数据 · 首 Token 暂无数据');
+  const invalid = core.formatKeyOptionLabel(key, { multiplier: Number.NaN, latencyMs: -1 });
+  assert.equal(invalid, 'main · A001-K12 · 倍率暂无数据 · 首 Token 暂无数据');
+  assert.equal(invalid.includes('sk-must-not-appear'), false);
 });
 
 test('formats usage multipliers without unnecessary zeroes', () => {
