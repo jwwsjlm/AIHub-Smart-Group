@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.5.3
+// @version      0.5.4
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.5.3';
+  const SCRIPT_VERSION = '0.5.4';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -627,8 +627,6 @@
     #${ROOT_ID} .asg-setting-wide{grid-column:1/-1}
     #${ROOT_ID} .asg-setting-compact{min-width:0}
     #${ROOT_ID} .asg-settings-grid .asg-auto{margin:1px 0 0}
-    #${ROOT_ID} .asg-setting-control-only{min-width:0;padding-top:16px}
-    #${ROOT_ID} .asg-setting-control-only input{margin-top:3px}
     #${ROOT_ID} .asg-balance-setting{grid-column:1/-1}
     #${ROOT_ID} .asg-balance-preview,#${ROOT_ID} .asg-balance-reason,#${ROOT_ID} .asg-setting-preview{display:block;margin-top:4px;color:#15803d;font-size:11px;line-height:1.4;overflow-wrap:anywhere}
     #${ROOT_ID} .asg-preview-pending{color:#b54708}
@@ -782,9 +780,9 @@
                 </div>
               </section>
               <section class="asg-settings-section">
-                <div class="asg-settings-head"><div class="asg-settings-title">检测与切换</div><label class="asg-settings-inline-label" for="asg-consecutive-checks-setting">连续通过次数</label></div>
+                <div class="asg-settings-title">检测与切换</div>
                 <div class="asg-settings-grid">
-                  <div class="asg-setting-control-only"><input id="asg-consecutive-checks-setting" type="number" min="1" max="5" step="1" data-setting="consecutiveChecks" aria-label="连续通过次数"></div>
+                  <label>连续通过次数<input type="number" min="1" max="5" step="1" data-setting="consecutiveChecks"></label>
                   <label>检测间隔（秒）<input type="number" min="10" max="3600" step="1" data-setting="pollIntervalSeconds"></label>
                   <label class="asg-setting-wide">切换冷却（分钟）<input type="number" min="0" max="1440" step="0.1" data-setting="cooldownMinutes"><span class="asg-setting-preview" data-field="cooldown-preview" aria-live="polite"></span></label>
                 </div>

@@ -222,4 +222,4 @@ node --test tests/*.test.cjs
 npx --yes eslint@9.39.2 aihub-smart-group.user.js scripts/check-repository.cjs tests/*.test.cjs
 ```
 
-当前版本：`0.5.3`
+当前版本：`0.5.4`
