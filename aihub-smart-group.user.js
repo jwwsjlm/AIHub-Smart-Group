@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.5.1
+// @version      0.5.2
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.5.1';
+  const SCRIPT_VERSION = '0.5.2';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -102,6 +102,18 @@
 
   function normalizeAvailabilityMode(value) {
     return value === 'successes' || value === 'consecutive' ? value : 'percent';
+  }
+
+  function getAvailabilityHint(config = DEFAULT_CONFIG) {
+    const normalized = normalizeConfig(config);
+    if (normalized.availabilityMode === 'successes') {
+      return `10分钟累计成功 ≥ ${normalized.minSuccessPoints10m}点`;
+    }
+    if (normalized.availabilityMode === 'consecutive') {
+      return `最新连续成功 ≥ ${normalized.minConsecutiveSuccesses10m}点`;
+    }
+    const percent = (normalized.minSuccess10m * 100).toFixed(1).replace(/\.0$/, '');
+    return `10分钟可用率 ≥ ${percent}%`;
   }
 
   function getBalanceAmount(payload) {
@@ -625,6 +637,9 @@
     #${ROOT_ID} .asg-setting-wide{grid-column:1/-1}
     #${ROOT_ID} .asg-setting-compact{min-width:0}
     #${ROOT_ID} .asg-settings-grid .asg-auto{margin:1px 0 0}
+    #${ROOT_ID} .asg-availability-aside{min-width:0;display:flex;flex-direction:column;justify-content:space-between;gap:4px;padding-top:1px}
+    #${ROOT_ID} .asg-availability-hint{color:#667085;font-size:10px;line-height:1.3;overflow-wrap:anywhere}
+    #${ROOT_ID} .asg-availability-aside .asg-auto{margin:0}
     #${ROOT_ID} .asg-balance-setting{grid-column:1/-1}
     #${ROOT_ID} .asg-balance-preview,#${ROOT_ID} .asg-balance-reason,#${ROOT_ID} .asg-setting-preview{display:block;margin-top:4px;color:#15803d;font-size:11px;line-height:1.4;overflow-wrap:anywhere}
     #${ROOT_ID} .asg-preview-pending{color:#b54708}
@@ -769,7 +784,7 @@
                 <div class="asg-settings-title">可靠性筛选</div>
                 <div class="asg-settings-grid">
                   <label class="asg-setting-compact">可用性判断方式<select data-setting="availabilityMode"><option value="percent">按可用率（百分比）</option><option value="successes">按成功监控点数</option><option value="consecutive">按连续成功点数</option></select></label>
-                  <label class="asg-setting-compact asg-auto"><input type="checkbox" data-setting="requireNoWarnings"> 排除监控警告</label>
+                  <div class="asg-availability-aside"><span class="asg-availability-hint" data-field="availability-hint" aria-live="polite"></span><label class="asg-auto"><input type="checkbox" data-setting="requireNoWarnings"> 排除监控警告</label></div>
                   <label class="asg-setting-wide" data-availability-setting="percent" title="可自行修改，0.1 表示 10%">最近10分钟最低可用率（默认10%）<input type="number" min="0" max="1" step="0.01" data-setting="minSuccess10m"></label>
                   <label class="asg-setting-wide" data-availability-setting="successes">最近10分钟至少成功监控点数<input type="number" min="1" max="60" step="1" data-setting="minSuccessPoints10m"></label>
                   <label class="asg-setting-wide" data-availability-setting="consecutive">连续成功监控点数<input type="number" min="1" max="60" step="1" data-setting="minConsecutiveSuccesses10m"></label>
@@ -918,9 +933,23 @@
     }
 
     renderSettingsPreviews() {
+      this.renderAvailabilityHint();
       this.renderBalancePreview();
       this.renderExcludedPreview();
       this.renderCooldownPreview();
+    }
+
+    renderAvailabilityHint() {
+      const hint = this.panel?.querySelector('[data-field="availability-hint"]');
+      if (!hint) return;
+      const draft = this.readDraftConfig();
+      hint.textContent = getAvailabilityHint(draft);
+      const activeValueChanged = draft.availabilityMode === 'successes'
+        ? draft.minSuccessPoints10m !== this.config.minSuccessPoints10m
+        : draft.availabilityMode === 'consecutive'
+          ? draft.minConsecutiveSuccesses10m !== this.config.minConsecutiveSuccesses10m
+          : draft.minSuccess10m !== this.config.minSuccess10m;
+      hint.classList.toggle('asg-preview-pending', draft.availabilityMode !== this.config.availabilityMode || activeValueChanged);
     }
 
     renderBalancePreview() {
@@ -1509,6 +1538,7 @@
     normalizeConfig,
     normalizeGroupMode,
     normalizeAvailabilityMode,
+    getAvailabilityHint,
     normalizePanelTab,
     getBalanceAmount,
     formatBalance,

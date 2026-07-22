@@ -43,6 +43,12 @@ test('normalizes selectable availability criteria', () => {
   assert.equal(core.normalizeConfig({ availabilityMode: 'unknown' }).availabilityMode, 'percent');
 });
 
+test('formats compact availability hints for the selected criterion', () => {
+  assert.equal(core.getAvailabilityHint({ availabilityMode: 'percent', minSuccess10m: 0.1 }), '10分钟可用率 ≥ 10%');
+  assert.equal(core.getAvailabilityHint({ availabilityMode: 'successes', minSuccessPoints10m: 1 }), '10分钟累计成功 ≥ 1点');
+  assert.equal(core.getAvailabilityHint({ availabilityMode: 'consecutive', minConsecutiveSuccesses10m: 2 }), '最新连续成功 ≥ 2点');
+});
+
 test('normalizes the monitor freshness limit', () => {
   assert.equal(core.DEFAULT_CONFIG.maxMonitorAgeSeconds, 600);
   assert.equal(core.normalizeConfig({ maxMonitorAgeSeconds: '240' }).maxMonitorAgeSeconds, 600);
