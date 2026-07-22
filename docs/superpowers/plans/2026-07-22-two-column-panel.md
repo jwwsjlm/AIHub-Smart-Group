@@ -120,3 +120,11 @@ Stage only `README.md`, `aihub-smart-group.user.js`, and `tests/aihub-smart-grou
 ```powershell
 git commit -m "feat: add two-column control panel"
 ```
+
+### Scope Amendment: Group Exclusions and Fractional Cooldown
+
+The release also includes two settings requested during implementation:
+
+- `excludedGroupKeywords` stores normalized, pipe-separated lowercase keywords. Candidate names are compared case-insensitively with substring matching before any mode ranking.
+- `cooldownMinutes` remains bounded from `0` to `1440` but is no longer rounded; the UI uses `0.1` steps so `0.1` means six seconds.
+- Tests cover normalization, candidate exclusion, and the exact fractional cooldown boundary.
