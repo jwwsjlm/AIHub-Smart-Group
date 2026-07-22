@@ -26,10 +26,21 @@ test('normalizes thresholds and safety settings', () => {
 });
 
 test('normalizes the monitor freshness limit', () => {
-  assert.equal(core.DEFAULT_CONFIG.maxMonitorAgeSeconds, 180);
+  assert.equal(core.DEFAULT_CONFIG.maxMonitorAgeSeconds, 600);
   assert.equal(core.normalizeConfig({ maxMonitorAgeSeconds: '240' }).maxMonitorAgeSeconds, 240);
   assert.equal(core.normalizeConfig({ maxMonitorAgeSeconds: 1 }).maxMonitorAgeSeconds, 30);
   assert.equal(core.normalizeConfig({ maxMonitorAgeSeconds: 9999 }).maxMonitorAgeSeconds, 3600);
+});
+
+test('uses the latest actual monitor sample as the freshness timestamp', () => {
+  assert.equal(core.getLatestMonitorSampleAt({
+    generatedAt: '2026-07-22T05:10:00Z',
+    seriesByApiId: {
+      one: [[Date.parse('2026-07-22T05:04:00Z'), 1], [Date.parse('2026-07-22T05:09:00Z'), 0]],
+      two: [[Date.parse('2026-07-22T05:08:00Z'), 1]],
+    },
+  }), Date.parse('2026-07-22T05:09:00Z'));
+  assert.equal(core.getLatestMonitorSampleAt({ generatedAt: '2026-07-22T05:10:00Z', seriesByApiId: {} }), null);
 });
 
 test('preserves decimal cooldowns and normalizes excluded group keywords', () => {

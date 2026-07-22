@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.4.6
+// @version      0.4.7
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.4.6';
+  const SCRIPT_VERSION = '0.4.7';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -45,7 +45,7 @@
     mode: 'price',
     balanceMaxPrice: 0.1,
     excludedGroupKeywords: '',
-    maxMonitorAgeSeconds: 180,
+    maxMonitorAgeSeconds: 600,
   });
 
   function numberOr(value, fallback) {
@@ -201,6 +201,17 @@
       stale: ageMs > Math.max(0, Number(maxAgeSeconds) || 0) * 1000,
       label: formatRelativeAge(ageMs),
     };
+  }
+
+  function getLatestMonitorSampleAt(seriesPayload) {
+    let latest = null;
+    for (const samples of Object.values(seriesPayload?.seriesByApiId || {})) {
+      for (const sample of Array.isArray(samples) ? samples : []) {
+        const timestamp = Number(sample?.[0]);
+        if (Number.isFinite(timestamp) && (latest === null || timestamp > latest)) latest = timestamp;
+      }
+    }
+    return latest;
   }
 
   function formatRemainingTime(remainingMs) {
@@ -569,6 +580,7 @@
     #${ROOT_ID} .asg-settings-grid label{margin:0}
     #${ROOT_ID} .asg-settings-grid input[type=number],#${ROOT_ID} .asg-settings-grid input[type=text]{margin-top:3px}
     #${ROOT_ID} .asg-setting-wide{grid-column:1/-1}
+    #${ROOT_ID} .asg-setting-compact{min-width:0}
     #${ROOT_ID} .asg-settings-grid .asg-auto{margin:1px 0 0}
     #${ROOT_ID} .asg-balance-setting{grid-column:1/-1}
     #${ROOT_ID} .asg-balance-preview,#${ROOT_ID} .asg-balance-reason,#${ROOT_ID} .asg-setting-preview{display:block;margin-top:4px;color:#15803d;font-size:11px;line-height:1.4;overflow-wrap:anywhere}
@@ -710,11 +722,11 @@
               <section class="asg-settings-section">
                 <div class="asg-settings-title">可靠性筛选</div>
                 <div class="asg-settings-grid">
-                  <label class="asg-setting-wide" title="可自行修改，0.1 表示 10%">最近10分钟最低可用率（默认10%）<input type="number" min="0" max="1" step="0.01" data-setting="minSuccess10m"></label>
-                  <label class="asg-setting-wide asg-auto"><input type="checkbox" data-setting="requireNoWarnings"> 排除监控警告</label>
+                  <label class="asg-setting-compact" title="可自行修改，0.1 表示 10%">最近10分钟最低可用率（默认10%）<input type="number" min="0" max="1" step="0.01" data-setting="minSuccess10m"></label>
+                  <label class="asg-setting-compact asg-auto"><input type="checkbox" data-setting="requireNoWarnings"> 排除监控警告</label>
                   <label class="asg-setting-wide" title="名称包含任一关键词的分组不会参与推荐或切换">排除分组关键词（使用 | 分隔）<input type="text" data-setting="excludedGroupKeywords" placeholder="例如 free|unstable"></label>
                   <span class="asg-setting-preview asg-setting-wide" data-field="excluded-preview" aria-live="polite"></span>
-                  <label class="asg-setting-wide" title="数据超过此时间仍未更新时禁止手动和自动切换">监控数据最大年龄（秒）<input type="number" min="30" max="3600" step="10" data-setting="maxMonitorAgeSeconds"></label>
+                  <label class="asg-setting-compact" title="超过此时间没有新的监控样本时暂停切换">数据过期保护（秒）<input type="number" min="30" max="3600" step="10" data-setting="maxMonitorAgeSeconds"><span class="asg-setting-preview">默认 600 秒 = 10 分钟</span></label>
                 </div>
               </section>
               <section class="asg-settings-section">
@@ -996,7 +1008,7 @@
         }
         this.lastAuthLogSignature = this.authError;
         this.rows = attachRecentAvailability(summary?.apis, series);
-        this.monitorGeneratedAt = series?.generatedAt || summary?.generatedAt || null;
+        this.monitorGeneratedAt = getLatestMonitorSampleAt(series) || series?.generatedAt || summary?.generatedAt || null;
         this.updateMonitorFreshness();
         this.candidateDiagnostics = analyzeCandidates(this.rows, this.config);
         this.ranked = rankCandidates(this.rows, this.config);
@@ -1398,6 +1410,7 @@
     analyzeCandidates,
     rankCandidates,
     getMonitorFreshness,
+    getLatestMonitorSampleAt,
     getCooldownInfo,
     attachRecentAvailability,
     normalizeGroupName,
