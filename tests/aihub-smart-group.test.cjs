@@ -1,7 +1,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 
 const core = require('../aihub-smart-group.user.js');
+const userscriptSource = fs.readFileSync(path.join(__dirname, '..', 'aihub-smart-group.user.js'), 'utf8');
+
+test('hides inactive availability settings despite the shared label display rule', () => {
+  assert.match(userscriptSource, /\[data-availability-setting\]\[hidden\]\{display:none !important\}/);
+});
 
 test('defaults the adjustable 10m availability threshold to 10 percent', () => {
   assert.equal(core.DEFAULT_CONFIG.minSuccess10m, 0.1);

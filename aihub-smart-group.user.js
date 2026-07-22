@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.5.0
+// @version      0.5.1
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.5.0';
+  const SCRIPT_VERSION = '0.5.1';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -594,6 +594,7 @@
     #${ROOT_ID} .asg-monitor-age{margin-top:4px;color:#15803d;font-size:11px}
     #${ROOT_ID} .asg-monitor-age.asg-stale{color:#b42318;font-weight:600}
     #${ROOT_ID} label{display:block;color:#475467;font-size:12px;margin:8px 0 4px}
+    #${ROOT_ID} [data-availability-setting][hidden]{display:none !important}
     #${ROOT_ID} select,#${ROOT_ID} input[type=number],#${ROOT_ID} input[type=text]{width:100%;border:1px solid #cfd5df;border-radius:6px;padding:6px;background:#fff;color:#172033;font:inherit}
     #${ROOT_ID} .asg-key-details[hidden]{display:none}
     #${ROOT_ID} .asg-key-details{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px 10px;margin-top:5px;padding:6px 0 2px;border-bottom:1px solid #eef0f3}
