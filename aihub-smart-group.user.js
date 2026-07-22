@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.4.4
+// @version      0.4.5
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.4.4';
+  const SCRIPT_VERSION = '0.4.5';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -44,6 +44,7 @@
     autoSwitch: false,
     mode: 'price',
     balanceMaxPrice: 0.1,
+    excludedGroupKeywords: '',
   });
 
   function numberOr(value, fallback) {
@@ -55,6 +56,19 @@
     return Math.min(max, Math.max(min, value));
   }
 
+  function normalizeExcludedGroupKeywords(value) {
+    const source = Array.isArray(value) ? value.join('|') : String(value ?? '');
+    const seen = new Set();
+    return source.split('|')
+      .map((keyword) => keyword.trim().toLocaleLowerCase())
+      .filter((keyword) => {
+        if (!keyword || seen.has(keyword)) return false;
+        seen.add(keyword);
+        return true;
+      })
+      .join('|');
+  }
+
   function normalizeConfig(input = {}) {
     const source = input && typeof input === 'object' ? input : {};
     return {
@@ -62,10 +76,11 @@
       requireNoWarnings: source.requireNoWarnings !== false,
       consecutiveChecks: Math.round(clamp(numberOr(source.consecutiveChecks, DEFAULT_CONFIG.consecutiveChecks), 1, 5)),
       pollIntervalSeconds: Math.round(clamp(numberOr(source.pollIntervalSeconds, DEFAULT_CONFIG.pollIntervalSeconds), 10, 3600)),
-      cooldownMinutes: Math.round(clamp(numberOr(source.cooldownMinutes, DEFAULT_CONFIG.cooldownMinutes), 0, 1440)),
+      cooldownMinutes: clamp(numberOr(source.cooldownMinutes, DEFAULT_CONFIG.cooldownMinutes), 0, 1440),
       autoSwitch: source.autoSwitch === true,
       mode: normalizeGroupMode(source.mode),
       balanceMaxPrice: clamp(numberOr(source.balanceMaxPrice, DEFAULT_CONFIG.balanceMaxPrice), 0, 1000),
+      excludedGroupKeywords: normalizeExcludedGroupKeywords(source.excludedGroupKeywords),
     };
   }
 
@@ -73,16 +88,23 @@
     return Object.prototype.hasOwnProperty.call(GROUP_MODE_LABELS, value) ? value : 'price';
   }
 
+  function normalizePanelTab(value) {
+    return value === 'logs' ? 'logs' : 'settings';
+  }
+
   function getEligibleCandidates(rows, normalizedConfig) {
+    const excludedKeywords = normalizedConfig.excludedGroupKeywords.split('|').filter(Boolean);
     return (Array.isArray(rows) ? rows : [])
       .filter((row) => {
         if (!row || row.enabled === false || row.available !== true) return false;
         const groupId = Number(row.group_id);
         const price = Number(row.priceMultiplier);
         const success10m = Number(row.successRates?.['10m']);
+        const groupName = String(row.planType || row.name || `Group ${row.group_id}`).toLocaleLowerCase();
         if (!Number.isInteger(groupId) || groupId <= 0 || !Number.isFinite(price) || price < 0) return false;
         if (!Number.isFinite(success10m) || success10m < normalizedConfig.minSuccess10m) return false;
         if (normalizedConfig.requireNoWarnings && Array.isArray(row.warningReasons) && row.warningReasons.length > 0) return false;
+        if (excludedKeywords.some((keyword) => groupName.includes(keyword))) return false;
         return true;
       })
       .map((row) => ({
@@ -408,23 +430,25 @@
   }
 
   const STYLE = `
-    #${ROOT_ID}{position:fixed;right:16px;bottom:16px;z-index:2147483647;width:340px;max-width:calc(100vw - 32px);color:#172033;background:#fff;border:1px solid #d6dbe5;border-radius:8px;box-shadow:0 8px 30px rgba(16,24,40,.18);font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    #${ROOT_ID}{position:fixed;right:16px;bottom:16px;z-index:2147483647;display:flex;flex-direction:column;width:680px;height:min(620px,calc(100vh - 32px));max-width:calc(100vw - 32px);color:#172033;background:#fff;border:1px solid #d6dbe5;border-radius:8px;box-shadow:0 8px 30px rgba(16,24,40,.18);font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
     #${ROOT_ID}[hidden]{display:none}
     #${ROOT_ID} *{box-sizing:border-box}
-    #${ROOT_ID} .asg-head{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #e4e7ec}
+    #${ROOT_ID} .asg-head{display:flex;flex:none;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #e4e7ec}
     #${ROOT_ID} .asg-head strong{font-size:14px}
     #${ROOT_ID} button{font:inherit;cursor:pointer;border:1px solid #cfd5df;border-radius:6px;background:#fff;color:#172033;padding:5px 9px}
     #${ROOT_ID} button:hover:not(:disabled){background:#f3f5f8}
     #${ROOT_ID} button:disabled{cursor:not-allowed;opacity:.5}
     #${ROOT_ID} .asg-icon{border:0;padding:2px 5px;font-size:18px;line-height:1}
-    #${ROOT_ID} .asg-body{padding:10px 12px}
+    #${ROOT_ID} .asg-body{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);flex:1;min-height:0;overflow:hidden}
+    #${ROOT_ID} .asg-main-column,#${ROOT_ID} .asg-side-column{min-width:0;min-height:0;overflow:auto;padding:10px 12px}
+    #${ROOT_ID} .asg-side-column{border-left:1px solid #e4e7ec;background:#fbfcfe}
     #${ROOT_ID} .asg-status{color:#667085;font-size:12px;margin-bottom:8px}
     #${ROOT_ID} .asg-recommend{padding:9px;background:#f4f8ff;border:1px solid #cfe0ff;border-radius:6px;margin:9px 0}
     #${ROOT_ID} .asg-recommend strong{font-size:15px}
     #${ROOT_ID} .asg-muted{color:#667085}
     #${ROOT_ID} .asg-metrics{display:flex;flex-wrap:wrap;gap:6px 12px;color:#475467;font-size:12px;margin-top:4px}
     #${ROOT_ID} label{display:block;color:#475467;font-size:12px;margin:8px 0 4px}
-    #${ROOT_ID} select,#${ROOT_ID} input[type=number]{width:100%;border:1px solid #cfd5df;border-radius:6px;padding:6px;background:#fff;color:#172033;font:inherit}
+    #${ROOT_ID} select,#${ROOT_ID} input[type=number],#${ROOT_ID} input[type=text]{width:100%;border:1px solid #cfd5df;border-radius:6px;padding:6px;background:#fff;color:#172033;font:inherit}
     #${ROOT_ID} .asg-key-details[hidden]{display:none}
     #${ROOT_ID} .asg-key-details{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px 10px;margin-top:5px;padding:6px 0 2px;border-bottom:1px solid #eef0f3}
     #${ROOT_ID} .asg-key-detail{min-width:0}
@@ -440,13 +464,17 @@
     #${ROOT_ID} .asg-guide ol{margin:6px 0 0;padding-left:20px}
     #${ROOT_ID} details{margin-top:9px;border-top:1px solid #e4e7ec;padding-top:7px}
     #${ROOT_ID} summary{cursor:pointer;color:#475467}
+    #${ROOT_ID} .asg-side-tabs{position:sticky;top:-10px;z-index:1;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:4px;margin:-10px -12px 0;padding:10px 12px 8px;background:#fbfcfe;border-bottom:1px solid #e4e7ec}
+    #${ROOT_ID} .asg-side-tab{border-color:transparent;background:transparent;color:#667085;font-weight:600}
+    #${ROOT_ID} .asg-side-tab[aria-selected=true]{border-color:#b8cff9;background:#eaf1ff;color:#1456d9}
+    #${ROOT_ID} .asg-side-view[hidden]{display:none}
     #${ROOT_ID} .asg-settings-body{margin-top:7px}
     #${ROOT_ID} .asg-settings-section{padding:7px 0}
     #${ROOT_ID} .asg-settings-section+.asg-settings-section{border-top:1px solid #eef0f3}
     #${ROOT_ID} .asg-settings-title{margin-bottom:6px;color:#344054;font-size:11px;font-weight:600}
     #${ROOT_ID} .asg-settings-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:7px 9px}
     #${ROOT_ID} .asg-settings-grid label{margin:0}
-    #${ROOT_ID} .asg-settings-grid input[type=number]{margin-top:3px}
+    #${ROOT_ID} .asg-settings-grid input[type=number],#${ROOT_ID} .asg-settings-grid input[type=text]{margin-top:3px}
     #${ROOT_ID} .asg-setting-wide{grid-column:1/-1}
     #${ROOT_ID} .asg-settings-grid .asg-auto{margin:1px 0 0}
     #${ROOT_ID} .asg-balance-setting{grid-column:1/-1}
@@ -454,9 +482,8 @@
     #${ROOT_ID} .asg-balance-preview.asg-preview-pending{color:#b54708}
     #${ROOT_ID} .asg-save{width:100%;margin-top:5px;background:#1456d9;color:#fff;border-color:#1456d9;font-weight:600}
     #${ROOT_ID} .asg-save:hover:not(:disabled){background:#0f46b6}
-    #${ROOT_ID} .asg-log-details{margin-top:9px;border-top:1px solid #e4e7ec;padding-top:7px}
-    #${ROOT_ID} .asg-log-actions{display:flex;justify-content:flex-end;margin-top:6px}
-    #${ROOT_ID} .asg-logs{margin:6px 0 0;padding:0;list-style:none;max-height:150px;overflow:auto;border-top:1px solid #eef0f3}
+    #${ROOT_ID} .asg-log-actions{display:flex;justify-content:flex-end;margin-top:7px}
+    #${ROOT_ID} .asg-logs{margin:6px 0 0;padding:0;list-style:none;border-top:1px solid #eef0f3}
     #${ROOT_ID} .asg-logs li{padding:5px 0;border-bottom:1px solid #eef0f3;font-size:11px;overflow-wrap:anywhere}
     #${ROOT_ID} .asg-logs .asg-log-error{color:#b42318}
     #${ROOT_ID} .asg-list{margin:8px 0 0;padding:0;list-style:none;max-height:132px;overflow:auto;border-top:1px solid #eef0f3}
@@ -466,6 +493,13 @@
     #${TOGGLE_ID}{position:fixed;right:16px;bottom:16px;z-index:2147483647;width:42px;height:42px;padding:0;border:1px solid #1456d9;border-radius:50%;background:#1456d9;color:#fff;box-shadow:0 8px 24px rgba(16,24,40,.2);font:600 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;cursor:pointer}
     #${TOGGLE_ID}[hidden]{display:none}
     #${TOGGLE_ID}:hover{background:#0f46b6}
+    @media (max-width:759px){
+      #${ROOT_ID}{width:340px}
+      #${ROOT_ID} .asg-body{grid-template-columns:minmax(0,1fr);overflow:auto}
+      #${ROOT_ID} .asg-main-column,#${ROOT_ID} .asg-side-column{overflow:visible}
+      #${ROOT_ID} .asg-side-column{border-top:1px solid #e4e7ec;border-left:0}
+      #${ROOT_ID} .asg-side-tabs{position:static}
+    }
   `;
 
   const USAGE_STYLE = `
@@ -504,6 +538,7 @@
       this.authError = '';
       this.keyCount = null;
       this.minimized = storageGet('minimized', false) === true;
+      this.sideTab = 'settings';
       this.timer = null;
       this.panel = null;
       this.toggleButton = null;
@@ -546,28 +581,37 @@
       panel.innerHTML = `
         <div class="asg-head"><strong>AIHub 智能分组 v${SCRIPT_VERSION}</strong><button class="asg-icon" data-action="minimize" title="最小化">−</button></div>
         <div class="asg-body">
-          <div class="asg-status" data-field="status">准备检测</div>
-          <label for="asg-mode-select">模式</label>
-          <select id="asg-mode-select" data-field="mode"><option value="price">价格（最低价格）</option><option value="balance">平衡（倍率上限内首 Token 最快）</option><option value="speed">速度（最快首字）</option></select>
-          <div class="asg-recommend" data-field="recommend"><div class="asg-muted">正在读取监控数据...</div></div>
-          <label for="asg-key-select">目标密钥</label>
-          <select id="asg-key-select" data-field="key"></select>
-          <div class="asg-key-details" data-field="key-details" hidden>
-            <div class="asg-key-detail"><span>密钥名</span><strong data-key-detail="name"></strong></div>
-            <div class="asg-key-detail"><span>当前分组</span><strong data-key-detail="group"></strong></div>
-            <div class="asg-key-detail"><span>倍率</span><strong class="asg-key-metric" data-key-detail="multiplier"></strong></div>
-            <div class="asg-key-detail"><span>最新首 Token</span><strong class="asg-key-metric" data-key-detail="latency"></strong></div>
+          <div class="asg-main-column">
+            <div class="asg-status" data-field="status">准备检测</div>
+            <label for="asg-mode-select">模式</label>
+            <select id="asg-mode-select" data-field="mode"><option value="price">价格（最低价格）</option><option value="balance">平衡（倍率上限内首 Token 最快）</option><option value="speed">速度（最快首字）</option></select>
+            <div class="asg-recommend" data-field="recommend"><div class="asg-muted">正在读取监控数据...</div></div>
+            <label for="asg-key-select">目标密钥</label>
+            <select id="asg-key-select" data-field="key"></select>
+            <div class="asg-key-details" data-field="key-details" hidden>
+              <div class="asg-key-detail"><span>密钥名</span><strong data-key-detail="name"></strong></div>
+              <div class="asg-key-detail"><span>当前分组</span><strong data-key-detail="group"></strong></div>
+              <div class="asg-key-detail"><span>倍率</span><strong class="asg-key-metric" data-key-detail="multiplier"></strong></div>
+              <div class="asg-key-detail"><span>最新首 Token</span><strong class="asg-key-metric" data-key-detail="latency"></strong></div>
+            </div>
+            <div class="asg-actions"><button data-action="refresh">检测</button><button data-action="switch" disabled>切换到推荐分组</button></div>
+            <label class="asg-auto"><input type="checkbox" data-field="auto"> 自动切换（默认关闭）</label>
+            <details class="asg-guide"><summary>快速开始</summary><ol><li>选择价格、平衡或速度模式。</li><li>选择目标密钥并点击“检测”。</li><li>确认推荐分组后点击切换；自动切换可在设置中开启。</li></ol></details>
+            <ul class="asg-list" data-field="list"></ul>
           </div>
-          <div class="asg-actions"><button data-action="refresh">检测</button><button data-action="switch" disabled>切换到推荐分组</button></div>
-          <label class="asg-auto"><input type="checkbox" data-field="auto"> 自动切换（默认关闭）</label>
-          <details class="asg-guide"><summary>快速开始</summary><ol><li>选择价格、平衡或速度模式。</li><li>选择目标密钥并点击“检测”。</li><li>确认推荐分组后点击切换；自动切换可在设置中开启。</li></ol></details>
-          <details class="asg-settings"><summary>设置</summary>
-            <div class="asg-settings-body">
+          <aside class="asg-side-column" aria-label="设置与日志">
+            <div class="asg-side-tabs" role="tablist" aria-label="面板工具">
+              <button type="button" class="asg-side-tab" role="tab" id="asg-settings-tab" aria-controls="asg-settings-view" aria-selected="true" data-panel-tab="settings">设置</button>
+              <button type="button" class="asg-side-tab" role="tab" id="asg-logs-tab" aria-controls="asg-logs-view" aria-selected="false" data-panel-tab="logs">日志</button>
+            </div>
+            <section class="asg-side-view" id="asg-settings-view" role="tabpanel" aria-labelledby="asg-settings-tab" data-panel-view="settings">
+              <div class="asg-settings-body">
               <section class="asg-settings-section">
                 <div class="asg-settings-title">可靠性筛选</div>
                 <div class="asg-settings-grid">
                   <label class="asg-setting-wide" title="可自行修改，0.1 表示 10%">最近10分钟最低可用率（默认10%）<input type="number" min="0" max="1" step="0.01" data-setting="minSuccess10m"></label>
                   <label class="asg-setting-wide asg-auto"><input type="checkbox" data-setting="requireNoWarnings"> 排除监控警告</label>
+                  <label class="asg-setting-wide" title="名称包含任一关键词的分组不会参与推荐或切换">排除分组关键词（使用 | 分隔）<input type="text" data-setting="excludedGroupKeywords" placeholder="例如 free|unstable"></label>
                 </div>
               </section>
               <section class="asg-settings-section">
@@ -575,7 +619,7 @@
                 <div class="asg-settings-grid">
                   <label>连续通过次数<input type="number" min="1" max="5" step="1" data-setting="consecutiveChecks"></label>
                   <label>检测间隔（秒）<input type="number" min="10" max="3600" step="1" data-setting="pollIntervalSeconds"></label>
-                  <label class="asg-setting-wide">切换冷却（分钟）<input type="number" min="0" max="1440" step="1" data-setting="cooldownMinutes"></label>
+                  <label class="asg-setting-wide">切换冷却（分钟）<input type="number" min="0" max="1440" step="0.1" data-setting="cooldownMinutes"></label>
                 </div>
               </section>
               <section class="asg-settings-section">
@@ -585,10 +629,13 @@
                 </div>
               </section>
               <button class="asg-save" data-action="save-settings">保存设置</button>
-            </div>
-          </details>
-          <details class="asg-log-details"><summary>使用日志</summary><div class="asg-log-actions"><button data-action="clear-logs">清空日志</button></div><ul class="asg-logs" data-field="logs"></ul></details>
-          <ul class="asg-list" data-field="list"></ul>
+              </div>
+            </section>
+            <section class="asg-side-view" id="asg-logs-view" role="tabpanel" aria-labelledby="asg-logs-tab" data-panel-view="logs" hidden>
+              <div class="asg-log-actions"><button data-action="clear-logs">清空日志</button></div>
+              <ul class="asg-logs" data-field="logs"></ul>
+            </section>
+          </aside>
         </div>`;
       document.body.appendChild(panel);
       this.panel = panel;
@@ -600,18 +647,31 @@
       toggle.setAttribute('aria-label', '打开 AIHub 智能分组');
       document.body.appendChild(toggle);
       this.toggleButton = toggle;
+      this.setSideTab(this.sideTab);
       this.syncSettingsInputs();
       this.setMinimized(this.minimized);
     }
 
     bindEvents() {
       this.panel.addEventListener('click', (event) => {
+        const panelTab = event.target.closest('[data-panel-tab]')?.dataset.panelTab;
+        if (panelTab) this.setSideTab(panelTab);
         const action = event.target.closest('[data-action]')?.dataset.action;
         if (action === 'minimize') this.setMinimized(true);
         if (action === 'refresh') this.refresh(true);
         if (action === 'switch') this.switchToRecommendation(false);
         if (action === 'save-settings') this.saveSettings();
         if (action === 'clear-logs') this.clearLogs();
+      });
+      this.panel.querySelector('[role="tablist"]').addEventListener('keydown', (event) => {
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+        event.preventDefault();
+        const tabs = [...this.panel.querySelectorAll('[data-panel-tab]')];
+        const currentIndex = tabs.indexOf(document.activeElement);
+        const direction = event.key === 'ArrowRight' ? 1 : -1;
+        const nextTab = tabs[(currentIndex + direction + tabs.length) % tabs.length];
+        this.setSideTab(nextTab.dataset.panelTab);
+        nextTab.focus();
       });
       this.toggleButton.addEventListener('click', () => this.setMinimized(false));
       this.panel.querySelector('[data-field="key"]').addEventListener('change', (event) => {
@@ -648,6 +708,18 @@
       storageSet('minimized', this.minimized);
     }
 
+    setSideTab(value) {
+      this.sideTab = normalizePanelTab(value);
+      for (const tab of this.panel?.querySelectorAll('[data-panel-tab]') || []) {
+        const selected = tab.dataset.panelTab === this.sideTab;
+        tab.setAttribute('aria-selected', String(selected));
+        tab.tabIndex = selected ? 0 : -1;
+      }
+      for (const view of this.panel?.querySelectorAll('[data-panel-view]') || []) {
+        view.hidden = view.dataset.panelView !== this.sideTab;
+      }
+    }
+
     syncSettingsInputs() {
       for (const input of this.panel.querySelectorAll('[data-setting]')) {
         const key = input.dataset.setting;
@@ -678,7 +750,8 @@
         .filter((candidate) => candidate.price <= normalizedDraft.balanceMaxPrice).length;
       const hasUnsavedFilter = normalizedDraft.balanceMaxPrice !== this.config.balanceMaxPrice
         || normalizedDraft.minSuccess10m !== this.config.minSuccess10m
-        || normalizedDraft.requireNoWarnings !== this.config.requireNoWarnings;
+        || normalizedDraft.requireNoWarnings !== this.config.requireNoWarnings
+        || normalizedDraft.excludedGroupKeywords !== this.config.excludedGroupKeywords;
       const suffix = hasUnsavedFilter ? ' · 未保存' : '';
       const limit = formatMultiplier(normalizedDraft.balanceMaxPrice);
       if (!this.lastUpdated) {
@@ -1119,6 +1192,7 @@
     GROUP_MODE_LABELS,
     normalizeConfig,
     normalizeGroupMode,
+    normalizePanelTab,
     rankCandidates,
     attachRecentAvailability,
     normalizeGroupName,

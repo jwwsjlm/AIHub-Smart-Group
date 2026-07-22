@@ -25,6 +25,13 @@ test('normalizes thresholds and safety settings', () => {
   assert.equal(config.requireNoWarnings, false);
 });
 
+test('preserves decimal cooldowns and normalizes excluded group keywords', () => {
+  const config = core.normalizeConfig({ cooldownMinutes: '0.1', excludedGroupKeywords: ' free | Test |free ' });
+
+  assert.equal(config.cooldownMinutes, 0.1);
+  assert.equal(config.excludedGroupKeywords, 'free|test');
+});
+
 test('filters and orders eligible monitor rows by recent availability then price', () => {
   const rows = [
     { planType: 'slow-cheap', group_id: 3, priceMultiplier: 0.03, available: true, successRates: { '10m': 1, '24h': 0.01 }, firstTokenLatencyMs: 3000, warningReasons: [] },
@@ -37,6 +44,18 @@ test('filters and orders eligible monitor rows by recent availability then price
   const ranked = core.rankCandidates(rows, core.DEFAULT_CONFIG);
 
   assert.deepEqual(ranked.map((row) => row.planType), ['slow-cheap', 'best']);
+});
+
+test('excludes groups whose names contain configured keywords', () => {
+  const rows = [
+    { planType: 'free-fast', group_id: 1, priceMultiplier: 0.01, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 50, warningReasons: [] },
+    { planType: 'Paid-Standard', group_id: 2, priceMultiplier: 0.02, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 100, warningReasons: [] },
+    { planType: 'premium', group_id: 3, priceMultiplier: 0.03, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 150, warningReasons: [] },
+  ];
+
+  const ranked = core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, excludedGroupKeywords: 'free|PREMIUM' });
+
+  assert.deepEqual(ranked.map((row) => row.planType), ['Paid-Standard']);
 });
 
 test('uses reliability and latency as deterministic tie breakers', () => {
@@ -94,6 +113,13 @@ test('normalizes adjustable AIHub mode settings', () => {
   assert.equal(core.normalizeConfig({ mode: 'unknown', balanceMaxPrice: 9999 }).balanceMaxPrice, 1000);
 });
 
+test('normalizes the side panel tab to settings or logs', () => {
+  assert.equal(core.normalizePanelTab('settings'), 'settings');
+  assert.equal(core.normalizePanelTab('logs'), 'logs');
+  assert.equal(core.normalizePanelTab('unknown'), 'settings');
+  assert.equal(core.normalizePanelTab(), 'settings');
+});
+
 test('ignores groups above the absolute balance price limit', () => {
   const rows = [
     { planType: 'cheap', group_id: 1, priceMultiplier: 0.04, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 500, warningReasons: [] },
@@ -149,6 +175,12 @@ test('blocks auto switching during cooldown and when already on target', () => {
   assert.equal(core.canAutoSwitch({ now: 1_000, lastSwitchAt: 500, currentGroupId: 1, targetGroupId: 2, stable: true, config }), false);
   assert.equal(core.canAutoSwitch({ now: 601_000, lastSwitchAt: 500, currentGroupId: 2, targetGroupId: 2, stable: true, config }), false);
   assert.equal(core.canAutoSwitch({ now: 601_000, lastSwitchAt: 500, currentGroupId: 1, targetGroupId: 2, stable: true, config }), true);
+});
+
+test('applies fractional cooldowns without rounding to zero', () => {
+  const config = { ...core.DEFAULT_CONFIG, cooldownMinutes: 0.1 };
+  assert.equal(core.canAutoSwitch({ now: 6_499, lastSwitchAt: 500, currentGroupId: 1, targetGroupId: 2, stable: true, config }), false);
+  assert.equal(core.canAutoSwitch({ now: 6_500, lastSwitchAt: 500, currentGroupId: 1, targetGroupId: 2, stable: true, config }), true);
 });
 
 test('explains why automatic switching is skipped', () => {
