@@ -25,6 +25,13 @@ test('normalizes thresholds and safety settings', () => {
   assert.equal(config.requireNoWarnings, false);
 });
 
+test('normalizes the monitor freshness limit', () => {
+  assert.equal(core.DEFAULT_CONFIG.maxMonitorAgeSeconds, 180);
+  assert.equal(core.normalizeConfig({ maxMonitorAgeSeconds: '240' }).maxMonitorAgeSeconds, 240);
+  assert.equal(core.normalizeConfig({ maxMonitorAgeSeconds: 1 }).maxMonitorAgeSeconds, 30);
+  assert.equal(core.normalizeConfig({ maxMonitorAgeSeconds: 9999 }).maxMonitorAgeSeconds, 3600);
+});
+
 test('preserves decimal cooldowns and normalizes excluded group keywords', () => {
   const config = core.normalizeConfig({ cooldownMinutes: '0.1', excludedGroupKeywords: ' free | Test |free ' });
 
@@ -56,6 +63,47 @@ test('excludes groups whose names contain configured keywords', () => {
   const ranked = core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, excludedGroupKeywords: 'free|PREMIUM' });
 
   assert.deepEqual(ranked.map((row) => row.planType), ['Paid-Standard']);
+});
+
+test('previews excluded group keyword matches case-insensitively', () => {
+  const info = core.getExcludedGroupInfo([
+    { planType: 'Free-Fast' },
+    { name: 'stable' },
+    { planType: 'unstable-test' },
+    { planType: 'paid' },
+  ], ' free | unstable | free ');
+  assert.deepEqual(info.keywords, ['free', 'unstable']);
+  assert.deepEqual(info.matches.map((row) => row.name), ['Free-Fast', 'unstable-test']);
+});
+
+test('reports mutually exclusive candidate diagnostics', () => {
+  const rows = [
+    { planType: 'invalid', group_id: 'x', priceMultiplier: 0.01 },
+    { planType: 'disabled', group_id: 1, priceMultiplier: 0.01, enabled: false, available: true, successRates: { '10m': 1 } },
+    { planType: 'unavailable', group_id: 2, priceMultiplier: 0.01, available: false, successRates: { '10m': 1 } },
+    { planType: 'low', group_id: 3, priceMultiplier: 0.01, available: true, successRates: { '10m': 0.01 } },
+    { planType: 'warning', group_id: 4, priceMultiplier: 0.01, available: true, successRates: { '10m': 1 }, warningReasons: ['warning'] },
+    { planType: 'free-fast', group_id: 5, priceMultiplier: 0.01, available: true, successRates: { '10m': 1 }, warningReasons: [] },
+    { planType: 'eligible', group_id: 6, priceMultiplier: 0.02, available: true, successRates: { '10m': 1 }, warningReasons: [] },
+  ];
+  const result = core.analyzeCandidates(rows, { ...core.DEFAULT_CONFIG, excludedGroupKeywords: 'free' });
+  assert.deepEqual(result.counts, { total: 7, invalid: 1, unavailable: 2, lowSuccess: 1, warnings: 1, keywords: 1, eligible: 1 });
+  assert.deepEqual(result.candidates.map((row) => row.name), ['eligible']);
+});
+
+test('formats monitor freshness and treats invalid timestamps as stale', () => {
+  const now = Date.parse('2026-07-22T05:10:00Z');
+  assert.deepEqual(core.getMonitorFreshness(new Date(now - 42_000).toISOString(), now, 180), {
+    generatedAt: now - 42_000, ageMs: 42_000, stale: false, label: '42 秒前',
+  });
+  assert.equal(core.getMonitorFreshness(new Date(now - 181_000).toISOString(), now, 180).stale, true);
+  assert.equal(core.getMonitorFreshness('bad timestamp', now, 180).label, '时间未知');
+  assert.equal(core.getMonitorFreshness('bad timestamp', now, 180).stale, true);
+});
+
+test('reports fractional cooldown remaining time', () => {
+  assert.deepEqual(core.getCooldownInfo(1_000, 0.1, 4_000), { remainingMs: 3_000, active: true, label: '剩余 3 秒' });
+  assert.equal(core.getCooldownInfo(1_000, 0.1, 7_000).active, false);
 });
 
 test('uses reliability and latency as deterministic tie breakers', () => {
@@ -197,7 +245,13 @@ test('explains why automatic switching is skipped', () => {
   assert.equal(core.getAutoSwitchBlockReason(ready), '');
   assert.equal(core.getAutoSwitchBlockReason({ ...ready, stable: false }), '推荐尚未稳定');
   assert.equal(core.getAutoSwitchBlockReason({ ...ready, currentGroupId: 2 }), '当前密钥已经在推荐分组');
-  assert.equal(core.getAutoSwitchBlockReason({ ...ready, now: 1_000 }), '切换冷却中');
+  assert.equal(core.getAutoSwitchBlockReason({ ...ready, now: 1_000 }), '切换冷却中（剩余 10 分钟）');
+  assert.equal(core.getAutoSwitchBlockReason({ ...ready, monitorStale: true, monitorFreshnessText: '4 分钟前' }), '监控数据已过期（4 分钟前）');
+});
+
+test('blocks manual switching when monitor data is stale', () => {
+  const ready = { loading: false, error: '', authError: '', winner: { groupId: 2 }, key: { groupId: 1 }, stability: { stable: true, count: 2 }, requiredChecks: 2 };
+  assert.equal(core.getSwitchBlockReason({ ...ready, monitorStale: true, monitorFreshnessText: '4 分钟前' }), '监控数据已过期（4 分钟前）');
 });
 
 test('projects key metadata without exposing complete API key values', () => {
@@ -225,6 +279,14 @@ test('merges paginated API key responses without duplicates', () => {
     { items: [{ id: 2 }, { id: 3 }], pages: 2 },
   ]);
   assert.deepEqual(merged.map((key) => key.id), [1, 2, 3]);
+});
+
+test('refreshes keys when empty, forced, or older than five minutes', () => {
+  const intervalMs = 5 * 60 * 1000;
+  assert.equal(core.shouldRefreshKeys({ now: 1_000, lastFetchedAt: 0, keyCount: 0, intervalMs }), true);
+  assert.equal(core.shouldRefreshKeys({ now: intervalMs + 1, lastFetchedAt: 1, keyCount: 2, intervalMs }), true);
+  assert.equal(core.shouldRefreshKeys({ now: 10, lastFetchedAt: 1, keyCount: 2, intervalMs, force: true }), true);
+  assert.equal(core.shouldRefreshKeys({ now: 10, lastFetchedAt: 1, keyCount: 2, intervalMs }), false);
 });
 
 test('logs periodic detection state only when it changes unless forced', () => {

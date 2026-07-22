@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.4.5
+// @version      0.4.6
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.4.5';
+  const SCRIPT_VERSION = '0.4.6';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -45,6 +45,7 @@
     mode: 'price',
     balanceMaxPrice: 0.1,
     excludedGroupKeywords: '',
+    maxMonitorAgeSeconds: 180,
   });
 
   function numberOr(value, fallback) {
@@ -81,6 +82,7 @@
       mode: normalizeGroupMode(source.mode),
       balanceMaxPrice: clamp(numberOr(source.balanceMaxPrice, DEFAULT_CONFIG.balanceMaxPrice), 0, 1000),
       excludedGroupKeywords: normalizeExcludedGroupKeywords(source.excludedGroupKeywords),
+      maxMonitorAgeSeconds: Math.round(clamp(numberOr(source.maxMonitorAgeSeconds, DEFAULT_CONFIG.maxMonitorAgeSeconds), 30, 3600)),
     };
   }
 
@@ -92,29 +94,68 @@
     return value === 'logs' ? 'logs' : 'settings';
   }
 
-  function getEligibleCandidates(rows, normalizedConfig) {
+  function getExcludedGroupInfo(rows, keywordInput) {
+    const keywords = normalizeExcludedGroupKeywords(keywordInput).split('|').filter(Boolean);
+    const matches = [];
+    const seen = new Set();
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const name = String(row?.planType || row?.name || '').trim();
+      const normalizedName = name.toLocaleLowerCase();
+      if (!name || !keywords.some((keyword) => normalizedName.includes(keyword))) continue;
+      const identity = `${row?.group_id ?? ''}:${normalizedName}`;
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      matches.push({ row, name });
+    }
+    return { keywords, matches };
+  }
+
+  function analyzeCandidates(rows, config = DEFAULT_CONFIG) {
+    const normalizedConfig = normalizeConfig(config);
     const excludedKeywords = normalizedConfig.excludedGroupKeywords.split('|').filter(Boolean);
-    return (Array.isArray(rows) ? rows : [])
-      .filter((row) => {
-        if (!row || row.enabled === false || row.available !== true) return false;
-        const groupId = Number(row.group_id);
-        const price = Number(row.priceMultiplier);
-        const success10m = Number(row.successRates?.['10m']);
-        const groupName = String(row.planType || row.name || `Group ${row.group_id}`).toLocaleLowerCase();
-        if (!Number.isInteger(groupId) || groupId <= 0 || !Number.isFinite(price) || price < 0) return false;
-        if (!Number.isFinite(success10m) || success10m < normalizedConfig.minSuccess10m) return false;
-        if (normalizedConfig.requireNoWarnings && Array.isArray(row.warningReasons) && row.warningReasons.length > 0) return false;
-        if (excludedKeywords.some((keyword) => groupName.includes(keyword))) return false;
-        return true;
-      })
-      .map((row) => ({
+    const sourceRows = Array.isArray(rows) ? rows : [];
+    const counts = { total: sourceRows.length, invalid: 0, unavailable: 0, lowSuccess: 0, warnings: 0, keywords: 0, eligible: 0 };
+    const candidates = [];
+    for (const row of sourceRows) {
+      const groupId = Number(row?.group_id);
+      const price = Number(row?.priceMultiplier);
+      if (!row || !Number.isInteger(groupId) || groupId <= 0 || !Number.isFinite(price) || price < 0) {
+        counts.invalid += 1;
+        continue;
+      }
+      if (row.enabled === false || row.available !== true) {
+        counts.unavailable += 1;
+        continue;
+      }
+      const success10m = Number(row.successRates?.['10m']);
+      if (!Number.isFinite(success10m) || success10m < normalizedConfig.minSuccess10m) {
+        counts.lowSuccess += 1;
+        continue;
+      }
+      if (normalizedConfig.requireNoWarnings && Array.isArray(row.warningReasons) && row.warningReasons.length > 0) {
+        counts.warnings += 1;
+        continue;
+      }
+      const name = String(row.planType || row.name || `Group ${row.group_id}`);
+      if (excludedKeywords.some((keyword) => name.toLocaleLowerCase().includes(keyword))) {
+        counts.keywords += 1;
+        continue;
+      }
+      candidates.push({
         ...row,
-        groupId: Number(row.group_id),
-        price: Number(row.priceMultiplier),
-        success10m: Number(row.successRates['10m']),
+        groupId,
+        price,
+        success10m,
         latency: Number.isFinite(Number(row.firstTokenLatencyMs)) ? Number(row.firstTokenLatencyMs) : Number.POSITIVE_INFINITY,
-        name: String(row.planType || row.name || `Group ${row.group_id}`),
-      }));
+        name,
+      });
+      counts.eligible += 1;
+    }
+    return { candidates, counts };
+  }
+
+  function getEligibleCandidates(rows, normalizedConfig) {
+    return analyzeCandidates(rows, normalizedConfig).candidates;
   }
 
   function comparePrice(left, right) {
@@ -137,6 +178,44 @@
     if (normalizedConfig.mode === 'speed') return candidates.sort(compareSpeed);
     if (normalizedConfig.mode === 'balance') return candidates.filter((candidate) => candidate.price <= normalizedConfig.balanceMaxPrice).sort(compareSpeed);
     return candidates.sort(comparePrice);
+  }
+
+  function formatRelativeAge(ageMs) {
+    if (!Number.isFinite(ageMs)) return '时间未知';
+    const seconds = Math.max(0, Math.floor(ageMs / 1000));
+    if (seconds < 5) return '刚刚';
+    if (seconds < 60) return `${seconds} 秒前`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes} 分钟前`;
+    const hours = Math.floor(minutes / 60);
+    return `${hours} 小时前`;
+  }
+
+  function getMonitorFreshness(generatedAt, now = Date.now(), maxAgeSeconds = DEFAULT_CONFIG.maxMonitorAgeSeconds) {
+    const parsed = typeof generatedAt === 'number' ? generatedAt : Date.parse(generatedAt);
+    if (!Number.isFinite(parsed)) return { generatedAt: null, ageMs: null, stale: true, label: '时间未知' };
+    const ageMs = Math.max(0, Number(now) - parsed);
+    return {
+      generatedAt: parsed,
+      ageMs,
+      stale: ageMs > Math.max(0, Number(maxAgeSeconds) || 0) * 1000,
+      label: formatRelativeAge(ageMs),
+    };
+  }
+
+  function formatRemainingTime(remainingMs) {
+    const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+    if (totalSeconds < 60) return `${totalSeconds} 秒`;
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分钟`;
+  }
+
+  function getCooldownInfo(lastSwitchAt, cooldownMinutes, now = Date.now()) {
+    const cooldownMs = Math.max(0, Number(cooldownMinutes) || 0) * 60 * 1000;
+    const lastAt = Number(lastSwitchAt);
+    const remainingMs = Number.isFinite(lastAt) ? Math.max(0, lastAt + cooldownMs - Number(now)) : 0;
+    return { remainingMs, active: remainingMs > 0, label: remainingMs > 0 ? `剩余 ${formatRemainingTime(remainingMs)}` : '冷却已结束' };
   }
 
   function attachRecentAvailability(rows, seriesPayload, windowMs = 10 * 60 * 1000) {
@@ -232,16 +311,17 @@
     return { groupId: numericGroupId, count, stable: count >= required };
   }
 
-  function canAutoSwitch({ now, lastSwitchAt, currentGroupId, targetGroupId, stable, config }) {
-    return getAutoSwitchBlockReason({ now, lastSwitchAt, currentGroupId, targetGroupId, stable, config }) === '';
+  function canAutoSwitch(options) {
+    return getAutoSwitchBlockReason(options) === '';
   }
 
-  function getAutoSwitchBlockReason({ now, lastSwitchAt, currentGroupId, targetGroupId, stable, config }) {
+  function getAutoSwitchBlockReason({ now, lastSwitchAt, currentGroupId, targetGroupId, stable, config, monitorStale, monitorFreshnessText }) {
+    if (monitorStale) return `监控数据已过期（${monitorFreshnessText || '时间未知'}）`;
     if (!stable) return '推荐尚未稳定';
     if (targetGroupId == null) return '暂无推荐分组';
     if (currentGroupId === targetGroupId) return '当前密钥已经在推荐分组';
-    const cooldownMs = normalizeConfig(config).cooldownMinutes * 60 * 1000;
-    if (Number.isFinite(lastSwitchAt) && Number(now) - lastSwitchAt < cooldownMs) return '切换冷却中';
+    const cooldown = getCooldownInfo(lastSwitchAt, normalizeConfig(config).cooldownMinutes, now);
+    if (cooldown.active) return `切换冷却中（${cooldown.label}）`;
     return '';
   }
 
@@ -249,10 +329,11 @@
     return forced || previous !== current;
   }
 
-  function getSwitchBlockReason({ loading, allowWhileLoading, error, authError, winner, key, stability, requiredChecks }) {
+  function getSwitchBlockReason({ loading, allowWhileLoading, error, authError, monitorStale, monitorFreshnessText, winner, key, stability, requiredChecks }) {
     if (loading && !allowWhileLoading) return '正在检测';
     if (error) return String(error);
     if (authError) return String(authError);
+    if (monitorStale) return `监控数据已过期（${monitorFreshnessText || '时间未知'}）`;
     if (!winner) return '暂无符合条件的推荐分组';
     if (!key) return '请先读取并选择目标密钥';
     if (!stability?.stable) return `推荐尚未稳定（${Number(stability?.count) || 0}/${requiredChecks} 次）`;
@@ -298,6 +379,15 @@
       }
     }
     return [...byId.values()];
+  }
+
+  function shouldRefreshKeys({ now = Date.now(), lastFetchedAt, keyCount, force = false, intervalMs = 5 * 60 * 1000 }) {
+    const fetchedAt = Number(lastFetchedAt);
+    return force === true
+      || Number(keyCount) === 0
+      || !Number.isFinite(fetchedAt)
+      || fetchedAt <= 0
+      || Number(now) - fetchedAt >= Math.max(0, Number(intervalMs) || 0);
   }
 
   function storageGet(key, fallback) {
@@ -447,6 +537,9 @@
     #${ROOT_ID} .asg-recommend strong{font-size:15px}
     #${ROOT_ID} .asg-muted{color:#667085}
     #${ROOT_ID} .asg-metrics{display:flex;flex-wrap:wrap;gap:6px 12px;color:#475467;font-size:12px;margin-top:4px}
+    #${ROOT_ID} .asg-recommend-meta{margin-top:5px;color:#667085;font-size:11px;line-height:1.45;overflow-wrap:anywhere}
+    #${ROOT_ID} .asg-monitor-age{margin-top:4px;color:#15803d;font-size:11px}
+    #${ROOT_ID} .asg-monitor-age.asg-stale{color:#b42318;font-weight:600}
     #${ROOT_ID} label{display:block;color:#475467;font-size:12px;margin:8px 0 4px}
     #${ROOT_ID} select,#${ROOT_ID} input[type=number],#${ROOT_ID} input[type=text]{width:100%;border:1px solid #cfd5df;border-radius:6px;padding:6px;background:#fff;color:#172033;font:inherit}
     #${ROOT_ID} .asg-key-details[hidden]{display:none}
@@ -478,8 +571,8 @@
     #${ROOT_ID} .asg-setting-wide{grid-column:1/-1}
     #${ROOT_ID} .asg-settings-grid .asg-auto{margin:1px 0 0}
     #${ROOT_ID} .asg-balance-setting{grid-column:1/-1}
-    #${ROOT_ID} .asg-balance-preview,#${ROOT_ID} .asg-balance-reason{display:block;margin-top:4px;color:#15803d;font-size:11px;line-height:1.4;overflow-wrap:anywhere}
-    #${ROOT_ID} .asg-balance-preview.asg-preview-pending{color:#b54708}
+    #${ROOT_ID} .asg-balance-preview,#${ROOT_ID} .asg-balance-reason,#${ROOT_ID} .asg-setting-preview{display:block;margin-top:4px;color:#15803d;font-size:11px;line-height:1.4;overflow-wrap:anywhere}
+    #${ROOT_ID} .asg-preview-pending{color:#b54708}
     #${ROOT_ID} .asg-save{width:100%;margin-top:5px;background:#1456d9;color:#fff;border-color:#1456d9;font-weight:600}
     #${ROOT_ID} .asg-save:hover:not(:disabled){background:#0f46b6}
     #${ROOT_ID} .asg-log-actions{display:flex;justify-content:flex-end;margin-top:7px}
@@ -538,11 +631,16 @@
       this.authError = '';
       this.keyCount = null;
       this.minimized = storageGet('minimized', false) === true;
-      this.sideTab = 'settings';
+      this.sideTab = normalizePanelTab(storageGet('sideTab', 'settings'));
       this.timer = null;
+      this.uiTimer = null;
       this.panel = null;
       this.toggleButton = null;
       this.active = false;
+      this.monitorGeneratedAt = null;
+      this.monitorFreshness = getMonitorFreshness(null, Date.now(), this.config.maxMonitorAgeSeconds);
+      this.candidateDiagnostics = analyzeCandidates([], this.config);
+      this.lastKeysFetchedAt = 0;
       this.lastDetectionLogSignature = null;
       this.lastAuthLogSignature = '';
       this.lastErrorLogSignature = '';
@@ -562,12 +660,15 @@
       if (registerMenu && typeof GM_registerMenuCommand === 'function') GM_registerMenuCommand('显示 AIHub 智能分组', () => this.setMinimized(false));
       this.refresh();
       this.timer = window.setInterval(() => this.refresh(), this.config.pollIntervalSeconds * 1000);
+      this.uiTimer = window.setInterval(() => this.renderTimeSensitiveState(), 1000);
     }
 
     stop() {
       this.active = false;
       if (this.timer) window.clearInterval(this.timer);
+      if (this.uiTimer) window.clearInterval(this.uiTimer);
       this.timer = null;
+      this.uiTimer = null;
       this.panel?.remove();
       this.toggleButton?.remove();
       this.panel = null;
@@ -612,6 +713,8 @@
                   <label class="asg-setting-wide" title="可自行修改，0.1 表示 10%">最近10分钟最低可用率（默认10%）<input type="number" min="0" max="1" step="0.01" data-setting="minSuccess10m"></label>
                   <label class="asg-setting-wide asg-auto"><input type="checkbox" data-setting="requireNoWarnings"> 排除监控警告</label>
                   <label class="asg-setting-wide" title="名称包含任一关键词的分组不会参与推荐或切换">排除分组关键词（使用 | 分隔）<input type="text" data-setting="excludedGroupKeywords" placeholder="例如 free|unstable"></label>
+                  <span class="asg-setting-preview asg-setting-wide" data-field="excluded-preview" aria-live="polite"></span>
+                  <label class="asg-setting-wide" title="数据超过此时间仍未更新时禁止手动和自动切换">监控数据最大年龄（秒）<input type="number" min="30" max="3600" step="10" data-setting="maxMonitorAgeSeconds"></label>
                 </div>
               </section>
               <section class="asg-settings-section">
@@ -619,7 +722,7 @@
                 <div class="asg-settings-grid">
                   <label>连续通过次数<input type="number" min="1" max="5" step="1" data-setting="consecutiveChecks"></label>
                   <label>检测间隔（秒）<input type="number" min="10" max="3600" step="1" data-setting="pollIntervalSeconds"></label>
-                  <label class="asg-setting-wide">切换冷却（分钟）<input type="number" min="0" max="1440" step="0.1" data-setting="cooldownMinutes"></label>
+                  <label class="asg-setting-wide">切换冷却（分钟）<input type="number" min="0" max="1440" step="0.1" data-setting="cooldownMinutes"><span class="asg-setting-preview" data-field="cooldown-preview" aria-live="polite"></span></label>
                 </div>
               </section>
               <section class="asg-settings-section">
@@ -697,7 +800,7 @@
         this.refresh();
       });
       this.panel.addEventListener('input', (event) => {
-        if (event.target.matches('[data-setting]')) this.renderBalancePreview();
+        if (event.target.matches('[data-setting]')) this.renderSettingsPreviews();
       });
     }
 
@@ -710,6 +813,7 @@
 
     setSideTab(value) {
       this.sideTab = normalizePanelTab(value);
+      storageSet('sideTab', this.sideTab);
       for (const tab of this.panel?.querySelectorAll('[data-panel-tab]') || []) {
         const selected = tab.dataset.panelTab === this.sideTab;
         tab.setAttribute('aria-selected', String(selected));
@@ -728,7 +832,21 @@
       }
       this.panel.querySelector('[data-field="auto"]').checked = this.config.autoSwitch;
       this.panel.querySelector('[data-field="mode"]').value = this.config.mode;
+      this.renderSettingsPreviews();
+    }
+
+    readDraftConfig() {
+      const draft = { ...this.config };
+      for (const input of this.panel?.querySelectorAll('[data-setting]') || []) {
+        draft[input.dataset.setting] = input.type === 'checkbox' ? input.checked : input.value;
+      }
+      return normalizeConfig(draft);
+    }
+
+    renderSettingsPreviews() {
       this.renderBalancePreview();
+      this.renderExcludedPreview();
+      this.renderCooldownPreview();
     }
 
     renderBalancePreview() {
@@ -741,11 +859,7 @@
         preview.classList.add('asg-preview-pending');
         return;
       }
-      const draft = { ...this.config };
-      for (const input of this.panel.querySelectorAll('[data-setting]')) {
-        draft[input.dataset.setting] = input.type === 'checkbox' ? input.checked : input.value;
-      }
-      const normalizedDraft = normalizeConfig(draft);
+      const normalizedDraft = this.readDraftConfig();
       const candidateCount = getEligibleCandidates(this.rows, normalizedDraft)
         .filter((candidate) => candidate.price <= normalizedDraft.balanceMaxPrice).length;
       const hasUnsavedFilter = normalizedDraft.balanceMaxPrice !== this.config.balanceMaxPrice
@@ -762,6 +876,44 @@
         preview.textContent = `只考虑倍率 ≤ ${limit} · ${candidateCount} 个分组可选 · 将选首 Token 最快${suffix}`;
       }
       preview.classList.toggle('asg-preview-pending', hasUnsavedFilter);
+    }
+
+    renderExcludedPreview() {
+      const preview = this.panel?.querySelector('[data-field="excluded-preview"]');
+      const input = this.panel?.querySelector('[data-setting="excludedGroupKeywords"]');
+      if (!preview || !input) return;
+      const info = getExcludedGroupInfo(this.rows, input.value);
+      const normalized = info.keywords.join('|');
+      const unsaved = normalized !== this.config.excludedGroupKeywords;
+      const suffix = unsaved ? ' · 未保存' : '';
+      if (!info.keywords.length) {
+        preview.textContent = `未设置排除关键词${suffix}`;
+      } else if (!this.lastUpdated) {
+        preview.textContent = `${info.keywords.length} 个关键词 · 检测后显示匹配分组${suffix}`;
+      } else if (!info.matches.length) {
+        preview.textContent = `未匹配到分组${suffix}`;
+      } else {
+        const names = info.matches.slice(0, 3).map((match) => match.name).join('、');
+        const more = info.matches.length > 3 ? ` 等 ${info.matches.length} 个` : '';
+        preview.textContent = `将排除 ${info.matches.length} 个：${names}${more}${suffix}`;
+      }
+      preview.classList.toggle('asg-preview-pending', unsaved);
+    }
+
+    renderCooldownPreview() {
+      const preview = this.panel?.querySelector('[data-field="cooldown-preview"]');
+      const input = this.panel?.querySelector('[data-setting="cooldownMinutes"]');
+      if (!preview || !input) return;
+      if (input.value.trim() === '' || !input.checkValidity()) {
+        preview.textContent = '请输入 0–1440 之间的分钟数';
+        preview.classList.add('asg-preview-pending');
+        return;
+      }
+      const minutes = normalizeConfig({ ...this.config, cooldownMinutes: input.value }).cooldownMinutes;
+      const unsaved = minutes !== this.config.cooldownMinutes;
+      const cooldown = getCooldownInfo(Number(this.lastSwitch.at), minutes);
+      preview.textContent = `${minutes} 分钟 = ${formatRemainingTime(minutes * 60 * 1000)}${cooldown.active ? ` · 当前${cooldown.label}` : ''}${unsaved ? ' · 未保存' : ''}`;
+      preview.classList.toggle('asg-preview-pending', unsaved);
     }
 
     saveSettings() {
@@ -815,26 +967,27 @@
       if (this.loading) return;
       this.loading = true;
       this.authError = '';
-      this.keyCount = null;
       this.setStatus('检测中...');
       this.renderActionState();
       try {
         const [summary, series] = await Promise.all([fetchMonitorSummary(), fetchMonitorSeries()]);
         if (!this.active) return;
         let keys = null;
-        try {
-          keys = await fetchAllKeys();
-          if (!this.active) return;
-        } catch (error) {
-          if (!this.active) return;
-          if (error?.status === 401 && this.onAuthInvalid) {
-            this.onAuthInvalid();
+        if (shouldRefreshKeys({ now: Date.now(), lastFetchedAt: this.lastKeysFetchedAt, keyCount: this.keys.length, force: forceLog })) {
+          try {
+            keys = await fetchAllKeys();
             if (!this.active) return;
+            this.lastKeysFetchedAt = Date.now();
+          } catch (error) {
+            if (!this.active) return;
+            if (error?.status === 401 && this.onAuthInvalid) {
+              this.onAuthInvalid();
+              if (!this.active) return;
+            }
+            this.authError = error?.status === 401
+              ? (getAuthToken() ? '密钥接口返回 401：当前登录已失效，请重新登录后刷新' : '未找到页面登录令牌，请在此 Chrome 配置中重新登录后刷新')
+              : (error instanceof Error ? `密钥读取失败：${error.message}` : '密钥读取失败');
           }
-          this.keys = [];
-          this.authError = error?.status === 401
-            ? (getAuthToken() ? '密钥接口返回 401：当前登录已失效，请重新登录后刷新' : '未找到页面登录令牌，请在此 Chrome 配置中重新登录后刷新')
-            : (error instanceof Error ? `密钥读取失败：${error.message}` : '密钥读取失败');
         }
         if (this.authError && shouldLogTransition(this.lastAuthLogSignature, this.authError, forceLog)) {
           this.log('error', this.authError);
@@ -843,9 +996,14 @@
         }
         this.lastAuthLogSignature = this.authError;
         this.rows = attachRecentAvailability(summary?.apis, series);
+        this.monitorGeneratedAt = series?.generatedAt || summary?.generatedAt || null;
+        this.updateMonitorFreshness();
+        this.candidateDiagnostics = analyzeCandidates(this.rows, this.config);
         this.ranked = rankCandidates(this.rows, this.config);
         const winner = this.ranked[0] || null;
-        this.stability = advanceStability(this.stability, winner?.groupId ?? null, this.config.consecutiveChecks);
+        this.stability = this.monitorFreshness.stale
+          ? createStabilityState()
+          : advanceStability(this.stability, winner?.groupId ?? null, this.config.consecutiveChecks);
         if (keys) {
           this.keys = keys;
           this.keyCount = keys.length;
@@ -878,6 +1036,27 @@
       }
     }
 
+    updateMonitorFreshness() {
+      this.monitorFreshness = getMonitorFreshness(this.monitorGeneratedAt, Date.now(), this.config.maxMonitorAgeSeconds);
+      return this.monitorFreshness;
+    }
+
+    renderTimeSensitiveState() {
+      if (!this.active || !this.panel) return;
+      const wasStale = this.monitorFreshness.stale;
+      this.updateMonitorFreshness();
+      if (!wasStale && this.monitorFreshness.stale) this.stability = createStabilityState();
+      const node = this.panel.querySelector('[data-field="monitor-freshness"]');
+      if (node) {
+        node.textContent = this.monitorFreshness.stale
+          ? `监控数据已过期（${this.monitorFreshness.label}），切换已暂停`
+          : `数据更新于 ${this.monitorFreshness.label}`;
+        node.classList.toggle('asg-stale', this.monitorFreshness.stale);
+      }
+      this.renderCooldownPreview();
+      this.renderActionState();
+    }
+
     selectedKey() {
       return this.keys.find((key) => String(key.id) === String(this.selectedKeyId)) || null;
     }
@@ -890,6 +1069,8 @@
         allowWhileLoading: fromAuto,
         error: this.error,
         authError: this.authError,
+        monitorStale: this.monitorFreshness.stale,
+        monitorFreshnessText: this.monitorFreshness.label,
         winner,
         key,
         stability: this.stability,
@@ -912,6 +1093,8 @@
         targetGroupId: winner.groupId,
         stable: this.stability.stable,
         config: this.config,
+        monitorStale: this.monitorFreshness.stale,
+        monitorFreshnessText: this.monitorFreshness.label,
       })) {
         const reason = getAutoSwitchBlockReason({
           now,
@@ -920,6 +1103,8 @@
           targetGroupId: winner.groupId,
           stable: this.stability.stable,
           config: this.config,
+          monitorStale: this.monitorFreshness.stale,
+          monitorFreshnessText: this.monitorFreshness.label,
         });
         if (shouldLogTransition(this.lastAutoSkipLogSignature, reason)) this.log('info', `自动切换跳过：${reason}`);
         this.lastAutoSkipLogSignature = reason;
@@ -931,6 +1116,7 @@
         if (!this.active) return false;
         key.groupId = winner.groupId;
         key.groupName = winner.name;
+        this.lastKeysFetchedAt = 0;
         this.lastSwitch = { at: Date.now(), keyId: key.id, groupId: winner.groupId };
         this.lastAutoSkipLogSignature = '';
         storageSet('lastSwitch', this.lastSwitch);
@@ -979,13 +1165,26 @@
           recommend.appendChild(reason);
         }
       }
+      const diagnostics = this.candidateDiagnostics?.counts || {};
+      const diagnostic = document.createElement('div');
+      diagnostic.className = 'asg-recommend-meta';
+      const overLimit = this.config.mode === 'balance' ? Math.max(0, Number(diagnostics.eligible || 0) - this.ranked.length) : 0;
+      diagnostic.textContent = `参与比较 ${this.ranked.length} · 排除关键词 ${diagnostics.keywords || 0} · 不可用 ${diagnostics.unavailable || 0} · 可用率不足 ${diagnostics.lowSuccess || 0} · 监控警告 ${diagnostics.warnings || 0}${overLimit ? ` · 超过倍率上限 ${overLimit}` : ''}`;
+      recommend.appendChild(diagnostic);
+      const freshness = document.createElement('div');
+      freshness.className = `asg-monitor-age${this.monitorFreshness.stale ? ' asg-stale' : ''}`;
+      freshness.dataset.field = 'monitor-freshness';
+      freshness.textContent = this.monitorFreshness.stale
+        ? `监控数据已过期（${this.monitorFreshness.label}），切换已暂停`
+        : `数据更新于 ${this.monitorFreshness.label}`;
+      recommend.appendChild(freshness);
       const keyInfo = this.authError || (this.keyCount !== null ? `已读取 ${this.keyCount} 个密钥` : '');
       this.setStatus(this.error || keyInfo || (this.lastUpdated ? `最近检测：${this.lastUpdated.toLocaleTimeString()}` : '准备检测'), Boolean(this.error || this.authError));
       this.renderKeys();
       this.renderCandidates();
       this.renderLogs();
       this.renderActionState();
-      this.renderBalancePreview();
+      this.renderSettingsPreviews();
     }
 
     renderKeys() {
@@ -1046,6 +1245,8 @@
         loading: this.loading,
         error: this.error,
         authError: this.authError,
+        monitorStale: this.monitorFreshness.stale,
+        monitorFreshnessText: this.monitorFreshness.label,
         winner,
         key,
         stability: this.stability,
@@ -1193,7 +1394,11 @@
     normalizeConfig,
     normalizeGroupMode,
     normalizePanelTab,
+    getExcludedGroupInfo,
+    analyzeCandidates,
     rankCandidates,
+    getMonitorFreshness,
+    getCooldownInfo,
     attachRecentAvailability,
     normalizeGroupName,
     buildGroupMultiplierMap,
@@ -1211,6 +1416,7 @@
     buildAuthHeaders,
     buildApiHeaders,
     mergeKeyPages,
+    shouldRefreshKeys,
     appendLogEntries,
     formatLogLine,
     start() {
