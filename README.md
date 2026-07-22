@@ -131,6 +131,7 @@ Greasy Fork 同步源：
 ```powershell
 node --check aihub-smart-group.user.js
 node --test tests/aihub-smart-group.test.cjs
+npx --yes eslint@9.39.2 aihub-smart-group.user.js
 ```
 
-当前版本：`0.3.1`
+当前版本：`0.3.2`
