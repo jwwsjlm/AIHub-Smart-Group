@@ -81,57 +81,29 @@ test('selects AIHub candidates for price, balance, and speed modes', () => {
   ];
 
   assert.equal(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'price' })[0].planType, 'cheap');
-  assert.equal(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'balance', balancePricePercent: 20 })[0].planType, 'balanced');
+  assert.equal(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'balance', balanceMaxPrice: 0.05 })[0].planType, 'balanced');
   assert.equal(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'speed' })[0].planType, 'fast');
 });
 
 test('normalizes adjustable AIHub mode settings', () => {
-  const config = core.normalizeConfig({ mode: 'balance', balancePricePercent: '35' });
+  const config = core.normalizeConfig({ mode: 'balance', balanceMaxPrice: '0.1', balancePricePercent: 500 });
   assert.equal(config.mode, 'balance');
-  assert.equal(config.balancePricePercent, 35);
-  assert.equal(core.normalizeConfig({ mode: 'unknown', balancePricePercent: 999 }).mode, 'price');
-  assert.equal(core.normalizeConfig({ mode: 'unknown', balancePricePercent: 999 }).balancePricePercent, 500);
+  assert.equal(config.balanceMaxPrice, 0.1);
+  assert.equal(Object.hasOwn(config, 'balancePricePercent'), false);
+  assert.equal(core.normalizeConfig({ mode: 'unknown', balanceMaxPrice: 9999 }).mode, 'price');
+  assert.equal(core.normalizeConfig({ mode: 'unknown', balanceMaxPrice: 9999 }).balanceMaxPrice, 1000);
 });
 
-test('computes the balance price ceiling from the cheapest eligible group', () => {
+test('ignores groups above the absolute balance price limit', () => {
   const rows = [
-    { planType: 'eligible', group_id: 1, priceMultiplier: 0.04, available: true, successRates: { '10m': 1 }, warningReasons: [] },
-    { planType: 'faster', group_id: 2, priceMultiplier: 0.045, available: true, successRates: { '10m': 1 }, warningReasons: [] },
-    { planType: 'unavailable', group_id: 3, priceMultiplier: 0.001, available: false, successRates: { '10m': 1 }, warningReasons: [] },
-    { planType: 'low-success', group_id: 4, priceMultiplier: 0.01, available: true, successRates: { '10m': 0.05 }, warningReasons: [] },
-    { planType: 'warning', group_id: 5, priceMultiplier: 0.02, available: true, successRates: { '10m': 1 }, warningReasons: [{ type: 'unstable' }] },
+    { planType: 'cheap', group_id: 1, priceMultiplier: 0.04, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 500, warningReasons: [] },
+    { planType: 'balanced', group_id: 2, priceMultiplier: 0.045, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 100, warningReasons: [] },
+    { planType: 'too-expensive', group_id: 3, priceMultiplier: 0.08, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 10, warningReasons: [] },
   ];
 
-  assert.deepEqual(core.getBalancePriceInfo(rows, {
-    ...core.DEFAULT_CONFIG,
-    mode: 'balance',
-    balancePricePercent: 20,
-  }), {
-    minPrice: 0.04,
-    percent: 20,
-    maxPrice: 0.048,
-  });
-});
-
-test('handles empty and boundary balance price previews without mutating saved settings', () => {
-  const savedConfig = Object.freeze({ ...core.DEFAULT_CONFIG, mode: 'price', balancePricePercent: 20 });
-  const rows = Object.freeze([
-    Object.freeze({ planType: 'eligible', group_id: 1, priceMultiplier: 0.125, available: true, successRates: { '10m': 1 }, warningReasons: [] }),
-  ]);
-
-  assert.deepEqual(core.getBalancePriceInfo([], savedConfig), {
-    minPrice: null,
-    percent: 20,
-    maxPrice: null,
-  });
-  assert.equal(core.getBalancePriceInfo(rows, { ...savedConfig, balancePricePercent: 0 }).maxPrice, 0.125);
-  assert.equal(core.getBalancePriceInfo(rows, { ...savedConfig, balancePricePercent: 500 }).maxPrice, 0.75);
-  assert.equal(core.formatMultiplier(core.getBalancePriceInfo(rows, {
-    ...savedConfig,
-    balancePricePercent: 12.5,
-  }).maxPrice), '×0.140625');
-  assert.equal(savedConfig.balancePricePercent, 20);
-  assert.equal(savedConfig.mode, 'price');
+  assert.deepEqual(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'balance', balanceMaxPrice: 0.05 }).map((row) => row.planType), ['balanced', 'cheap']);
+  assert.deepEqual(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'balance', balanceMaxPrice: 0.04 }).map((row) => row.planType), ['cheap']);
+  assert.deepEqual(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'balance', balanceMaxPrice: 0.03 }), []);
 });
 
 test('keeps bounded, sanitized runtime logs', () => {

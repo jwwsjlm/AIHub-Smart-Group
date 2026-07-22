@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.4.3
+// @version      0.4.4
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.4.3';
+  const SCRIPT_VERSION = '0.4.4';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -43,7 +43,7 @@
     cooldownMinutes: 10,
     autoSwitch: false,
     mode: 'price',
-    balancePricePercent: 20,
+    balanceMaxPrice: 0.1,
   });
 
   function numberOr(value, fallback) {
@@ -65,7 +65,7 @@
       cooldownMinutes: Math.round(clamp(numberOr(source.cooldownMinutes, DEFAULT_CONFIG.cooldownMinutes), 0, 1440)),
       autoSwitch: source.autoSwitch === true,
       mode: normalizeGroupMode(source.mode),
-      balancePricePercent: clamp(numberOr(source.balancePricePercent, DEFAULT_CONFIG.balancePricePercent), 0, 500),
+      balanceMaxPrice: clamp(numberOr(source.balanceMaxPrice, DEFAULT_CONFIG.balanceMaxPrice), 0, 1000),
     };
   }
 
@@ -109,30 +109,11 @@
       || left.name.localeCompare(right.name);
   }
 
-  function getBalancePriceInfo(rows, config = DEFAULT_CONFIG) {
-    const normalizedConfig = normalizeConfig(config);
-    const cheapest = getEligibleCandidates(rows, normalizedConfig).sort(comparePrice)[0];
-    return {
-      minPrice: cheapest?.price ?? null,
-      percent: normalizedConfig.balancePricePercent,
-      maxPrice: cheapest ? cheapest.price * (1 + normalizedConfig.balancePricePercent / 100) : null,
-    };
-  }
-
   function rankCandidates(rows, config = DEFAULT_CONFIG) {
     const normalizedConfig = normalizeConfig(config);
     const candidates = getEligibleCandidates(rows, normalizedConfig);
     if (normalizedConfig.mode === 'speed') return candidates.sort(compareSpeed);
-    const cheapest = [...candidates].sort(comparePrice)[0];
-    if (normalizedConfig.mode === 'balance' && cheapest) {
-      const maxPrice = cheapest.price * (1 + normalizedConfig.balancePricePercent / 100);
-      return candidates.sort((left, right) => {
-        const leftInRange = left.price <= maxPrice;
-        const rightInRange = right.price <= maxPrice;
-        if (leftInRange !== rightInRange) return leftInRange ? -1 : 1;
-        return leftInRange ? compareSpeed(left, right) : comparePrice(left, right);
-      });
-    }
+    if (normalizedConfig.mode === 'balance') return candidates.filter((candidate) => candidate.price <= normalizedConfig.balanceMaxPrice).sort(compareSpeed);
     return candidates.sort(comparePrice);
   }
 
@@ -567,7 +548,7 @@
         <div class="asg-body">
           <div class="asg-status" data-field="status">准备检测</div>
           <label for="asg-mode-select">模式</label>
-          <select id="asg-mode-select" data-field="mode"><option value="price">价格（最低价格）</option><option value="balance">平衡（低价范围内最快首字）</option><option value="speed">速度（最快首字）</option></select>
+          <select id="asg-mode-select" data-field="mode"><option value="price">价格（最低价格）</option><option value="balance">平衡（倍率上限内首 Token 最快）</option><option value="speed">速度（最快首字）</option></select>
           <div class="asg-recommend" data-field="recommend"><div class="asg-muted">正在读取监控数据...</div></div>
           <label for="asg-key-select">目标密钥</label>
           <select id="asg-key-select" data-field="key"></select>
@@ -600,7 +581,7 @@
               <section class="asg-settings-section">
                 <div class="asg-settings-title">平衡策略</div>
                 <div class="asg-settings-grid">
-                  <label class="asg-balance-setting">平衡价格范围（%）<input type="number" min="0" max="500" step="1" data-setting="balancePricePercent"><span class="asg-balance-preview" data-field="balance-preview" aria-live="polite"></span></label>
+                  <label class="asg-balance-setting">允许切换的最高倍率<input type="number" min="0" max="1000" step="0.001" data-setting="balanceMaxPrice"><span class="asg-balance-preview" data-field="balance-preview" aria-live="polite"></span></label>
                 </div>
               </section>
               <button class="asg-save" data-action="save-settings">保存设置</button>
@@ -680,11 +661,11 @@
 
     renderBalancePreview() {
       const preview = this.panel?.querySelector('[data-field="balance-preview"]');
-      const percentInput = this.panel?.querySelector('[data-setting="balancePricePercent"]');
-      if (!preview || !percentInput) return;
-      const rawPercent = percentInput.value.trim();
-      if (rawPercent === '' || !percentInput.checkValidity()) {
-        preview.textContent = '请输入 0–500 之间的百分比';
+      const maxPriceInput = this.panel?.querySelector('[data-setting="balanceMaxPrice"]');
+      if (!preview || !maxPriceInput) return;
+      const rawMaxPrice = maxPriceInput.value.trim();
+      if (rawMaxPrice === '' || !maxPriceInput.checkValidity()) {
+        preview.textContent = '请输入 0–1000 之间的倍率';
         preview.classList.add('asg-preview-pending');
         return;
       }
@@ -693,17 +674,19 @@
         draft[input.dataset.setting] = input.type === 'checkbox' ? input.checked : input.value;
       }
       const normalizedDraft = normalizeConfig(draft);
-      const info = getBalancePriceInfo(this.rows, normalizedDraft);
-      const hasUnsavedFilter = normalizedDraft.balancePricePercent !== this.config.balancePricePercent
+      const candidateCount = getEligibleCandidates(this.rows, normalizedDraft)
+        .filter((candidate) => candidate.price <= normalizedDraft.balanceMaxPrice).length;
+      const hasUnsavedFilter = normalizedDraft.balanceMaxPrice !== this.config.balanceMaxPrice
         || normalizedDraft.minSuccess10m !== this.config.minSuccess10m
         || normalizedDraft.requireNoWarnings !== this.config.requireNoWarnings;
       const suffix = hasUnsavedFilter ? ' · 未保存' : '';
+      const limit = formatMultiplier(normalizedDraft.balanceMaxPrice);
       if (!this.lastUpdated) {
-        preview.textContent = `当前输入 ${info.percent}% · 检测后显示预计上限${suffix}`;
-      } else if (info.minPrice === null) {
-        preview.textContent = `当前输入 ${info.percent}% · 当前条件下无可用分组${suffix}`;
+        preview.textContent = `最高倍率 ${limit} · 检测后显示符合分组${suffix}`;
+      } else if (candidateCount === 0) {
+        preview.textContent = `最高倍率 ${limit} · 当前没有符合条件的分组${suffix}`;
       } else {
-        preview.textContent = `当前输入 ${info.percent}% · 最低 ${formatMultiplier(info.minPrice)} · 预计上限 ${formatMultiplier(info.maxPrice)}${suffix}`;
+        preview.textContent = `只考虑倍率 ≤ ${limit} · ${candidateCount} 个分组可选 · 将选首 Token 最快${suffix}`;
       }
       preview.classList.toggle('asg-preview-pending', hasUnsavedFilter);
     }
@@ -905,7 +888,9 @@
       if (!winner) {
         const empty = document.createElement('div');
         empty.className = 'asg-muted';
-        empty.textContent = '没有符合当前可靠性条件的分组';
+        empty.textContent = this.config.mode === 'balance'
+          ? '没有符合当前可靠性和倍率上限的分组'
+          : '没有符合当前可靠性条件的分组';
         recommend.appendChild(empty);
       } else {
         const title = document.createElement('strong');
@@ -915,13 +900,10 @@
         metrics.textContent = `10m ${formatPercent(winner.success10m)} · ${winner.recentSampleCount}次探测 · 首Token ${formatLatency(winner.latency)}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
         recommend.append(title, metrics);
         if (this.config.mode === 'balance') {
-          const info = getBalancePriceInfo(this.rows, this.config);
-          if (info.minPrice !== null) {
-            const reason = document.createElement('div');
-            reason.className = 'asg-balance-reason';
-            reason.textContent = `范围内首 Token 最快 · 最低 ${formatMultiplier(info.minPrice)} · +${info.percent}% · 上限 ${formatMultiplier(info.maxPrice)}`;
-            recommend.appendChild(reason);
-          }
+          const reason = document.createElement('div');
+          reason.className = 'asg-balance-reason';
+          reason.textContent = `倍率上限 ${formatMultiplier(this.config.balanceMaxPrice)} · 范围内首 Token 最快`;
+          recommend.appendChild(reason);
         }
       }
       const keyInfo = this.authError || (this.keyCount !== null ? `已读取 ${this.keyCount} 个密钥` : '');
@@ -1137,7 +1119,6 @@
     GROUP_MODE_LABELS,
     normalizeConfig,
     normalizeGroupMode,
-    getBalancePriceInfo,
     rankCandidates,
     attachRecentAvailability,
     normalizeGroupName,
