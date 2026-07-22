@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.5.2
+// @version      0.5.3
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.5.2';
+  const SCRIPT_VERSION = '0.5.3';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -102,18 +102,6 @@
 
   function normalizeAvailabilityMode(value) {
     return value === 'successes' || value === 'consecutive' ? value : 'percent';
-  }
-
-  function getAvailabilityHint(config = DEFAULT_CONFIG) {
-    const normalized = normalizeConfig(config);
-    if (normalized.availabilityMode === 'successes') {
-      return `10分钟累计成功 ≥ ${normalized.minSuccessPoints10m}点`;
-    }
-    if (normalized.availabilityMode === 'consecutive') {
-      return `最新连续成功 ≥ ${normalized.minConsecutiveSuccesses10m}点`;
-    }
-    const percent = (normalized.minSuccess10m * 100).toFixed(1).replace(/\.0$/, '');
-    return `10分钟可用率 ≥ ${percent}%`;
   }
 
   function getBalanceAmount(payload) {
@@ -630,16 +618,17 @@
     #${ROOT_ID} .asg-settings-body{margin-top:7px}
     #${ROOT_ID} .asg-settings-section{padding:7px 0}
     #${ROOT_ID} .asg-settings-section+.asg-settings-section{border-top:1px solid #eef0f3}
-    #${ROOT_ID} .asg-settings-title{margin-bottom:6px;color:#344054;font-size:11px;font-weight:600}
+    #${ROOT_ID} .asg-settings-head{display:flex;align-items:baseline;gap:12px;margin-bottom:6px;min-width:0}
+    #${ROOT_ID} .asg-settings-title{flex:none;color:#344054;font-size:11px;font-weight:600}
+    #${ROOT_ID} .asg-settings-inline-label{min-width:0;margin:0;color:#475467;font-size:12px;line-height:1.3;overflow-wrap:anywhere}
     #${ROOT_ID} .asg-settings-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:7px 9px}
     #${ROOT_ID} .asg-settings-grid label{margin:0}
     #${ROOT_ID} .asg-settings-grid input[type=number],#${ROOT_ID} .asg-settings-grid input[type=text]{margin-top:3px}
     #${ROOT_ID} .asg-setting-wide{grid-column:1/-1}
     #${ROOT_ID} .asg-setting-compact{min-width:0}
     #${ROOT_ID} .asg-settings-grid .asg-auto{margin:1px 0 0}
-    #${ROOT_ID} .asg-availability-aside{min-width:0;display:flex;flex-direction:column;justify-content:space-between;gap:4px;padding-top:1px}
-    #${ROOT_ID} .asg-availability-hint{color:#667085;font-size:10px;line-height:1.3;overflow-wrap:anywhere}
-    #${ROOT_ID} .asg-availability-aside .asg-auto{margin:0}
+    #${ROOT_ID} .asg-setting-control-only{min-width:0;padding-top:16px}
+    #${ROOT_ID} .asg-setting-control-only input{margin-top:3px}
     #${ROOT_ID} .asg-balance-setting{grid-column:1/-1}
     #${ROOT_ID} .asg-balance-preview,#${ROOT_ID} .asg-balance-reason,#${ROOT_ID} .asg-setting-preview{display:block;margin-top:4px;color:#15803d;font-size:11px;line-height:1.4;overflow-wrap:anywhere}
     #${ROOT_ID} .asg-preview-pending{color:#b54708}
@@ -781,10 +770,10 @@
             <section class="asg-side-view" id="asg-settings-view" role="tabpanel" aria-labelledby="asg-settings-tab" data-panel-view="settings">
               <div class="asg-settings-body">
               <section class="asg-settings-section">
-                <div class="asg-settings-title">可靠性筛选</div>
+                <div class="asg-settings-head"><div class="asg-settings-title">可靠性筛选</div><label class="asg-settings-inline-label" for="asg-availability-mode-setting">可用性判断方式</label></div>
                 <div class="asg-settings-grid">
-                  <label class="asg-setting-compact">可用性判断方式<select data-setting="availabilityMode"><option value="percent">按可用率（百分比）</option><option value="successes">按成功监控点数</option><option value="consecutive">按连续成功点数</option></select></label>
-                  <div class="asg-availability-aside"><span class="asg-availability-hint" data-field="availability-hint" aria-live="polite"></span><label class="asg-auto"><input type="checkbox" data-setting="requireNoWarnings"> 排除监控警告</label></div>
+                  <select id="asg-availability-mode-setting" data-setting="availabilityMode"><option value="percent">按可用率（百分比）</option><option value="successes">按成功监控点数</option><option value="consecutive">按连续成功点数</option></select>
+                  <label class="asg-setting-compact asg-auto"><input type="checkbox" data-setting="requireNoWarnings"> 排除监控警告</label>
                   <label class="asg-setting-wide" data-availability-setting="percent" title="可自行修改，0.1 表示 10%">最近10分钟最低可用率（默认10%）<input type="number" min="0" max="1" step="0.01" data-setting="minSuccess10m"></label>
                   <label class="asg-setting-wide" data-availability-setting="successes">最近10分钟至少成功监控点数<input type="number" min="1" max="60" step="1" data-setting="minSuccessPoints10m"></label>
                   <label class="asg-setting-wide" data-availability-setting="consecutive">连续成功监控点数<input type="number" min="1" max="60" step="1" data-setting="minConsecutiveSuccesses10m"></label>
@@ -793,17 +782,17 @@
                 </div>
               </section>
               <section class="asg-settings-section">
-                <div class="asg-settings-title">检测与切换</div>
+                <div class="asg-settings-head"><div class="asg-settings-title">检测与切换</div><label class="asg-settings-inline-label" for="asg-consecutive-checks-setting">连续通过次数</label></div>
                 <div class="asg-settings-grid">
-                  <label>连续通过次数<input type="number" min="1" max="5" step="1" data-setting="consecutiveChecks"></label>
+                  <div class="asg-setting-control-only"><input id="asg-consecutive-checks-setting" type="number" min="1" max="5" step="1" data-setting="consecutiveChecks" aria-label="连续通过次数"></div>
                   <label>检测间隔（秒）<input type="number" min="10" max="3600" step="1" data-setting="pollIntervalSeconds"></label>
                   <label class="asg-setting-wide">切换冷却（分钟）<input type="number" min="0" max="1440" step="0.1" data-setting="cooldownMinutes"><span class="asg-setting-preview" data-field="cooldown-preview" aria-live="polite"></span></label>
                 </div>
               </section>
               <section class="asg-settings-section">
-                <div class="asg-settings-title">平衡策略</div>
+                <div class="asg-settings-head"><div class="asg-settings-title">平衡策略</div><label class="asg-settings-inline-label" for="asg-balance-max-setting">允许切换的最高倍率</label></div>
                 <div class="asg-settings-grid">
-                  <label class="asg-balance-setting">允许切换的最高倍率<input type="number" min="0" max="1000" step="0.001" data-setting="balanceMaxPrice"><span class="asg-balance-preview" data-field="balance-preview" aria-live="polite"></span></label>
+                  <label class="asg-balance-setting"><input id="asg-balance-max-setting" type="number" min="0" max="1000" step="0.001" data-setting="balanceMaxPrice" aria-label="允许切换的最高倍率"><span class="asg-balance-preview" data-field="balance-preview" aria-live="polite"></span></label>
                 </div>
               </section>
               <button class="asg-save" data-action="save-settings">保存设置</button>
@@ -933,23 +922,9 @@
     }
 
     renderSettingsPreviews() {
-      this.renderAvailabilityHint();
       this.renderBalancePreview();
       this.renderExcludedPreview();
       this.renderCooldownPreview();
-    }
-
-    renderAvailabilityHint() {
-      const hint = this.panel?.querySelector('[data-field="availability-hint"]');
-      if (!hint) return;
-      const draft = this.readDraftConfig();
-      hint.textContent = getAvailabilityHint(draft);
-      const activeValueChanged = draft.availabilityMode === 'successes'
-        ? draft.minSuccessPoints10m !== this.config.minSuccessPoints10m
-        : draft.availabilityMode === 'consecutive'
-          ? draft.minConsecutiveSuccesses10m !== this.config.minConsecutiveSuccesses10m
-          : draft.minSuccess10m !== this.config.minSuccess10m;
-      hint.classList.toggle('asg-preview-pending', draft.availabilityMode !== this.config.availabilityMode || activeValueChanged);
     }
 
     renderBalancePreview() {
@@ -1538,7 +1513,6 @@
     normalizeConfig,
     normalizeGroupMode,
     normalizeAvailabilityMode,
-    getAvailabilityHint,
     normalizePanelTab,
     getBalanceAmount,
     formatBalance,
