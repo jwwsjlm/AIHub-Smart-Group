@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.5.4
+// @version      0.5.5
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.5.4';
+  const SCRIPT_VERSION = '0.5.5';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -644,11 +644,31 @@
     #${TOGGLE_ID}[hidden]{display:none}
     #${TOGGLE_ID}:hover{background:#0f46b6}
     @media (max-width:759px){
-      #${ROOT_ID}{width:340px}
-      #${ROOT_ID} .asg-body{grid-template-columns:minmax(0,1fr);overflow:auto}
-      #${ROOT_ID} .asg-main-column,#${ROOT_ID} .asg-side-column{overflow:visible}
-      #${ROOT_ID} .asg-side-column{border-top:1px solid #e4e7ec;border-left:0}
-      #${ROOT_ID} .asg-side-tabs{position:static}
+      #${ROOT_ID}{width:min(360px,calc(100vw - 32px))}
+      #${ROOT_ID} .asg-body{
+        display:flex;
+        flex-direction:column;
+        overflow:auto;
+        -webkit-overflow-scrolling:touch;
+      }
+      #${ROOT_ID} .asg-main-column,
+      #${ROOT_ID} .asg-side-column{
+        flex:0 0 auto;
+        min-height:auto;
+        overflow:visible;
+      }
+      #${ROOT_ID} .asg-side-column{
+        border-top:1px solid #e4e7ec;
+        border-left:0;
+      }
+      #${ROOT_ID} .asg-side-tabs{
+        position:static;
+        top:auto;
+        z-index:auto;
+        margin:0;
+        padding:0 0 8px;
+      }
+      #${ROOT_ID} .asg-list{max-height:none}
     }
   `;
 

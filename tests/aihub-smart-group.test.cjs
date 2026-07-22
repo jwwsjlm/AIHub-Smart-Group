@@ -10,6 +10,21 @@ test('hides inactive availability settings despite the shared label display rule
   assert.match(userscriptSource, /\[data-availability-setting\]\[hidden\]\{display:none !important\}/);
 });
 
+test('stacks narrow-screen panel sections without overlapping the main controls', () => {
+  const mediaStart = userscriptSource.indexOf('@media (max-width:759px){');
+  const styleEnd = userscriptSource.indexOf('\n  `;\n\n  const USAGE_STYLE', mediaStart);
+
+  assert.notEqual(mediaStart, -1);
+  assert.notEqual(styleEnd, -1);
+
+  const mobileStyles = userscriptSource.slice(mediaStart, styleEnd);
+  assert.match(mobileStyles, /\.asg-body\{\s*display:flex;\s*flex-direction:column;\s*overflow:auto;/);
+  assert.match(mobileStyles, /\.asg-main-column,\s*#\$\{ROOT_ID\} \.asg-side-column\{\s*flex:0 0 auto;\s*min-height:auto;\s*overflow:visible;/);
+  assert.match(mobileStyles, /\.asg-side-tabs\{\s*position:static;\s*top:auto;\s*z-index:auto;/);
+  assert.match(mobileStyles, /\.asg-list\{max-height:none\}/);
+  assert.doesNotMatch(mobileStyles, /\.asg-body\{[^}]*grid-template-columns/);
+});
+
 test('defaults the adjustable 10m availability threshold to 10 percent', () => {
   assert.equal(core.DEFAULT_CONFIG.minSuccess10m, 0.1);
   assert.equal(core.normalizeConfig({}).minSuccess10m, 0.1);
