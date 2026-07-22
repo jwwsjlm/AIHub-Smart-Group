@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.3.0
+// @version      0.3.1
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -18,6 +18,8 @@
 // @run-at       document-idle
 // ==/UserScript==
 
+/* global GM_addStyle, GM_getValue, GM_registerMenuCommand, GM_setValue, URLSearchParams, document, localStorage, location, module, unsafeWindow, window */
+
 (function (factory) {
   const exported = factory();
   if (typeof module !== 'undefined' && module.exports) module.exports = exported;
@@ -27,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.3.0';
+  const SCRIPT_VERSION = '0.3.1';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -140,10 +142,31 @@
   }
 
   function canAutoSwitch({ now, lastSwitchAt, currentGroupId, targetGroupId, stable, config }) {
-    if (!stable || targetGroupId == null || currentGroupId === targetGroupId) return false;
+    return getAutoSwitchBlockReason({ now, lastSwitchAt, currentGroupId, targetGroupId, stable, config }) === '';
+  }
+
+  function getAutoSwitchBlockReason({ now, lastSwitchAt, currentGroupId, targetGroupId, stable, config }) {
+    if (!stable) return '推荐尚未稳定';
+    if (targetGroupId == null) return '暂无推荐分组';
+    if (currentGroupId === targetGroupId) return '当前密钥已经在推荐分组';
     const cooldownMs = normalizeConfig(config).cooldownMinutes * 60 * 1000;
-    if (!Number.isFinite(lastSwitchAt)) return true;
-    return Number(now) - lastSwitchAt >= cooldownMs;
+    if (Number.isFinite(lastSwitchAt) && Number(now) - lastSwitchAt < cooldownMs) return '切换冷却中';
+    return '';
+  }
+
+  function shouldLogTransition(previous, current, forced = false) {
+    return forced || previous !== current;
+  }
+
+  function getSwitchBlockReason({ loading, allowWhileLoading, error, authError, winner, key, stability, requiredChecks }) {
+    if (loading && !allowWhileLoading) return '正在检测';
+    if (error) return String(error);
+    if (authError) return String(authError);
+    if (!winner) return '暂无符合条件的推荐分组';
+    if (!key) return '请先读取并选择目标密钥';
+    if (!stability?.stable) return `推荐尚未稳定（${Number(stability?.count) || 0}/${requiredChecks} 次）`;
+    if (key.groupId === winner.groupId) return '当前密钥已经在推荐分组';
+    return '';
   }
 
   function projectKeys(keys) {
@@ -210,7 +233,9 @@
 
   function sanitizeLogText(value) {
     return String(value ?? '')
-      .replace(/(?:sk-|key-|token[=:])[^\s,'"]{8,}/gi, '[已隐藏]')
+      .replace(/(Bearer\s+)[^\s,'"]+/gi, '$1[已隐藏]')
+      .replace(/((?:auth[_-]?token|access[_-]?token|token)\s*[=:]\s*)[^\s,'"]+/gi, '$1[已隐藏]')
+      .replace(/(?:sk-|key-)[^\s,'"]{8,}/gi, '[已隐藏]')
       .slice(0, 180);
   }
 
@@ -389,6 +414,10 @@
       this.timer = null;
       this.panel = null;
       this.toggleButton = null;
+      this.lastDetectionLogSignature = null;
+      this.lastAuthLogSignature = '';
+      this.lastErrorLogSignature = '';
+      this.lastAutoSkipLogSignature = '';
     }
 
     start() {
@@ -453,7 +482,7 @@
       this.panel.addEventListener('click', (event) => {
         const action = event.target.closest('[data-action]')?.dataset.action;
         if (action === 'minimize') this.setMinimized(true);
-        if (action === 'refresh') this.refresh();
+        if (action === 'refresh') this.refresh(true);
         if (action === 'switch') this.switchToRecommendation(false);
         if (action === 'save-settings') this.saveSettings();
         if (action === 'clear-logs') this.clearLogs();
@@ -513,7 +542,7 @@
       this.timer = window.setInterval(() => this.refresh(), this.config.pollIntervalSeconds * 1000);
       this.setStatus('设置已保存');
       this.log('info', '设置已保存');
-      this.refresh();
+      this.refresh(true);
     }
 
     log(level, message) {
@@ -546,22 +575,30 @@
       }
     }
 
-    async refresh() {
+    async refresh(forceLog = false) {
       if (this.loading) return;
       this.loading = true;
       this.authError = '';
       this.keyCount = null;
       this.setStatus('检测中...');
+      this.renderActionState();
       try {
         const summary = await fetchMonitorSummary();
         let keys = null;
         try {
           keys = await fetchAllKeys();
         } catch (error) {
+          this.keys = [];
           this.authError = error?.status === 401
             ? (getAuthToken() ? '密钥接口返回 401：当前登录已失效，请重新登录后刷新' : '未找到页面登录令牌，请在此 Chrome 配置中重新登录后刷新')
             : (error instanceof Error ? `密钥读取失败：${error.message}` : '密钥读取失败');
         }
+        if (this.authError && shouldLogTransition(this.lastAuthLogSignature, this.authError, forceLog)) {
+          this.log('error', this.authError);
+        } else if (!this.authError && this.lastAuthLogSignature) {
+          this.log('info', '密钥读取已恢复');
+        }
+        this.lastAuthLogSignature = this.authError;
         this.rows = Array.isArray(summary?.apis) ? summary.apis : [];
         this.ranked = rankCandidates(this.rows, this.config);
         const winner = this.ranked[0] || null;
@@ -577,11 +614,18 @@
         this.lastUpdated = new Date();
         this.error = '';
         this.renderData();
-        this.log('info', `检测完成，推荐${this.ranked[0]?.name || '暂无分组'}`);
+        const detectionSignature = `${this.config.mode}:${winner?.groupId ?? 'none'}`;
+        if (shouldLogTransition(this.lastDetectionLogSignature, detectionSignature, forceLog)) {
+          this.log('info', `检测完成，推荐${winner?.name || '暂无分组'}`);
+        }
+        this.lastDetectionLogSignature = detectionSignature;
+        if (this.lastErrorLogSignature) this.log('info', '监控检测已恢复');
+        this.lastErrorLogSignature = '';
         if (this.config.autoSwitch) await this.switchToRecommendation(true);
       } catch (error) {
         this.error = error instanceof Error ? error.message : '检测失败';
-        this.log('error', this.error);
+        if (shouldLogTransition(this.lastErrorLogSignature, this.error, forceLog)) this.log('error', this.error);
+        this.lastErrorLogSignature = this.error;
         this.setStatus(this.error, true);
         this.renderActionState();
       } finally {
@@ -597,25 +641,53 @@
     async switchToRecommendation(fromAuto) {
       const winner = this.ranked[0];
       const key = this.selectedKey();
-      if (!winner || !key || !this.stability.stable) return false;
-      if (key.groupId === winner.groupId) {
-        this.setStatus(`密钥“${key.name}”已经在 ${winner.name}`);
+      const blockReason = getSwitchBlockReason({
+        loading: this.loading,
+        allowWhileLoading: fromAuto,
+        error: this.error,
+        authError: this.authError,
+        winner,
+        key,
+        stability: this.stability,
+        requiredChecks: this.config.consecutiveChecks,
+      });
+      if (blockReason) {
+        if (fromAuto) {
+          if (shouldLogTransition(this.lastAutoSkipLogSignature, blockReason)) this.log('info', `自动切换跳过：${blockReason}`);
+          this.lastAutoSkipLogSignature = blockReason;
+        } else {
+          this.setStatus(blockReason, Boolean(this.error || this.authError));
+        }
         return false;
       }
+      const now = Date.now();
       if (fromAuto && !canAutoSwitch({
-        now: Date.now(),
+        now,
         lastSwitchAt: Number(this.lastSwitch.at),
         currentGroupId: key.groupId,
         targetGroupId: winner.groupId,
         stable: this.stability.stable,
         config: this.config,
-      })) return false;
+      })) {
+        const reason = getAutoSwitchBlockReason({
+          now,
+          lastSwitchAt: Number(this.lastSwitch.at),
+          currentGroupId: key.groupId,
+          targetGroupId: winner.groupId,
+          stable: this.stability.stable,
+          config: this.config,
+        });
+        if (shouldLogTransition(this.lastAutoSkipLogSignature, reason)) this.log('info', `自动切换跳过：${reason}`);
+        this.lastAutoSkipLogSignature = reason;
+        return false;
+      }
       if (!fromAuto && !window.confirm(`将密钥“${key.name}”切换到 ${winner.name}（${winner.price}x），是否继续？`)) return false;
       try {
         await updateKeyGroup(key.id, winner.groupId);
         key.groupId = winner.groupId;
         key.groupName = winner.name;
         this.lastSwitch = { at: Date.now(), keyId: key.id, groupId: winner.groupId };
+        this.lastAutoSkipLogSignature = '';
         storageSet('lastSwitch', this.lastSwitch);
         this.setStatus(`已切换到 ${winner.name}`);
         this.log('info', `已切换到${winner.name}`);
@@ -698,12 +770,15 @@
       const button = this.panel.querySelector('[data-action="switch"]');
       const winner = this.ranked[0];
       const key = this.selectedKey();
-      let reason = '';
-      if (this.loading) reason = '正在检测';
-      else if (!winner) reason = '暂无符合条件的推荐分组';
-      else if (!key) reason = '请先读取并选择目标密钥';
-      else if (!this.stability.stable) reason = `推荐尚未稳定（${this.stability.count}/${this.config.consecutiveChecks} 次）`;
-      else if (key.groupId === winner.groupId) reason = '当前密钥已经在推荐分组';
+      const reason = getSwitchBlockReason({
+        loading: this.loading,
+        error: this.error,
+        authError: this.authError,
+        winner,
+        key,
+        stability: this.stability,
+        requiredChecks: this.config.consecutiveChecks,
+      });
       button.disabled = Boolean(reason);
       button.title = reason || `切换到 ${winner.name}`;
     }
@@ -718,6 +793,9 @@
     createStabilityState,
     advanceStability,
     canAutoSwitch,
+    getAutoSwitchBlockReason,
+    shouldLogTransition,
+    getSwitchBlockReason,
     projectKeys,
     buildAuthHeaders,
     buildApiHeaders,

@@ -80,6 +80,16 @@ test('keeps bounded, sanitized runtime logs', () => {
   assert.match(core.formatLogLine(bounded[0]), /第三条/);
 });
 
+test('redacts bearer credentials and auth token values from logs', () => {
+  const logs = core.appendLogEntries([], {
+    message: 'Authorization: Bearer header.payload.signature auth_token: secret-token-value',
+  });
+
+  assert.equal(logs[0].message.includes('header.payload.signature'), false);
+  assert.equal(logs[0].message.includes('secret-token-value'), false);
+  assert.match(logs[0].message, /Bearer \[已隐藏\]/);
+});
+
 test('requires the same winner for the configured number of checks', () => {
   let state = core.createStabilityState();
   state = core.advanceStability(state, 14, 2);
@@ -97,6 +107,23 @@ test('blocks auto switching during cooldown and when already on target', () => {
   assert.equal(core.canAutoSwitch({ now: 1_000, lastSwitchAt: 500, currentGroupId: 1, targetGroupId: 2, stable: true, config }), false);
   assert.equal(core.canAutoSwitch({ now: 601_000, lastSwitchAt: 500, currentGroupId: 2, targetGroupId: 2, stable: true, config }), false);
   assert.equal(core.canAutoSwitch({ now: 601_000, lastSwitchAt: 500, currentGroupId: 1, targetGroupId: 2, stable: true, config }), true);
+});
+
+test('explains why automatic switching is skipped', () => {
+  const config = { ...core.DEFAULT_CONFIG, cooldownMinutes: 10 };
+  const ready = {
+    now: 601_000,
+    lastSwitchAt: 500,
+    currentGroupId: 1,
+    targetGroupId: 2,
+    stable: true,
+    config,
+  };
+
+  assert.equal(core.getAutoSwitchBlockReason(ready), '');
+  assert.equal(core.getAutoSwitchBlockReason({ ...ready, stable: false }), '推荐尚未稳定');
+  assert.equal(core.getAutoSwitchBlockReason({ ...ready, currentGroupId: 2 }), '当前密钥已经在推荐分组');
+  assert.equal(core.getAutoSwitchBlockReason({ ...ready, now: 1_000 }), '切换冷却中');
 });
 
 test('projects key metadata without exposing complete API key values', () => {
@@ -124,4 +151,30 @@ test('merges paginated API key responses without duplicates', () => {
     { items: [{ id: 2 }, { id: 3 }], pages: 2 },
   ]);
   assert.deepEqual(merged.map((key) => key.id), [1, 2, 3]);
+});
+
+test('logs periodic detection state only when it changes unless forced', () => {
+  assert.equal(core.shouldLogTransition(null, 'price:14', false), true);
+  assert.equal(core.shouldLogTransition('price:14', 'price:14', false), false);
+  assert.equal(core.shouldLogTransition('price:14', 'price:14', true), true);
+  assert.equal(core.shouldLogTransition('price:14', 'price:20', false), true);
+});
+
+test('blocks switching while loading or when key authentication failed', () => {
+  const ready = {
+    loading: false,
+    authError: '',
+    winner: { groupId: 14 },
+    key: { groupId: 20 },
+    stability: { stable: true, count: 2 },
+    requiredChecks: 2,
+  };
+
+  assert.equal(core.getSwitchBlockReason(ready), '');
+  assert.equal(core.getSwitchBlockReason({ ...ready, loading: true }), '正在检测');
+  assert.equal(core.getSwitchBlockReason({ ...ready, loading: true, allowWhileLoading: true }), '');
+  assert.equal(core.getSwitchBlockReason({ ...ready, error: '监控请求失败' }), '监控请求失败');
+  assert.equal(core.getSwitchBlockReason({ ...ready, authError: '登录已失效' }), '登录已失效');
+  assert.equal(core.getSwitchBlockReason({ ...ready, stability: { stable: false, count: 1 } }), '推荐尚未稳定（1/2 次）');
+  assert.equal(core.getSwitchBlockReason({ ...ready, key: { groupId: 14 } }), '当前密钥已经在推荐分组');
 });
