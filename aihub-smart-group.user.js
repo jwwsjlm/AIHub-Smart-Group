@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.4.8
+// @version      0.4.9
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.4.8';
+  const SCRIPT_VERSION = '0.4.9';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -82,7 +82,7 @@
       mode: normalizeGroupMode(source.mode),
       balanceMaxPrice: clamp(numberOr(source.balanceMaxPrice, DEFAULT_CONFIG.balanceMaxPrice), 0, 1000),
       excludedGroupKeywords: normalizeExcludedGroupKeywords(source.excludedGroupKeywords),
-      maxMonitorAgeSeconds: Math.round(clamp(numberOr(source.maxMonitorAgeSeconds, DEFAULT_CONFIG.maxMonitorAgeSeconds), 30, 3600)),
+      maxMonitorAgeSeconds: DEFAULT_CONFIG.maxMonitorAgeSeconds,
     };
   }
 
@@ -564,6 +564,7 @@
     #${ROOT_ID} .asg-balance{flex:none;color:#15803d;font-size:12px;font-weight:600;text-align:right;white-space:nowrap}
     #${ROOT_ID} .asg-balance.asg-balance-error{color:#b54708;font-weight:500}
     #${ROOT_ID} .asg-recommend{padding:9px;background:#f4f8ff;border:1px solid #cfe0ff;border-radius:6px;margin:9px 0}
+    #${ROOT_ID} .asg-recommend.asg-recommend-stale{background:#fff4f2;border-color:#fecdca}
     #${ROOT_ID} .asg-recommend strong{font-size:15px}
     #${ROOT_ID} .asg-muted{color:#667085}
     #${ROOT_ID} .asg-metrics{display:flex;flex-wrap:wrap;gap:6px 12px;color:#475467;font-size:12px;margin-top:4px}
@@ -675,6 +676,7 @@
       this.candidateDiagnostics = analyzeCandidates([], this.config);
       this.lastKeysFetchedAt = 0;
       this.lastDetectionLogSignature = null;
+      this.lastMonitorStaleLogState = null;
       this.lastAuthLogSignature = '';
       this.lastErrorLogSignature = '';
       this.lastAutoSkipLogSignature = '';
@@ -747,7 +749,6 @@
                   <label class="asg-setting-compact asg-auto"><input type="checkbox" data-setting="requireNoWarnings"> 排除监控警告</label>
                   <label class="asg-setting-wide" title="名称包含任一关键词的分组不会参与推荐或切换">排除分组关键词（使用 | 分隔）<input type="text" data-setting="excludedGroupKeywords" placeholder="例如 free|unstable"></label>
                   <span class="asg-setting-preview asg-setting-wide" data-field="excluded-preview" aria-live="polite"></span>
-                  <label class="asg-setting-compact" title="超过此时间没有新的监控样本时暂停切换">数据过期保护（秒）<input type="number" min="30" max="3600" step="10" data-setting="maxMonitorAgeSeconds"><span class="asg-setting-preview">默认 600 秒 = 10 分钟</span></label>
                 </div>
               </section>
               <section class="asg-settings-section">
@@ -1041,6 +1042,7 @@
         this.rows = attachRecentAvailability(summary?.apis, series);
         this.monitorGeneratedAt = getLatestMonitorSampleAt(series) || series?.generatedAt || summary?.generatedAt || null;
         this.updateMonitorFreshness();
+        this.recordMonitorFreshnessState();
         this.candidateDiagnostics = analyzeCandidates(this.rows, this.config);
         this.ranked = rankCandidates(this.rows, this.config);
         const winner = this.ranked[0] || null;
@@ -1089,6 +1091,8 @@
       const wasStale = this.monitorFreshness.stale;
       this.updateMonitorFreshness();
       if (!wasStale && this.monitorFreshness.stale) this.stability = createStabilityState();
+      this.recordMonitorFreshnessState();
+      this.panel.querySelector('[data-field="recommend"]')?.classList.toggle('asg-recommend-stale', this.monitorFreshness.stale);
       const node = this.panel.querySelector('[data-field="monitor-freshness"]');
       if (node) {
         node.textContent = this.monitorFreshness.stale
@@ -1098,6 +1102,16 @@
       }
       this.renderCooldownPreview();
       this.renderActionState();
+    }
+
+    recordMonitorFreshnessState() {
+      if (!this.monitorGeneratedAt || this.lastMonitorStaleLogState === this.monitorFreshness.stale) return;
+      if (this.monitorFreshness.stale) {
+        this.log('error', `监控数据已超过 10 分钟未更新（${this.monitorFreshness.label}），已暂停切换`);
+      } else if (this.lastMonitorStaleLogState === true) {
+        this.log('info', '监控数据已恢复，切换保护解除');
+      }
+      this.lastMonitorStaleLogState = this.monitorFreshness.stale;
     }
 
     selectedKey() {
@@ -1186,6 +1200,7 @@
     renderData() {
       const winner = this.ranked[0];
       const recommend = this.panel.querySelector('[data-field="recommend"]');
+      recommend.classList.toggle('asg-recommend-stale', this.monitorFreshness.stale);
       recommend.replaceChildren();
       if (!winner) {
         const empty = document.createElement('div');

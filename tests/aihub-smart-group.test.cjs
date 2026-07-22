@@ -27,9 +27,9 @@ test('normalizes thresholds and safety settings', () => {
 
 test('normalizes the monitor freshness limit', () => {
   assert.equal(core.DEFAULT_CONFIG.maxMonitorAgeSeconds, 600);
-  assert.equal(core.normalizeConfig({ maxMonitorAgeSeconds: '240' }).maxMonitorAgeSeconds, 240);
-  assert.equal(core.normalizeConfig({ maxMonitorAgeSeconds: 1 }).maxMonitorAgeSeconds, 30);
-  assert.equal(core.normalizeConfig({ maxMonitorAgeSeconds: 9999 }).maxMonitorAgeSeconds, 3600);
+  assert.equal(core.normalizeConfig({ maxMonitorAgeSeconds: '240' }).maxMonitorAgeSeconds, 600);
+  assert.equal(core.normalizeConfig({ maxMonitorAgeSeconds: 1 }).maxMonitorAgeSeconds, 600);
+  assert.equal(core.normalizeConfig({ maxMonitorAgeSeconds: 9999 }).maxMonitorAgeSeconds, 600);
 });
 
 test('uses the latest actual monitor sample as the freshness timestamp', () => {
