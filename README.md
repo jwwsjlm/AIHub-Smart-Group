@@ -16,18 +16,38 @@
 
 ## 安装
 
-### Greasy Fork 安装
+### 方法一：Greasy Fork 安装（推荐）
 
-1. 安装 [Tampermonkey](https://www.tampermonkey.net/)。
-2. 打开 Greasy Fork 上的脚本页面并点击安装。
-3. 登录 AIHub，打开 `/providers` 或 `/keys`。
+1. 在浏览器中安装 [Tampermonkey](https://www.tampermonkey.net/) 扩展。
+2. 打开 [AIHub Smart Group 的 Greasy Fork 页面](https://greasyfork.org/zh-CN/scripts/587603-aihub-smart-group)。
+3. 点击绿色的“安装此脚本”按钮。
+4. 浏览器会跳转到 Tampermonkey 安装页面，再点击一次“安装”。
+5. 登录 [AIHub](https://aihub.top/)，打开“供应商大厅”“API 密钥”或“使用记录”页面即可使用。
 
-### GitHub 手动安装
+以后发布新版本时，Tampermonkey 会定期检查更新。也可以打开 Tampermonkey 管理面板，在“已安装脚本”中手动检查更新。
 
-1. 安装 Tampermonkey。
-2. 打开 [aihub-smart-group.user.js](./aihub-smart-group.user.js)。
-3. 复制全部内容，在 Tampermonkey 中新建脚本，粘贴并保存。
-4. 登录 AIHub 后刷新页面。
+### 方法二：GitHub 直接安装
+
+1. 先安装 [Tampermonkey](https://www.tampermonkey.net/) 扩展。
+2. 打开 [脚本直装地址](https://raw.githubusercontent.com/jwwsjlm/AIHub-Smart-Group/main/aihub-smart-group.user.js)。
+3. Tampermonkey 会自动识别脚本并显示安装页面，点击“安装”。
+4. 登录 [AIHub](https://aihub.top/) 并刷新目标页面。
+
+如果打开直装地址后只看到代码，没有出现安装页面，请确认 Tampermonkey 已启用，然后重新打开该地址。
+
+### 方法三：手动安装
+
+1. 点击 Tampermonkey 图标，选择“添加新脚本”。
+2. 打开仓库中的 [aihub-smart-group.user.js](./aihub-smart-group.user.js)，复制全部代码。
+3. 删除编辑器内原有示例代码，粘贴脚本代码并按 `Ctrl+S` 保存。
+4. 确认脚本状态为“已启用”，然后刷新 AIHub 页面。
+
+### 安装后没有显示
+
+- 确认 Tampermonkey 和“AIHub 智能分组”脚本都已启用。
+- 确认当前域名是 `https://aihub.top/`。
+- 更新或重新安装脚本后，刷新 AIHub 页面。
+- 智能推荐面板只在“供应商大厅”和“API 密钥”页面显示；“使用记录”页面只会在分组名称旁显示绿色倍率。
 
 ## 第一次使用
 
@@ -120,6 +140,8 @@
 ## Greasy Fork 同步
 
 GitHub 仓库：[jwwsjlm/AIHub-Smart-Group](https://github.com/jwwsjlm/AIHub-Smart-Group)
+
+Greasy Fork 脚本页面：[AIHub Smart Group](https://greasyfork.org/zh-CN/scripts/587603-aihub-smart-group)
 
 Greasy Fork 同步源：
 
