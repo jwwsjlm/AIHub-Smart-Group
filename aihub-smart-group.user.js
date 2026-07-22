@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.4.1
+// @version      0.4.2
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.4.1';
+  const SCRIPT_VERSION = '0.4.2';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -36,8 +36,7 @@
     speed: '速度',
   });
   const DEFAULT_CONFIG = Object.freeze({
-    minSuccess6h: 0.95,
-    minSuccess24h: 0.90,
+    minSuccess10m: 0.10,
     requireNoWarnings: true,
     consecutiveChecks: 2,
     pollIntervalSeconds: 30,
@@ -59,8 +58,7 @@
   function normalizeConfig(input = {}) {
     const source = input && typeof input === 'object' ? input : {};
     return {
-      minSuccess6h: clamp(numberOr(source.minSuccess6h, DEFAULT_CONFIG.minSuccess6h), 0, 1),
-      minSuccess24h: clamp(numberOr(source.minSuccess24h, DEFAULT_CONFIG.minSuccess24h), 0, 1),
+      minSuccess10m: clamp(numberOr(source.minSuccess10m, DEFAULT_CONFIG.minSuccess10m), 0, 1),
       requireNoWarnings: source.requireNoWarnings !== false,
       consecutiveChecks: Math.round(clamp(numberOr(source.consecutiveChecks, DEFAULT_CONFIG.consecutiveChecks), 1, 5)),
       pollIntervalSeconds: Math.round(clamp(numberOr(source.pollIntervalSeconds, DEFAULT_CONFIG.pollIntervalSeconds), 10, 3600)),
@@ -82,11 +80,9 @@
         if (!row || row.enabled === false || row.available !== true) return false;
         const groupId = Number(row.group_id);
         const price = Number(row.priceMultiplier);
-        const success6h = Number(row.successRates?.['6h']);
-        const success24h = Number(row.successRates?.['24h']);
+        const success10m = Number(row.successRates?.['10m']);
         if (!Number.isInteger(groupId) || groupId <= 0 || !Number.isFinite(price) || price < 0) return false;
-        if (!Number.isFinite(success6h) || success6h < normalizedConfig.minSuccess6h) return false;
-        if (!Number.isFinite(success24h) || success24h < normalizedConfig.minSuccess24h) return false;
+        if (!Number.isFinite(success10m) || success10m < normalizedConfig.minSuccess10m) return false;
         if (normalizedConfig.requireNoWarnings && Array.isArray(row.warningReasons) && row.warningReasons.length > 0) return false;
         return true;
       })
@@ -94,23 +90,20 @@
         ...row,
         groupId: Number(row.group_id),
         price: Number(row.priceMultiplier),
-        success6h: Number(row.successRates['6h']),
-        success24h: Number(row.successRates['24h']),
+        success10m: Number(row.successRates['10m']),
         latency: Number.isFinite(Number(row.firstTokenLatencyMs)) ? Number(row.firstTokenLatencyMs) : Number.POSITIVE_INFINITY,
         name: String(row.planType || row.name || `Group ${row.group_id}`),
       }));
     const comparePrice = (left, right) => (
       left.price - right.price
-      || right.success6h - left.success6h
-      || right.success24h - left.success24h
+      || right.success10m - left.success10m
       || left.latency - right.latency
       || left.name.localeCompare(right.name)
     );
     const compareSpeed = (left, right) => (
       left.latency - right.latency
       || left.price - right.price
-      || right.success6h - left.success6h
-      || right.success24h - left.success24h
+      || right.success10m - left.success10m
       || left.name.localeCompare(right.name)
     );
     if (normalizedConfig.mode === 'speed') return candidates.sort(compareSpeed);
@@ -125,6 +118,29 @@
       });
     }
     return candidates.sort(comparePrice);
+  }
+
+  function attachRecentAvailability(rows, seriesPayload, windowMs = 10 * 60 * 1000) {
+    const generatedAt = Date.parse(seriesPayload?.generatedAt);
+    const now = Number.isFinite(generatedAt) ? generatedAt : Date.now();
+    const cutoff = now - Math.max(1, Number(windowMs) || 1);
+    const seriesByApiId = seriesPayload?.seriesByApiId || {};
+    return (Array.isArray(rows) ? rows : []).map((row) => {
+      const samples = Array.isArray(seriesByApiId[row?.id]) ? seriesByApiId[row.id] : [];
+      const recent = samples.filter((sample) => {
+        const at = Number(sample?.[0]);
+        return Number.isFinite(at) && at >= cutoff && at <= now && (sample?.[1] === 0 || sample?.[1] === 1);
+      });
+      const successes = recent.filter((sample) => sample[1] === 1).length;
+      return {
+        ...row,
+        successRates: {
+          ...(row?.successRates || {}),
+          '10m': recent.length ? successes / recent.length : Number.NaN,
+        },
+        recentSampleCount: recent.length,
+      };
+    });
   }
 
   function normalizeGroupName(value) {
@@ -341,6 +357,10 @@
     return apiRequest('/public/monitor/summary');
   }
 
+  async function fetchMonitorSeries() {
+    return apiRequest('/public/monitor/series/6h');
+  }
+
   async function fetchAllKeys() {
     const pages = [];
     let page = 1;
@@ -496,8 +516,7 @@
           <details class="asg-guide"><summary>快速开始</summary><ol><li>选择价格、平衡或速度模式。</li><li>选择目标密钥并点击“检测”。</li><li>确认推荐分组后点击切换；自动切换可在设置中开启。</li></ol></details>
           <details><summary>设置</summary>
             <div class="asg-grid">
-              <label>6h 最低可用率<input type="number" min="0" max="1" step="0.01" data-setting="minSuccess6h"></label>
-              <label>24h 最低可用率<input type="number" min="0" max="1" step="0.01" data-setting="minSuccess24h"></label>
+              <label title="可自行修改，0.1 表示 10%">最近10分钟最低可用率（默认10%）<input type="number" min="0" max="1" step="0.01" data-setting="minSuccess10m"></label>
               <label>连续通过次数<input type="number" min="1" max="5" step="1" data-setting="consecutiveChecks"></label>
               <label>检测间隔（秒）<input type="number" min="10" max="3600" step="1" data-setting="pollIntervalSeconds"></label>
               <label>切换冷却（分钟）<input type="number" min="0" max="1440" step="1" data-setting="cooldownMinutes"></label>
@@ -628,7 +647,7 @@
       this.setStatus('检测中...');
       this.renderActionState();
       try {
-        const summary = await fetchMonitorSummary();
+        const [summary, series] = await Promise.all([fetchMonitorSummary(), fetchMonitorSeries()]);
         if (!this.active) return;
         let keys = null;
         try {
@@ -651,7 +670,7 @@
           this.log('info', '密钥读取已恢复');
         }
         this.lastAuthLogSignature = this.authError;
-        this.rows = Array.isArray(summary?.apis) ? summary.apis : [];
+        this.rows = attachRecentAvailability(summary?.apis, series);
         this.ranked = rankCandidates(this.rows, this.config);
         const winner = this.ranked[0] || null;
         this.stability = advanceStability(this.stability, winner?.groupId ?? null, this.config.consecutiveChecks);
@@ -777,7 +796,7 @@
         title.textContent = `${GROUP_MODE_LABELS[this.config.mode]}模式 · ${winner.name} · ${winner.price}x`;
         const metrics = document.createElement('div');
         metrics.className = 'asg-metrics';
-        metrics.textContent = `6h ${formatPercent(winner.success6h)} · 24h ${formatPercent(winner.success24h)} · 首Token ${formatLatency(winner.latency)}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
+        metrics.textContent = `10m ${formatPercent(winner.success10m)} · ${winner.recentSampleCount}次探测 · 首Token ${formatLatency(winner.latency)}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
         recommend.append(title, metrics);
       }
       const keyInfo = this.authError || (this.keyCount !== null ? `已读取 ${this.keyCount} 个密钥` : '');
@@ -815,7 +834,7 @@
         const name = document.createElement('span');
         name.textContent = candidate.name;
         const metrics = document.createElement('span');
-        metrics.textContent = `${candidate.price}x · ${formatPercent(candidate.success6h)}`;
+        metrics.textContent = `${candidate.price}x · 10m ${formatPercent(candidate.success10m)}`;
         item.append(name, metrics);
         list.appendChild(item);
       }
@@ -976,6 +995,7 @@
     normalizeConfig,
     normalizeGroupMode,
     rankCandidates,
+    attachRecentAvailability,
     normalizeGroupName,
     buildGroupMultiplierMap,
     formatMultiplier,

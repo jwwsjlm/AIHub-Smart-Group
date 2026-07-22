@@ -3,31 +3,35 @@ const assert = require('node:assert/strict');
 
 const core = require('../aihub-smart-group.user.js');
 
+test('defaults the adjustable 10m availability threshold to 10 percent', () => {
+  assert.equal(core.DEFAULT_CONFIG.minSuccess10m, 0.1);
+  assert.equal(core.normalizeConfig({}).minSuccess10m, 0.1);
+  assert.equal(core.normalizeConfig({ minSuccess6h: 0.95 }).minSuccess10m, 0.1);
+});
+
 test('normalizes thresholds and safety settings', () => {
   const config = core.normalizeConfig({
-    minSuccess6h: '0.9',
-    minSuccess24h: 'invalid',
+    minSuccess10m: '0.9',
     consecutiveChecks: 0,
     pollIntervalSeconds: 2,
     cooldownMinutes: -1,
     requireNoWarnings: false,
   });
 
-  assert.equal(config.minSuccess6h, 0.9);
-  assert.equal(config.minSuccess24h, 0.9);
+  assert.equal(config.minSuccess10m, 0.9);
   assert.equal(config.consecutiveChecks, 1);
   assert.equal(config.pollIntervalSeconds, 10);
   assert.equal(config.cooldownMinutes, 0);
   assert.equal(config.requireNoWarnings, false);
 });
 
-test('filters and orders eligible monitor rows by price then reliability', () => {
+test('filters and orders eligible monitor rows by recent availability then price', () => {
   const rows = [
-    { planType: 'slow-cheap', group_id: 3, priceMultiplier: 0.03, available: true, successRates: { '6h': 1, '24h': 0.95 }, firstTokenLatencyMs: 3000, warningReasons: [] },
-    { planType: 'best', group_id: 2, priceMultiplier: 0.05, available: true, successRates: { '6h': 1, '24h': 1 }, firstTokenLatencyMs: 800, warningReasons: [] },
-    { planType: 'unavailable', group_id: 1, priceMultiplier: 0.001, available: false, successRates: { '6h': 1, '24h': 1 }, warningReasons: [] },
-    { planType: 'warning', group_id: 4, priceMultiplier: 0.02, available: true, successRates: { '6h': 1, '24h': 1 }, warningReasons: [{ type: 'input_tokens_change' }] },
-    { planType: 'low-24h', group_id: 5, priceMultiplier: 0.01, available: true, successRates: { '6h': 1, '24h': 0.5 }, warningReasons: [] },
+    { planType: 'slow-cheap', group_id: 3, priceMultiplier: 0.03, available: true, successRates: { '10m': 1, '24h': 0.01 }, firstTokenLatencyMs: 3000, warningReasons: [] },
+    { planType: 'best', group_id: 2, priceMultiplier: 0.05, available: true, successRates: { '10m': 1, '24h': 1 }, firstTokenLatencyMs: 800, warningReasons: [] },
+    { planType: 'unavailable', group_id: 1, priceMultiplier: 0.001, available: false, successRates: { '10m': 1, '24h': 1 }, warningReasons: [] },
+    { planType: 'warning', group_id: 4, priceMultiplier: 0.02, available: true, successRates: { '10m': 1, '24h': 1 }, warningReasons: [{ type: 'input_tokens_change' }] },
+    { planType: 'low-10m', group_id: 5, priceMultiplier: 0.01, available: true, successRates: { '10m': 0, '24h': 1 }, warningReasons: [] },
   ];
 
   const ranked = core.rankCandidates(rows, core.DEFAULT_CONFIG);
@@ -37,18 +41,43 @@ test('filters and orders eligible monitor rows by price then reliability', () =>
 
 test('uses reliability and latency as deterministic tie breakers', () => {
   const rows = [
-    { planType: 'slow', group_id: 1, priceMultiplier: 0.05, available: true, successRates: { '6h': 0.98, '24h': 0.99 }, firstTokenLatencyMs: 2000, warningReasons: [] },
-    { planType: 'fast', group_id: 2, priceMultiplier: 0.05, available: true, successRates: { '6h': 0.98, '24h': 0.99 }, firstTokenLatencyMs: 1000, warningReasons: [] },
+    { planType: 'slow', group_id: 1, priceMultiplier: 0.05, available: true, successRates: { '10m': 0.98, '24h': 0.99 }, firstTokenLatencyMs: 2000, warningReasons: [] },
+    { planType: 'fast', group_id: 2, priceMultiplier: 0.05, available: true, successRates: { '10m': 0.98, '24h': 0.99 }, firstTokenLatencyMs: 1000, warningReasons: [] },
   ];
 
   assert.equal(core.rankCandidates(rows, core.DEFAULT_CONFIG)[0].planType, 'fast');
 });
 
+test('computes availability from valid monitor samples in the latest 10 minutes', () => {
+  const now = Date.parse('2026-07-22T05:10:00Z');
+  const rows = [
+    { id: 'api-1', successRates: { '24h': 0.5 } },
+    { id: 'api-2', successRates: { '24h': 1 } },
+  ];
+  const series = {
+    generatedAt: new Date(now).toISOString(),
+    seriesByApiId: {
+      'api-1': [
+        [now - 11 * 60_000, 0],
+        [now - 9 * 60_000, 1],
+        [now - 4 * 60_000, 0],
+      ],
+      'api-2': [[now - 11 * 60_000, 1]],
+    },
+  };
+
+  const enriched = core.attachRecentAvailability(rows, series, 10 * 60_000);
+  assert.equal(enriched[0].successRates['10m'], 0.5);
+  assert.equal(enriched[0].recentSampleCount, 2);
+  assert.equal(Number.isNaN(enriched[1].successRates['10m']), true);
+  assert.equal(enriched[1].recentSampleCount, 0);
+});
+
 test('selects AIHub candidates for price, balance, and speed modes', () => {
   const rows = [
-    { planType: 'cheap', group_id: 1, priceMultiplier: 0.04, available: true, successRates: { '6h': 1, '24h': 1 }, firstTokenLatencyMs: 500, warningReasons: [] },
-    { planType: 'balanced', group_id: 2, priceMultiplier: 0.045, available: true, successRates: { '6h': 1, '24h': 1 }, firstTokenLatencyMs: 100, warningReasons: [] },
-    { planType: 'fast', group_id: 3, priceMultiplier: 0.08, available: true, successRates: { '6h': 1, '24h': 1 }, firstTokenLatencyMs: 50, warningReasons: [] },
+    { planType: 'cheap', group_id: 1, priceMultiplier: 0.04, available: true, successRates: { '10m': 1, '24h': 1 }, firstTokenLatencyMs: 500, warningReasons: [] },
+    { planType: 'balanced', group_id: 2, priceMultiplier: 0.045, available: true, successRates: { '10m': 1, '24h': 1 }, firstTokenLatencyMs: 100, warningReasons: [] },
+    { planType: 'fast', group_id: 3, priceMultiplier: 0.08, available: true, successRates: { '10m': 1, '24h': 1 }, firstTokenLatencyMs: 50, warningReasons: [] },
   ];
 
   assert.equal(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'price' })[0].planType, 'cheap');
