@@ -145,7 +145,7 @@
 
 ### 面板没有出现
 
-确认当前网址是 `aihub.top/providers` 或 `aihub.top/keys`，并在 Tampermonkey 中启用了脚本。更新脚本后刷新页面；如果旧面板仍在，检查是否重复安装了旧脚本。
+确认已登录 `aihub.top`，并在 Tampermonkey 中启用了脚本。更新脚本后刷新页面；如果旧面板仍在，检查是否重复安装了旧脚本。
 
 ### 显示“未找到页面登录令牌”
 
@@ -175,12 +175,29 @@ Greasy Fork 同步源：
 
 仓库已配置 Greasy Fork webhook。向 `main` 分支推送新版本后，Greasy Fork 会自动检查并同步脚本。
 
+## 参与贡献
+
+1. Fork 本仓库并从最新 `main` 创建分支。
+2. 修改代码、测试或文档，并在本地运行下方全部验证命令。
+3. 向本仓库的 `main` 分支提交 Pull Request。
+4. 按 PR 模板填写修改内容、修改原因和验证方式。
+
+PR 创建或更新后，GitHub 会自动运行：
+
+- 仓库与版本一致性检查
+- JavaScript 语法检查
+- 全部 Node 测试
+- ESLint 静态检查
+
+检查结束后，“PR Report Bot”会在 PR 中更新一条报告，显示是否建议合并、修改文件、增删行、提交记录和作者填写的修改说明。自动报告不代替维护者人工审核。
+
 ## 本地验证
 
 ```powershell
 node --check aihub-smart-group.user.js
-node --test tests/aihub-smart-group.test.cjs
-npx --yes eslint@9.39.2 aihub-smart-group.user.js
+node scripts/check-repository.cjs
+node --test tests/*.test.cjs
+npx --yes eslint@9.39.2 aihub-smart-group.user.js scripts/check-repository.cjs tests/*.test.cjs
 ```
 
 当前版本：`0.4.2`
