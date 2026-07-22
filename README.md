@@ -2,7 +2,7 @@
 
 一个用于 AIHub 的 Tampermonkey 油猴脚本。它会读取供应商监控数据，按价格、首 Token 速度和可用率推荐分组，并可把已有 API 密钥切换到推荐分组。
 
-脚本不会显示或保存完整 API Key。
+脚本不会显示或保存完整 API Key。面板顶部会显示当前账户余额，并在每次检测刷新时重新读取。
 
 ## 支持页面
 
@@ -113,6 +113,7 @@
 - 数据过期保护（默认 `600` 秒，即 10 分钟）
 - 是否排除监控警告
 - 是否开启自动切换
+- 当前账户余额（每次检测动态刷新）
 
 点击“保存设置”后，配置会写入当前浏览器的 Tampermonkey 存储。模式、目标密钥和最近一次切换记录也会保存。
 
@@ -218,4 +219,4 @@ node --test tests/*.test.cjs
 npx --yes eslint@9.39.2 aihub-smart-group.user.js scripts/check-repository.cjs tests/*.test.cjs
 ```
 
-当前版本：`0.4.7`
+当前版本：`0.4.8`

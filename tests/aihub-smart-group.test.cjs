@@ -282,6 +282,18 @@ test('marks authenticated user API requests like the AIHub client', () => {
     'X-User-UI-Request': '1',
   });
   assert.deepEqual(core.buildApiHeaders('/public/monitor/summary', ''), {});
+  assert.deepEqual(core.buildApiHeaders('/auth/me?timezone=Asia%2FShanghai', 'token-value'), {
+    Authorization: 'Bearer token-value',
+    'X-User-UI-Request': '1',
+  });
+});
+
+test('extracts and formats the current balance without exposing unrelated account data', () => {
+  assert.equal(core.getBalanceAmount({ data: { balance: '2.42650019', email: 'private@example.com' } }), 2.42650019);
+  assert.equal(core.getBalanceAmount({ data: { balance: -1 } }), null);
+  assert.equal(core.getBalanceAmount({ data: { balance: 'unknown' } }), null);
+  assert.equal(core.formatBalance(2.42650019), '2.4265');
+  assert.equal(core.formatBalance(Number.NaN), '暂无数据');
 });
 
 test('merges paginated API key responses without duplicates', () => {

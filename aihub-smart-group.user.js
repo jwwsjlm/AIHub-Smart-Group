@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.4.7
+// @version      0.4.8
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.4.7';
+  const SCRIPT_VERSION = '0.4.8';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -92,6 +92,18 @@
 
   function normalizePanelTab(value) {
     return value === 'logs' ? 'logs' : 'settings';
+  }
+
+  function getBalanceAmount(payload) {
+    const value = Number(payload?.data?.balance ?? payload?.balance);
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  }
+
+  function formatBalance(value) {
+    const amount = Number(value);
+    return Number.isFinite(amount) && amount >= 0
+      ? amount.toFixed(6).replace(/\.?0+$/, '')
+      : '暂无数据';
   }
 
   function getExcludedGroupInfo(rows, keywordInput) {
@@ -371,7 +383,7 @@
 
   function buildApiHeaders(path, token) {
     const headers = buildAuthHeaders(token);
-    if (/^\/(?:keys(?:\/|\?|$)|groups\/(?:available|rates)(?:\?|$)|usage(?:\/|\?|$)|redeem(?:\/|\?|$)|subscriptions(?:\/|\?|$))/.test(path)) {
+    if (/^\/(?:auth\/me(?:\?|$)|keys(?:\/|\?|$)|groups\/(?:available|rates)(?:\?|$)|usage(?:\/|\?|$)|redeem(?:\/|\?|$)|subscriptions(?:\/|\?|$))/.test(path)) {
       headers['X-User-UI-Request'] = '1';
     }
     return headers;
@@ -509,6 +521,10 @@
     return apiRequest('/public/monitor/series/6h');
   }
 
+  async function fetchCurrentBalance() {
+    return apiRequest('/auth/me?timezone=Asia%2FShanghai');
+  }
+
   async function fetchAllKeys() {
     const pages = [];
     let page = 1;
@@ -543,7 +559,10 @@
     #${ROOT_ID} .asg-body{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);flex:1;min-height:0;overflow:hidden}
     #${ROOT_ID} .asg-main-column,#${ROOT_ID} .asg-side-column{min-width:0;min-height:0;overflow:auto;padding:10px 12px}
     #${ROOT_ID} .asg-side-column{border-left:1px solid #e4e7ec;background:#fbfcfe}
-    #${ROOT_ID} .asg-status{color:#667085;font-size:12px;margin-bottom:8px}
+    #${ROOT_ID} .asg-status-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+    #${ROOT_ID} .asg-status{min-width:0;color:#667085;font-size:12px}
+    #${ROOT_ID} .asg-balance{flex:none;color:#15803d;font-size:12px;font-weight:600;text-align:right;white-space:nowrap}
+    #${ROOT_ID} .asg-balance.asg-balance-error{color:#b54708;font-weight:500}
     #${ROOT_ID} .asg-recommend{padding:9px;background:#f4f8ff;border:1px solid #cfe0ff;border-radius:6px;margin:9px 0}
     #${ROOT_ID} .asg-recommend strong{font-size:15px}
     #${ROOT_ID} .asg-muted{color:#667085}
@@ -641,6 +660,8 @@
       this.lastUpdated = null;
       this.error = '';
       this.authError = '';
+      this.balance = null;
+      this.balanceError = '';
       this.keyCount = null;
       this.minimized = storageGet('minimized', false) === true;
       this.sideTab = normalizePanelTab(storageGet('sideTab', 'settings'));
@@ -695,7 +716,7 @@
         <div class="asg-head"><strong>AIHub 智能分组 v${SCRIPT_VERSION}</strong><button class="asg-icon" data-action="minimize" title="最小化">−</button></div>
         <div class="asg-body">
           <div class="asg-main-column">
-            <div class="asg-status" data-field="status">准备检测</div>
+            <div class="asg-status-row"><div class="asg-status" data-field="status">准备检测</div><div class="asg-balance" data-field="balance">余额读取中...</div></div>
             <label for="asg-mode-select">模式</label>
             <select id="asg-mode-select" data-field="mode"><option value="price">价格（最低价格）</option><option value="balance">平衡（倍率上限内首 Token 最快）</option><option value="speed">速度（最快首字）</option></select>
             <div class="asg-recommend" data-field="recommend"><div class="asg-muted">正在读取监控数据...</div></div>
@@ -982,8 +1003,18 @@
       this.setStatus('检测中...');
       this.renderActionState();
       try {
-        const [summary, series] = await Promise.all([fetchMonitorSummary(), fetchMonitorSeries()]);
+        const [summary, series, balanceResult] = await Promise.all([
+          fetchMonitorSummary(),
+          fetchMonitorSeries(),
+          fetchCurrentBalance().then((payload) => ({ payload })).catch((error) => ({ error })),
+        ]);
         if (!this.active) return;
+        if (balanceResult.error) {
+          this.balanceError = balanceResult.error instanceof Error ? balanceResult.error.message : '余额读取失败';
+        } else {
+          this.balance = getBalanceAmount(balanceResult.payload);
+          this.balanceError = this.balance === null ? '余额数据格式异常' : '';
+        }
         let keys = null;
         if (shouldRefreshKeys({ now: Date.now(), lastFetchedAt: this.lastKeysFetchedAt, keyCount: this.keys.length, force: forceLog })) {
           try {
@@ -1190,6 +1221,7 @@
         ? `监控数据已过期（${this.monitorFreshness.label}），切换已暂停`
         : `数据更新于 ${this.monitorFreshness.label}`;
       recommend.appendChild(freshness);
+      this.renderBalance();
       const keyInfo = this.authError || (this.keyCount !== null ? `已读取 ${this.keyCount} 个密钥` : '');
       this.setStatus(this.error || keyInfo || (this.lastUpdated ? `最近检测：${this.lastUpdated.toLocaleTimeString()}` : '准备检测'), Boolean(this.error || this.authError));
       this.renderKeys();
@@ -1197,6 +1229,14 @@
       this.renderLogs();
       this.renderActionState();
       this.renderSettingsPreviews();
+    }
+
+    renderBalance() {
+      const node = this.panel?.querySelector('[data-field="balance"]');
+      if (!node) return;
+      node.classList.toggle('asg-balance-error', Boolean(this.balanceError));
+      node.textContent = this.balanceError ? '余额暂不可用' : `余额 ${formatBalance(this.balance)}`;
+      node.title = this.balanceError ? this.balanceError : '每次检测刷新当前余额';
     }
 
     renderKeys() {
@@ -1406,6 +1446,8 @@
     normalizeConfig,
     normalizeGroupMode,
     normalizePanelTab,
+    getBalanceAmount,
+    formatBalance,
     getExcludedGroupInfo,
     analyzeCandidates,
     rankCandidates,
