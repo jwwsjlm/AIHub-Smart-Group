@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.4.9
+// @version      0.5.0
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.4.9';
+  const SCRIPT_VERSION = '0.5.0';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -46,6 +46,9 @@
     balanceMaxPrice: 0.1,
     excludedGroupKeywords: '',
     maxMonitorAgeSeconds: 600,
+    availabilityMode: 'percent',
+    minSuccessPoints10m: 1,
+    minConsecutiveSuccesses10m: 2,
   });
 
   function numberOr(value, fallback) {
@@ -83,6 +86,9 @@
       balanceMaxPrice: clamp(numberOr(source.balanceMaxPrice, DEFAULT_CONFIG.balanceMaxPrice), 0, 1000),
       excludedGroupKeywords: normalizeExcludedGroupKeywords(source.excludedGroupKeywords),
       maxMonitorAgeSeconds: DEFAULT_CONFIG.maxMonitorAgeSeconds,
+      availabilityMode: normalizeAvailabilityMode(source.availabilityMode),
+      minSuccessPoints10m: Math.round(clamp(numberOr(source.minSuccessPoints10m, DEFAULT_CONFIG.minSuccessPoints10m), 1, 60)),
+      minConsecutiveSuccesses10m: Math.round(clamp(numberOr(source.minConsecutiveSuccesses10m, DEFAULT_CONFIG.minConsecutiveSuccesses10m), 1, 60)),
     };
   }
 
@@ -92,6 +98,10 @@
 
   function normalizePanelTab(value) {
     return value === 'logs' ? 'logs' : 'settings';
+  }
+
+  function normalizeAvailabilityMode(value) {
+    return value === 'successes' || value === 'consecutive' ? value : 'percent';
   }
 
   function getBalanceAmount(payload) {
@@ -140,7 +150,14 @@
         continue;
       }
       const success10m = Number(row.successRates?.['10m']);
-      if (!Number.isFinite(success10m) || success10m < normalizedConfig.minSuccess10m) {
+      const recentSuccessCount = Number(row.recentSuccessCount);
+      const recentConsecutiveSuccessCount = Number(row.recentConsecutiveSuccessCount);
+      const availabilityPasses = normalizedConfig.availabilityMode === 'successes'
+        ? Number.isFinite(recentSuccessCount) && recentSuccessCount >= normalizedConfig.minSuccessPoints10m
+        : normalizedConfig.availabilityMode === 'consecutive'
+          ? Number.isFinite(recentConsecutiveSuccessCount) && recentConsecutiveSuccessCount >= normalizedConfig.minConsecutiveSuccesses10m
+          : Number.isFinite(success10m) && success10m >= normalizedConfig.minSuccess10m;
+      if (!availabilityPasses) {
         counts.lowSuccess += 1;
         continue;
       }
@@ -253,6 +270,9 @@
         return Number.isFinite(at) && at >= cutoff && at <= now && (sample?.[1] === 0 || sample?.[1] === 1);
       });
       const successes = recent.filter((sample) => sample[1] === 1).length;
+      const orderedRecent = recent.slice().sort((left, right) => Number(left[0]) - Number(right[0]));
+      let trailingSuccesses = 0;
+      for (let index = orderedRecent.length - 1; index >= 0 && orderedRecent[index][1] === 1; index -= 1) trailingSuccesses += 1;
       return {
         ...row,
         successRates: {
@@ -260,6 +280,8 @@
           '10m': recent.length ? successes / recent.length : Number.NaN,
         },
         recentSampleCount: recent.length,
+        recentSuccessCount: successes,
+        recentConsecutiveSuccessCount: trailingSuccesses,
       };
     });
   }
@@ -745,8 +767,11 @@
               <section class="asg-settings-section">
                 <div class="asg-settings-title">可靠性筛选</div>
                 <div class="asg-settings-grid">
-                  <label class="asg-setting-compact" title="可自行修改，0.1 表示 10%">最近10分钟最低可用率（默认10%）<input type="number" min="0" max="1" step="0.01" data-setting="minSuccess10m"></label>
+                  <label class="asg-setting-compact">可用性判断方式<select data-setting="availabilityMode"><option value="percent">按可用率（百分比）</option><option value="successes">按成功监控点数</option><option value="consecutive">按连续成功点数</option></select></label>
                   <label class="asg-setting-compact asg-auto"><input type="checkbox" data-setting="requireNoWarnings"> 排除监控警告</label>
+                  <label class="asg-setting-wide" data-availability-setting="percent" title="可自行修改，0.1 表示 10%">最近10分钟最低可用率（默认10%）<input type="number" min="0" max="1" step="0.01" data-setting="minSuccess10m"></label>
+                  <label class="asg-setting-wide" data-availability-setting="successes">最近10分钟至少成功监控点数<input type="number" min="1" max="60" step="1" data-setting="minSuccessPoints10m"></label>
+                  <label class="asg-setting-wide" data-availability-setting="consecutive">连续成功监控点数<input type="number" min="1" max="60" step="1" data-setting="minConsecutiveSuccesses10m"></label>
                   <label class="asg-setting-wide" title="名称包含任一关键词的分组不会参与推荐或切换">排除分组关键词（使用 | 分隔）<input type="text" data-setting="excludedGroupKeywords" placeholder="例如 free|unstable"></label>
                   <span class="asg-setting-preview asg-setting-wide" data-field="excluded-preview" aria-live="polite"></span>
                 </div>
@@ -836,6 +861,12 @@
       this.panel.addEventListener('input', (event) => {
         if (event.target.matches('[data-setting]')) this.renderSettingsPreviews();
       });
+      this.panel.addEventListener('change', (event) => {
+        if (event.target.matches('[data-setting="availabilityMode"]')) {
+          this.syncAvailabilityInputs();
+          this.renderSettingsPreviews();
+        }
+      });
     }
 
     setMinimized(value) {
@@ -866,7 +897,15 @@
       }
       this.panel.querySelector('[data-field="auto"]').checked = this.config.autoSwitch;
       this.panel.querySelector('[data-field="mode"]').value = this.config.mode;
+      this.syncAvailabilityInputs();
       this.renderSettingsPreviews();
+    }
+
+    syncAvailabilityInputs() {
+      const mode = normalizeAvailabilityMode(this.panel?.querySelector('[data-setting="availabilityMode"]')?.value);
+      for (const field of this.panel?.querySelectorAll('[data-availability-setting]') || []) {
+        field.hidden = field.dataset.availabilitySetting !== mode;
+      }
     }
 
     readDraftConfig() {
@@ -898,6 +937,9 @@
         .filter((candidate) => candidate.price <= normalizedDraft.balanceMaxPrice).length;
       const hasUnsavedFilter = normalizedDraft.balanceMaxPrice !== this.config.balanceMaxPrice
         || normalizedDraft.minSuccess10m !== this.config.minSuccess10m
+        || normalizedDraft.availabilityMode !== this.config.availabilityMode
+        || normalizedDraft.minSuccessPoints10m !== this.config.minSuccessPoints10m
+        || normalizedDraft.minConsecutiveSuccesses10m !== this.config.minConsecutiveSuccesses10m
         || normalizedDraft.requireNoWarnings !== this.config.requireNoWarnings
         || normalizedDraft.excludedGroupKeywords !== this.config.excludedGroupKeywords;
       const suffix = hasUnsavedFilter ? ' · 未保存' : '';
@@ -1214,7 +1256,12 @@
         title.textContent = `${GROUP_MODE_LABELS[this.config.mode]}模式 · ${winner.name} · ${winner.price}x`;
         const metrics = document.createElement('div');
         metrics.className = 'asg-metrics';
-        metrics.textContent = `10m ${formatPercent(winner.success10m)} · ${winner.recentSampleCount}次探测 · 首Token ${formatLatency(winner.latency)}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
+        const availabilityText = this.config.availabilityMode === 'successes'
+          ? `成功 ${winner.recentSuccessCount || 0}/${winner.recentSampleCount || 0} 点`
+          : this.config.availabilityMode === 'consecutive'
+            ? `连续成功 ${winner.recentConsecutiveSuccessCount || 0} 点`
+            : `可用率 ${formatPercent(winner.success10m)}`;
+        metrics.textContent = `10m ${availabilityText} · ${winner.recentSampleCount}次探测 · 首Token ${formatLatency(winner.latency)}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
         recommend.append(title, metrics);
         if (this.config.mode === 'balance') {
           const reason = document.createElement('div');
@@ -1460,6 +1507,7 @@
     GROUP_MODE_LABELS,
     normalizeConfig,
     normalizeGroupMode,
+    normalizeAvailabilityMode,
     normalizePanelTab,
     getBalanceAmount,
     formatBalance,

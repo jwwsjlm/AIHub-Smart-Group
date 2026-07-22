@@ -23,6 +23,17 @@ test('normalizes thresholds and safety settings', () => {
   assert.equal(config.pollIntervalSeconds, 10);
   assert.equal(config.cooldownMinutes, 0);
   assert.equal(config.requireNoWarnings, false);
+  assert.equal(config.availabilityMode, 'percent');
+  assert.equal(config.minSuccessPoints10m, 1);
+  assert.equal(config.minConsecutiveSuccesses10m, 2);
+});
+
+test('normalizes selectable availability criteria', () => {
+  const config = core.normalizeConfig({ availabilityMode: 'successes', minSuccessPoints10m: '2', minConsecutiveSuccesses10m: 0 });
+  assert.equal(config.availabilityMode, 'successes');
+  assert.equal(config.minSuccessPoints10m, 2);
+  assert.equal(config.minConsecutiveSuccesses10m, 1);
+  assert.equal(core.normalizeConfig({ availabilityMode: 'unknown' }).availabilityMode, 'percent');
 });
 
 test('normalizes the monitor freshness limit', () => {
@@ -147,6 +158,8 @@ test('computes availability from valid monitor samples in the latest 10 minutes'
   const enriched = core.attachRecentAvailability(rows, series, 10 * 60_000);
   assert.equal(enriched[0].successRates['10m'], 0.5);
   assert.equal(enriched[0].recentSampleCount, 2);
+  assert.equal(enriched[0].recentSuccessCount, 1);
+  assert.equal(enriched[0].recentConsecutiveSuccessCount, 0);
   assert.equal(Number.isNaN(enriched[1].successRates['10m']), true);
   assert.equal(enriched[1].recentSampleCount, 0);
 });
@@ -286,6 +299,15 @@ test('marks authenticated user API requests like the AIHub client', () => {
     Authorization: 'Bearer token-value',
     'X-User-UI-Request': '1',
   });
+});
+
+test('filters by successful monitor points or trailing consecutive points', () => {
+  const rows = [
+    { planType: 'two-successes', group_id: 1, priceMultiplier: 0.01, available: true, successRates: { '10m': 0.5 }, recentSampleCount: 4, recentSuccessCount: 2, recentConsecutiveSuccessCount: 1, warningReasons: [] },
+    { planType: 'two-trailing', group_id: 2, priceMultiplier: 0.02, available: true, successRates: { '10m': 0.5 }, recentSampleCount: 4, recentSuccessCount: 2, recentConsecutiveSuccessCount: 2, warningReasons: [] },
+  ];
+  assert.deepEqual(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, availabilityMode: 'successes', minSuccessPoints10m: 2 }).map((row) => row.planType), ['two-successes', 'two-trailing']);
+  assert.deepEqual(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, availabilityMode: 'consecutive', minConsecutiveSuccesses10m: 2 }).map((row) => row.planType), ['two-trailing']);
 });
 
 test('extracts and formats the current balance without exposing unrelated account data', () => {
