@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.5.6
+// @version      0.5.7
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.5.6';
+  const SCRIPT_VERSION = '0.5.7';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -389,6 +389,11 @@
     return { statusText: '暂无监控', statusTone: 'unknown', latencyText, latencyValueText };
   }
 
+  function getGroupDropdownToneClass(tone) {
+    const safeTone = ['available', 'warning', 'unavailable', 'disabled', 'error'].includes(tone) ? tone : '';
+    return safeTone ? `asg-key-group-badge-${safeTone}` : '';
+  }
+
   function formatKeyOptionLabel(key, metric) {
     const name = String(key?.name || `Key ${key?.id ?? ''}`).trim();
     const groupName = String(key?.groupName || '未分组').trim();
@@ -732,6 +737,10 @@
     .asg-key-group-option .asg-key-group-row{align-items:center!important;gap:10px}
     .asg-key-group-main{display:flex!important;flex:1 1 auto;flex-direction:row!important;align-items:center!important;gap:7px;min-width:0}
     .asg-key-group-main>.groupOptionItemBadge{min-width:0}
+    .groupOptionItemBadge.asg-key-group-badge-available{color:#15803d!important;background:#ecfdf3!important}
+    .groupOptionItemBadge.asg-key-group-badge-warning{color:#b54708!important;background:#fffaeb!important}
+    .groupOptionItemBadge.asg-key-group-badge-unavailable,.groupOptionItemBadge.asg-key-group-badge-error{color:#b42318!important;background:#fff1f0!important}
+    .groupOptionItemBadge.asg-key-group-badge-disabled{color:#667085!important;background:#f2f4f7!important}
     .asg-key-group-rate-shell{flex:0 0 auto;min-width:max-content;padding-top:0!important}
     .asg-key-group-rate{display:flex!important;flex-direction:row!important;align-items:center!important;gap:8px;white-space:nowrap}
     .asg-key-group-status,.asg-key-group-latency{display:inline-flex;flex:0 0 auto;align-items:center;margin:0;font-size:11px;line-height:1.25;white-space:nowrap}
@@ -748,6 +757,10 @@
     .dark .asg-key-group-status-unavailable,.dark .asg-key-group-status-error{color:#f87171}
     .dark .asg-key-group-status-disabled,.dark .asg-key-group-status-unknown,.dark .asg-key-group-latency{color:#98a2b3}
     .dark .asg-key-group-latency-value{color:#4ade80}
+    .dark .groupOptionItemBadge.asg-key-group-badge-available{color:#4ade80!important;background:rgba(34,197,94,.12)!important}
+    .dark .groupOptionItemBadge.asg-key-group-badge-warning{color:#fbbf24!important;background:rgba(245,158,11,.12)!important}
+    .dark .groupOptionItemBadge.asg-key-group-badge-unavailable,.dark .groupOptionItemBadge.asg-key-group-badge-error{color:#f87171!important;background:rgba(239,68,68,.12)!important}
+    .dark .groupOptionItemBadge.asg-key-group-badge-disabled{color:#98a2b3!important;background:rgba(152,162,179,.12)!important}
   `;
 
   function addStyle(css) {
@@ -1505,6 +1518,11 @@
       document.querySelectorAll('.asg-key-group-status,.asg-key-group-latency').forEach((node) => node.remove());
       document.querySelectorAll('.asg-key-group-option').forEach((button) => {
         button.classList.remove('asg-key-group-option');
+        const badge = button.querySelector('.groupOptionItemBadge');
+        if (badge?.dataset.asgToneClass) {
+          badge.classList.remove(badge.dataset.asgToneClass);
+          delete badge.dataset.asgToneClass;
+        }
         button.querySelector('.asg-key-group-row')?.classList.remove('asg-key-group-row');
         button.querySelector('.asg-key-group-main')?.classList.remove('asg-key-group-main');
         button.querySelector('.asg-key-group-rate-shell')?.classList.remove('asg-key-group-rate-shell');
@@ -1593,6 +1611,18 @@
       } else {
         const multiplier = parseGroupOptionMultiplier(multiplierNode.textContent);
         info = formatGroupDropdownMonitor(findGroupDropdownMonitor(this.monitorIndex, name, multiplier));
+      }
+
+      const badgeToneClass = getGroupDropdownToneClass(info.statusTone);
+      const currentBadgeToneClass = badge.dataset.asgToneClass || '';
+      if (currentBadgeToneClass !== badgeToneClass) {
+        if (badge.dataset.asgToneClass) badge.classList.remove(badge.dataset.asgToneClass);
+        if (badgeToneClass) {
+          badge.classList.add(badgeToneClass);
+          badge.dataset.asgToneClass = badgeToneClass;
+        } else {
+          delete badge.dataset.asgToneClass;
+        }
       }
 
       let status = leftColumn.querySelector('.asg-key-group-status');
@@ -1787,6 +1817,7 @@
     findGroupDropdownMonitor,
     parseGroupOptionMultiplier,
     formatGroupDropdownMonitor,
+    getGroupDropdownToneClass,
     formatKeyOptionLabel,
     formatMultiplier,
     getPageFeatures,

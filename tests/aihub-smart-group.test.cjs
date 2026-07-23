@@ -16,6 +16,16 @@ test('wires the native key group dropdown enhancer through the app router', () =
   assert.match(userscriptSource, /input\[placeholder="搜索分组\.\.\."\]/);
 });
 
+test('maps dropdown monitor tones to native group badge classes', () => {
+  assert.equal(core.getGroupDropdownToneClass('available'), 'asg-key-group-badge-available');
+  assert.equal(core.getGroupDropdownToneClass('warning'), 'asg-key-group-badge-warning');
+  assert.equal(core.getGroupDropdownToneClass('unavailable'), 'asg-key-group-badge-unavailable');
+  assert.equal(core.getGroupDropdownToneClass('disabled'), 'asg-key-group-badge-disabled');
+  assert.equal(core.getGroupDropdownToneClass('error'), 'asg-key-group-badge-error');
+  assert.equal(core.getGroupDropdownToneClass('unknown'), '');
+  assert.equal(core.getGroupDropdownToneClass('unexpected'), '');
+});
+
 test('defaults the adjustable 10m availability threshold to 10 percent', () => {
   assert.equal(core.DEFAULT_CONFIG.minSuccess10m, 0.1);
   assert.equal(core.normalizeConfig({}).minSuccess10m, 0.1);
