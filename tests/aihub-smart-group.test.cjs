@@ -10,6 +10,12 @@ test('hides inactive availability settings despite the shared label display rule
   assert.match(userscriptSource, /\[data-availability-setting\]\[hidden\]\{display:none !important\}/);
 });
 
+test('wires the native key group dropdown enhancer through the app router', () => {
+  assert.match(userscriptSource, /class KeyGroupDropdownEnhancer/);
+  assert.match(userscriptSource, /this\.keyGroups = new KeyGroupDropdownEnhancer\(\)/);
+  assert.match(userscriptSource, /input\[placeholder="搜索分组\.\.\."\]/);
+});
+
 test('defaults the adjustable 10m availability threshold to 10 percent', () => {
   assert.equal(core.DEFAULT_CONFIG.minSuccess10m, 0.1);
   assert.equal(core.normalizeConfig({}).minSuccess10m, 0.1);
@@ -383,13 +389,71 @@ test('maps current group metrics by group id without filtering unavailable rows'
   const metrics = core.buildGroupMetricMap([
     { group_id: 14, planType: 'same-name', priceMultiplier: '0.04', firstTokenLatencyMs: '1141', available: false },
     { group_id: 20, planType: 'same-name', priceMultiplier: 0.08, firstTokenLatencyMs: 320, available: true },
+    { group_id: 21, priceMultiplier: null, firstTokenLatencyMs: null },
     { group_id: 'invalid', priceMultiplier: 0.01, firstTokenLatencyMs: 10 },
   ]);
 
   assert.deepEqual(metrics.get(14), { multiplier: 0.04, latencyMs: 1141 });
   assert.deepEqual(metrics.get(20), { multiplier: 0.08, latencyMs: 320 });
+  assert.deepEqual(metrics.get(21), { multiplier: null, latencyMs: null });
   assert.equal(metrics.has('same-name'), false);
-  assert.equal(metrics.size, 2);
+  assert.equal(metrics.size, 3);
+});
+
+test('indexes dropdown monitor rows by normalized name and multiplier', () => {
+  const rows = [
+    { planType: ' Same Group ', priceMultiplier: 0.04, available: true, firstTokenLatencyMs: 800 },
+    { planType: 'same group', priceMultiplier: 0.08, available: false, firstTokenLatencyMs: 1600 },
+    { planType: 'Unique', priceMultiplier: 0.1, available: true, firstTokenLatencyMs: 500 },
+  ];
+  const index = core.buildGroupDropdownMonitorIndex(rows);
+
+  assert.equal(core.findGroupDropdownMonitor(index, 'Same Group', 0.08), rows[1]);
+  assert.equal(core.findGroupDropdownMonitor(index, 'Unique', null), rows[2]);
+  assert.equal(core.findGroupDropdownMonitor(index, 'same group', null), null);
+});
+
+test('uses the newest monitor row when a composite key is duplicated', () => {
+  const oldRow = { planType: 'Duplicate', priceMultiplier: 0.1, checkedAt: '2026-07-23T00:00:00Z', available: false };
+  const newRow = { planType: 'Duplicate', priceMultiplier: 0.1, checkedAt: '2026-07-23T01:00:00Z', available: true };
+  const index = core.buildGroupDropdownMonitorIndex([oldRow, newRow, { planType: 'No Rate', priceMultiplier: null }]);
+
+  assert.equal(core.findGroupDropdownMonitor(index, 'Duplicate', 0.1), newRow);
+  assert.equal(index.byComposite.has('no rate|0.000000'), false);
+});
+
+test('parses the multiplier displayed by native group options', () => {
+  assert.equal(core.parseGroupOptionMultiplier('0.06x 倍率'), 0.06);
+  assert.equal(core.parseGroupOptionMultiplier('×0.012345'), 0.012345);
+  assert.equal(core.parseGroupOptionMultiplier('暂无倍率'), null);
+});
+
+test('formats dropdown status and first token metrics', () => {
+  assert.deepEqual(core.formatGroupDropdownMonitor({ available: true, enabled: true, warningReasons: [], firstTokenLatencyMs: 1227 }), {
+    statusText: '可用',
+    statusTone: 'available',
+    latencyText: '首 Token 1227 ms',
+  });
+  assert.deepEqual(core.formatGroupDropdownMonitor({ available: true, enabled: true, warningReasons: ['warning'], firstTokenLatencyMs: 9.6 }), {
+    statusText: '可用 · 有警告',
+    statusTone: 'warning',
+    latencyText: '首 Token 10 ms',
+  });
+  assert.deepEqual(core.formatGroupDropdownMonitor({ available: false, enabled: true, firstTokenLatencyMs: null }), {
+    statusText: '不可用',
+    statusTone: 'unavailable',
+    latencyText: '首 Token 暂无数据',
+  });
+  assert.deepEqual(core.formatGroupDropdownMonitor({ available: true, enabled: false, firstTokenLatencyMs: 100 }), {
+    statusText: '已停用',
+    statusTone: 'disabled',
+    latencyText: '首 Token 100 ms',
+  });
+  assert.deepEqual(core.formatGroupDropdownMonitor(null), {
+    statusText: '暂无监控',
+    statusTone: 'unknown',
+    latencyText: '首 Token 暂无数据',
+  });
 });
 
 test('formats target key options with current group metrics and safe placeholders', () => {
@@ -416,9 +480,9 @@ test('formats usage multipliers without unnecessary zeroes', () => {
 });
 
 test('enables the panel on every AIHub page only while logged in', () => {
-  assert.deepEqual(core.getPageFeatures('/providers', true), { panel: true, usage: false });
-  assert.deepEqual(core.getPageFeatures('/keys?page=1', true), { panel: true, usage: false });
-  assert.deepEqual(core.getPageFeatures('/usage', true), { panel: true, usage: true });
-  assert.deepEqual(core.getPageFeatures('/dashboard', true), { panel: true, usage: false });
-  assert.deepEqual(core.getPageFeatures('/usage', false), { panel: false, usage: false });
+  assert.deepEqual(core.getPageFeatures('/providers', true), { panel: true, usage: false, keyGroups: false });
+  assert.deepEqual(core.getPageFeatures('/keys?page=1', true), { panel: true, usage: false, keyGroups: true });
+  assert.deepEqual(core.getPageFeatures('/usage', true), { panel: true, usage: true, keyGroups: false });
+  assert.deepEqual(core.getPageFeatures('/dashboard', true), { panel: true, usage: false, keyGroups: false });
+  assert.deepEqual(core.getPageFeatures('/usage', false), { panel: false, usage: false, keyGroups: false });
 });

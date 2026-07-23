@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.5.4
+// @version      0.5.5
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.5.4';
+  const SCRIPT_VERSION = '0.5.5';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -301,6 +301,7 @@
   }
 
   function nonNegativeNumberOrNull(value) {
+    if (value == null || value === '') return null;
     const number = Number(value);
     return Number.isFinite(number) && number >= 0 ? number : null;
   }
@@ -316,6 +317,75 @@
       });
     }
     return result;
+  }
+
+  function normalizeGroupMonitorMultiplier(value) {
+    const multiplier = nonNegativeNumberOrNull(value);
+    return multiplier === null ? '' : multiplier.toFixed(6);
+  }
+
+  function groupDropdownMonitorKey(name, multiplier) {
+    const normalizedName = normalizeGroupName(name);
+    const normalizedMultiplier = normalizeGroupMonitorMultiplier(multiplier);
+    return normalizedName && normalizedMultiplier ? `${normalizedName}|${normalizedMultiplier}` : '';
+  }
+
+  function newerMonitorRow(current, candidate) {
+    if (!current) return candidate;
+    const currentAt = Date.parse(current.checkedAt);
+    const candidateAt = Date.parse(candidate.checkedAt);
+    return Number.isFinite(candidateAt) && (!Number.isFinite(currentAt) || candidateAt > currentAt) ? candidate : current;
+  }
+
+  function buildGroupDropdownMonitorIndex(rows) {
+    const byComposite = new Map();
+    const byName = new Map();
+    const ambiguousNames = new Set();
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const name = normalizeGroupName(row?.planType || row?.name);
+      if (!name) continue;
+      const compositeKey = groupDropdownMonitorKey(name, row?.priceMultiplier);
+      if (compositeKey) byComposite.set(compositeKey, newerMonitorRow(byComposite.get(compositeKey), row));
+      if (byName.has(name)) {
+        ambiguousNames.add(name);
+        byName.delete(name);
+      } else if (!ambiguousNames.has(name)) {
+        byName.set(name, row);
+      }
+    }
+    return { byComposite, byName, ambiguousNames };
+  }
+
+  function findGroupDropdownMonitor(index, name, multiplier) {
+    const compositeKey = groupDropdownMonitorKey(name, multiplier);
+    if (compositeKey && index?.byComposite instanceof Map && index.byComposite.has(compositeKey)) {
+      return index.byComposite.get(compositeKey);
+    }
+    const normalizedName = normalizeGroupName(name);
+    return normalizedName && index?.byName instanceof Map ? index.byName.get(normalizedName) || null : null;
+  }
+
+  function parseGroupOptionMultiplier(value) {
+    const text = String(value || '');
+    const match = text.match(/(?:×\s*([0-9]+(?:\.[0-9]+)?)|([0-9]+(?:\.[0-9]+)?)\s*x(?:\s*倍率)?)/i);
+    if (!match) return null;
+    const multiplier = Number(match[1] ?? match[2]);
+    return Number.isFinite(multiplier) && multiplier >= 0 ? multiplier : null;
+  }
+
+  function formatGroupDropdownMonitor(row) {
+    const latency = nonNegativeNumberOrNull(row?.firstTokenLatencyMs);
+    const latencyText = row && latency !== null
+      ? `首 Token ${Math.round(latency)} ms`
+      : '首 Token 暂无数据';
+    if (!row) return { statusText: '暂无监控', statusTone: 'unknown', latencyText };
+    if (row.enabled === false) return { statusText: '已停用', statusTone: 'disabled', latencyText };
+    if (row.available === true && Array.isArray(row.warningReasons) && row.warningReasons.length) {
+      return { statusText: '可用 · 有警告', statusTone: 'warning', latencyText };
+    }
+    if (row.available === true) return { statusText: '可用', statusTone: 'available', latencyText };
+    if (row.available === false) return { statusText: '不可用', statusTone: 'unavailable', latencyText };
+    return { statusText: '暂无监控', statusTone: 'unknown', latencyText };
   }
 
   function formatKeyOptionLabel(key, metric) {
@@ -336,10 +406,11 @@
 
   function getPageFeatures(pathname, loggedIn) {
     const path = String(pathname || '').split('?')[0];
-    if (!loggedIn) return { panel: false, usage: false };
+    if (!loggedIn) return { panel: false, usage: false, keyGroups: false };
     return {
       panel: true,
       usage: path === '/usage' || path.startsWith('/usage/'),
+      keyGroups: path === '/keys' || path.startsWith('/keys/'),
     };
   }
 
@@ -654,6 +725,21 @@
 
   const USAGE_STYLE = `
     .asg-usage-multiplier{margin-inline-start:6px;color:#15803d;font-weight:600;white-space:nowrap}
+  `;
+
+  const KEY_GROUP_STYLE = `
+    .asg-key-group-status,.asg-key-group-latency{display:block;margin-top:3px;font-size:11px;line-height:1.25;white-space:nowrap}
+    .asg-key-group-status{padding-left:2px;font-weight:600}
+    .asg-key-group-status::before{display:inline-block;width:6px;height:6px;margin-right:5px;border-radius:50%;background:currentColor;content:"";vertical-align:1px}
+    .asg-key-group-status-available{color:#15803d}
+    .asg-key-group-status-warning{color:#b54708}
+    .asg-key-group-status-unavailable,.asg-key-group-status-error{color:#b42318}
+    .asg-key-group-status-disabled,.asg-key-group-status-unknown{color:#667085}
+    .asg-key-group-latency{color:#667085;font-weight:500;text-align:right}
+    .dark .asg-key-group-status-available{color:#4ade80}
+    .dark .asg-key-group-status-warning{color:#fbbf24}
+    .dark .asg-key-group-status-unavailable,.dark .asg-key-group-status-error{color:#f87171}
+    .dark .asg-key-group-status-disabled,.dark .asg-key-group-status-unknown,.dark .asg-key-group-latency{color:#98a2b3}
   `;
 
   function addStyle(css) {
@@ -1374,6 +1460,138 @@
     }
   }
 
+  class KeyGroupDropdownEnhancer {
+    constructor() {
+      this.monitorIndex = buildGroupDropdownMonitorIndex([]);
+      this.observer = null;
+      this.renderTimer = null;
+      this.refreshTimer = null;
+      this.renderQueued = false;
+      this.loading = false;
+      this.active = false;
+      this.hasMonitorData = false;
+      this.loadFailed = false;
+      this.lastAttemptAt = 0;
+      this.lastErrorSignature = '';
+    }
+
+    start() {
+      this.active = true;
+      addStyle(KEY_GROUP_STYLE);
+      this.observer = new MutationObserver(() => this.queueRender());
+      this.observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+      this.queueRender();
+      this.refreshTimer = window.setInterval(() => {
+        if (this.findMenus().length && Date.now() - this.lastAttemptAt >= 60_000) this.refresh();
+      }, 60_000);
+    }
+
+    stop() {
+      this.active = false;
+      this.observer?.disconnect();
+      this.observer = null;
+      if (this.renderTimer) window.clearTimeout(this.renderTimer);
+      if (this.refreshTimer) window.clearInterval(this.refreshTimer);
+      this.renderTimer = null;
+      this.refreshTimer = null;
+      document.querySelectorAll('.asg-key-group-status,.asg-key-group-latency').forEach((node) => node.remove());
+    }
+
+    findMenus() {
+      return [...document.querySelectorAll('input[placeholder="搜索分组..."]')]
+        .map((input) => {
+          const searchArea = input.parentElement?.parentElement;
+          const menu = searchArea?.parentElement;
+          const optionList = searchArea?.nextElementSibling;
+          return menu && optionList && menu.contains(optionList) ? { menu, optionList } : null;
+        })
+        .filter(Boolean);
+    }
+
+    queueRender() {
+      if (!this.active || this.renderQueued) return;
+      this.renderQueued = true;
+      this.renderTimer = window.setTimeout(() => {
+        this.renderTimer = null;
+        this.renderQueued = false;
+        this.render();
+      }, 0);
+    }
+
+    async refresh() {
+      if (!this.active || this.loading || Date.now() - this.lastAttemptAt < 60_000) return;
+      this.loading = true;
+      this.loadFailed = false;
+      this.lastAttemptAt = Date.now();
+      this.render();
+      try {
+        const summary = await fetchMonitorSummary();
+        if (!this.active) return;
+        this.monitorIndex = buildGroupDropdownMonitorIndex(summary?.apis);
+        this.hasMonitorData = true;
+        if (this.lastErrorSignature) writeRuntimeLog('aihub', 'info', '密钥分组监控读取已恢复');
+        this.lastErrorSignature = '';
+      } catch (error) {
+        if (!this.active) return;
+        this.loadFailed = !this.hasMonitorData;
+        const message = error instanceof Error ? error.message : '未知错误';
+        if (message !== this.lastErrorSignature) writeRuntimeLog('aihub', 'error', `密钥分组监控读取失败：${message}`);
+        this.lastErrorSignature = message;
+      } finally {
+        this.loading = false;
+        if (this.active) this.render();
+      }
+    }
+
+    render() {
+      if (!this.active) return;
+      const menus = this.findMenus();
+      if (!menus.length) return;
+      if (!this.hasMonitorData && !this.loading && Date.now() - this.lastAttemptAt >= 60_000) this.refresh();
+      for (const { optionList } of menus) {
+        for (const button of optionList.querySelectorAll('button')) this.renderOption(button);
+      }
+    }
+
+    renderOption(button) {
+      const badge = button.querySelector('.groupOptionItemBadge');
+      const nameNode = badge?.querySelector('.truncate');
+      const content = button.firstElementChild;
+      const leftColumn = badge?.parentElement;
+      const rightShell = content?.lastElementChild;
+      const rightColumn = rightShell?.firstElementChild || rightShell;
+      const multiplierNode = rightColumn?.querySelector('span');
+      const name = nameNode?.textContent?.trim();
+      if (!name || !leftColumn || !rightColumn || !multiplierNode) return;
+
+      let info;
+      if (this.loadFailed) {
+        info = { statusText: '监控读取失败', statusTone: 'error', latencyText: '首 Token 暂无数据' };
+      } else if (!this.hasMonitorData) {
+        info = { statusText: '监控读取中', statusTone: 'unknown', latencyText: '首 Token --' };
+      } else {
+        const multiplier = parseGroupOptionMultiplier(multiplierNode.textContent);
+        info = formatGroupDropdownMonitor(findGroupDropdownMonitor(this.monitorIndex, name, multiplier));
+      }
+
+      let status = leftColumn.querySelector('.asg-key-group-status');
+      if (!status) {
+        status = document.createElement('span');
+        leftColumn.appendChild(status);
+      }
+      status.className = `asg-key-group-status asg-key-group-status-${info.statusTone}`;
+      status.textContent = info.statusText;
+
+      let latency = rightColumn.querySelector('.asg-key-group-latency');
+      if (!latency) {
+        latency = document.createElement('span');
+        rightColumn.appendChild(latency);
+      }
+      latency.className = 'asg-key-group-latency';
+      latency.textContent = info.latencyText;
+    }
+  }
+
   class UsageMultiplierEnhancer {
     constructor() {
       this.multiplierByGroup = new Map();
@@ -1465,6 +1683,7 @@
     constructor() {
       this.panel = null;
       this.usage = null;
+      this.keyGroups = null;
       this.rejectedToken = '';
       this.timer = null;
     }
@@ -1502,6 +1721,13 @@
         this.usage.stop();
         this.usage = null;
       }
+      if (features.keyGroups && !this.keyGroups) {
+        this.keyGroups = new KeyGroupDropdownEnhancer();
+        this.keyGroups.start();
+      } else if (!features.keyGroups && this.keyGroups) {
+        this.keyGroups.stop();
+        this.keyGroups = null;
+      }
     }
   }
 
@@ -1524,6 +1750,10 @@
     normalizeGroupName,
     buildGroupMultiplierMap,
     buildGroupMetricMap,
+    buildGroupDropdownMonitorIndex,
+    findGroupDropdownMonitor,
+    parseGroupOptionMultiplier,
+    formatGroupDropdownMonitor,
     formatKeyOptionLabel,
     formatMultiplier,
     getPageFeatures,
