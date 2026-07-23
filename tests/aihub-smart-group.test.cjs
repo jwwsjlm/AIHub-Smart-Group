@@ -433,26 +433,31 @@ test('formats dropdown status and first token metrics', () => {
     statusText: '可用',
     statusTone: 'available',
     latencyText: '首 Token 1227 ms',
+    latencyValueText: '1227 ms',
   });
   assert.deepEqual(core.formatGroupDropdownMonitor({ available: true, enabled: true, warningReasons: ['warning'], firstTokenLatencyMs: 9.6 }), {
     statusText: '可用 · 有警告',
     statusTone: 'warning',
     latencyText: '首 Token 10 ms',
+    latencyValueText: '10 ms',
   });
   assert.deepEqual(core.formatGroupDropdownMonitor({ available: false, enabled: true, firstTokenLatencyMs: null }), {
     statusText: '不可用',
     statusTone: 'unavailable',
     latencyText: '首 Token 暂无数据',
+    latencyValueText: '',
   });
   assert.deepEqual(core.formatGroupDropdownMonitor({ available: true, enabled: false, firstTokenLatencyMs: 100 }), {
     statusText: '已停用',
     statusTone: 'disabled',
     latencyText: '首 Token 100 ms',
+    latencyValueText: '100 ms',
   });
   assert.deepEqual(core.formatGroupDropdownMonitor(null), {
     statusText: '暂无监控',
     statusTone: 'unknown',
     latencyText: '首 Token 暂无数据',
+    latencyValueText: '',
   });
 });
 

@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.5.5
+// @version      0.5.6
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.5.5';
+  const SCRIPT_VERSION = '0.5.6';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -375,17 +375,18 @@
 
   function formatGroupDropdownMonitor(row) {
     const latency = nonNegativeNumberOrNull(row?.firstTokenLatencyMs);
+    const latencyValueText = row && latency !== null ? `${Math.round(latency)} ms` : '';
     const latencyText = row && latency !== null
-      ? `首 Token ${Math.round(latency)} ms`
+      ? `首 Token ${latencyValueText}`
       : '首 Token 暂无数据';
-    if (!row) return { statusText: '暂无监控', statusTone: 'unknown', latencyText };
-    if (row.enabled === false) return { statusText: '已停用', statusTone: 'disabled', latencyText };
+    if (!row) return { statusText: '暂无监控', statusTone: 'unknown', latencyText, latencyValueText };
+    if (row.enabled === false) return { statusText: '已停用', statusTone: 'disabled', latencyText, latencyValueText };
     if (row.available === true && Array.isArray(row.warningReasons) && row.warningReasons.length) {
-      return { statusText: '可用 · 有警告', statusTone: 'warning', latencyText };
+      return { statusText: '可用 · 有警告', statusTone: 'warning', latencyText, latencyValueText };
     }
-    if (row.available === true) return { statusText: '可用', statusTone: 'available', latencyText };
-    if (row.available === false) return { statusText: '不可用', statusTone: 'unavailable', latencyText };
-    return { statusText: '暂无监控', statusTone: 'unknown', latencyText };
+    if (row.available === true) return { statusText: '可用', statusTone: 'available', latencyText, latencyValueText };
+    if (row.available === false) return { statusText: '不可用', statusTone: 'unavailable', latencyText, latencyValueText };
+    return { statusText: '暂无监控', statusTone: 'unknown', latencyText, latencyValueText };
   }
 
   function formatKeyOptionLabel(key, metric) {
@@ -728,18 +729,25 @@
   `;
 
   const KEY_GROUP_STYLE = `
-    .asg-key-group-status,.asg-key-group-latency{display:block;margin-top:3px;font-size:11px;line-height:1.25;white-space:nowrap}
-    .asg-key-group-status{padding-left:2px;font-weight:600}
+    .asg-key-group-option .asg-key-group-row{align-items:center!important;gap:10px}
+    .asg-key-group-main{display:flex!important;flex:1 1 auto;flex-direction:row!important;align-items:center!important;gap:7px;min-width:0}
+    .asg-key-group-main>.groupOptionItemBadge{min-width:0}
+    .asg-key-group-rate-shell{flex:0 0 auto;min-width:max-content;padding-top:0!important}
+    .asg-key-group-rate{display:flex!important;flex-direction:row!important;align-items:center!important;gap:8px;white-space:nowrap}
+    .asg-key-group-status,.asg-key-group-latency{display:inline-flex;flex:0 0 auto;align-items:center;margin:0;font-size:11px;line-height:1.25;white-space:nowrap}
+    .asg-key-group-status{font-weight:600}
     .asg-key-group-status::before{display:inline-block;width:6px;height:6px;margin-right:5px;border-radius:50%;background:currentColor;content:"";vertical-align:1px}
     .asg-key-group-status-available{color:#15803d}
     .asg-key-group-status-warning{color:#b54708}
     .asg-key-group-status-unavailable,.asg-key-group-status-error{color:#b42318}
     .asg-key-group-status-disabled,.asg-key-group-status-unknown{color:#667085}
     .asg-key-group-latency{color:#667085;font-weight:500;text-align:right}
+    .asg-key-group-latency-value{margin-left:3px;color:#15803d;font-weight:700}
     .dark .asg-key-group-status-available{color:#4ade80}
     .dark .asg-key-group-status-warning{color:#fbbf24}
     .dark .asg-key-group-status-unavailable,.dark .asg-key-group-status-error{color:#f87171}
     .dark .asg-key-group-status-disabled,.dark .asg-key-group-status-unknown,.dark .asg-key-group-latency{color:#98a2b3}
+    .dark .asg-key-group-latency-value{color:#4ade80}
   `;
 
   function addStyle(css) {
@@ -1495,6 +1503,13 @@
       this.renderTimer = null;
       this.refreshTimer = null;
       document.querySelectorAll('.asg-key-group-status,.asg-key-group-latency').forEach((node) => node.remove());
+      document.querySelectorAll('.asg-key-group-option').forEach((button) => {
+        button.classList.remove('asg-key-group-option');
+        button.querySelector('.asg-key-group-row')?.classList.remove('asg-key-group-row');
+        button.querySelector('.asg-key-group-main')?.classList.remove('asg-key-group-main');
+        button.querySelector('.asg-key-group-rate-shell')?.classList.remove('asg-key-group-rate-shell');
+        button.querySelector('.asg-key-group-rate')?.classList.remove('asg-key-group-rate');
+      });
     }
 
     findMenus() {
@@ -1564,11 +1579,17 @@
       const name = nameNode?.textContent?.trim();
       if (!name || !leftColumn || !rightColumn || !multiplierNode) return;
 
+      button.classList.add('asg-key-group-option');
+      content.classList.add('asg-key-group-row');
+      leftColumn.classList.add('asg-key-group-main');
+      rightShell?.classList.add('asg-key-group-rate-shell');
+      rightColumn.classList.add('asg-key-group-rate');
+
       let info;
       if (this.loadFailed) {
-        info = { statusText: '监控读取失败', statusTone: 'error', latencyText: '首 Token 暂无数据' };
+        info = { statusText: '监控读取失败', statusTone: 'error', latencyText: '首 Token 暂无数据', latencyValueText: '' };
       } else if (!this.hasMonitorData) {
-        info = { statusText: '监控读取中', statusTone: 'unknown', latencyText: '首 Token --' };
+        info = { statusText: '监控读取中', statusTone: 'unknown', latencyText: '首 Token --', latencyValueText: '' };
       } else {
         const multiplier = parseGroupOptionMultiplier(multiplierNode.textContent);
         info = formatGroupDropdownMonitor(findGroupDropdownMonitor(this.monitorIndex, name, multiplier));
@@ -1579,16 +1600,28 @@
         status = document.createElement('span');
         leftColumn.appendChild(status);
       }
-      status.className = `asg-key-group-status asg-key-group-status-${info.statusTone}`;
-      status.textContent = info.statusText;
+      const statusClass = `asg-key-group-status asg-key-group-status-${info.statusTone}`;
+      if (status.className !== statusClass) status.className = statusClass;
+      if (status.textContent !== info.statusText) status.textContent = info.statusText;
 
       let latency = rightColumn.querySelector('.asg-key-group-latency');
       if (!latency) {
         latency = document.createElement('span');
         rightColumn.appendChild(latency);
       }
-      latency.className = 'asg-key-group-latency';
-      latency.textContent = info.latencyText;
+      if (latency.className !== 'asg-key-group-latency') latency.className = 'asg-key-group-latency';
+      const latencyRenderKey = `${info.latencyText}|${info.latencyValueText}`;
+      if (latency.dataset.renderKey !== latencyRenderKey) {
+        if (info.latencyValueText) {
+          const value = document.createElement('strong');
+          value.className = 'asg-key-group-latency-value';
+          value.textContent = info.latencyValueText;
+          latency.replaceChildren(document.createTextNode('首 Token'), value);
+        } else {
+          latency.textContent = info.latencyText;
+        }
+        latency.dataset.renderKey = latencyRenderKey;
+      }
     }
   }
 
