@@ -10,6 +10,22 @@ test('hides inactive availability settings despite the shared label display rule
   assert.match(userscriptSource, /\[data-availability-setting\]\[hidden\]\{display:none !important\}/);
 });
 
+test('stacks narrow-screen panel sections without unbounding the candidate list', () => {
+  const mediaStart = userscriptSource.indexOf('@media (max-width:759px){');
+  const styleEnd = userscriptSource.indexOf('const USAGE_STYLE', mediaStart);
+
+  assert.notEqual(mediaStart, -1);
+  assert.notEqual(styleEnd, -1);
+
+  const mobileStyles = userscriptSource.slice(mediaStart, styleEnd);
+  assert.match(mobileStyles, /#\$\{ROOT_ID\}\{width:min\(360px,calc\(100vw - 32px\)\)\}/);
+  assert.match(mobileStyles, /\.asg-body\{\s*display:flex;\s*flex-direction:column;\s*overflow:auto;/);
+  assert.match(mobileStyles, /\.asg-main-column,\s*#\$\{ROOT_ID\} \.asg-side-column\{\s*flex:0 0 auto;\s*min-height:auto;\s*overflow:visible;/);
+  assert.match(mobileStyles, /\.asg-side-tabs\{\s*position:static;\s*top:auto;\s*z-index:auto;/);
+  assert.doesNotMatch(mobileStyles, /\.asg-body\{[^}]*grid-template-columns/);
+  assert.doesNotMatch(mobileStyles, /\.asg-list\{max-height:none\}/);
+});
+
 test('wires the native key group dropdown enhancer through the app router', () => {
   assert.match(userscriptSource, /class KeyGroupDropdownEnhancer/);
   assert.match(userscriptSource, /this\.keyGroups = new KeyGroupDropdownEnhancer\(\)/);
