@@ -14,3 +14,4 @@ Desktop.ini
 coverage/
 dist/
 tmp/
+scripts/*.temp.js
