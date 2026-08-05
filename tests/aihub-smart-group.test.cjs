@@ -75,6 +75,66 @@ test('normalizes selectable availability criteria', () => {
   assert.equal(core.normalizeConfig({ availabilityMode: 'unknown' }).availabilityMode, 'percent');
 });
 
+test('normalizes the selectable TTFT source and preserves the legacy default', () => {
+  assert.equal(core.DEFAULT_CONFIG.latencySource, 'probe');
+  assert.equal(core.normalizeConfig({}).latencySource, 'probe');
+  assert.equal(core.normalizeConfig({ latencySource: 'user' }).latencySource, 'user');
+  assert.equal(core.normalizeConfig({ latencySource: 'unexpected' }).latencySource, 'probe');
+});
+
+test('normalizes the new provider summary response and keeps both TTFT metrics', () => {
+  const summary = core.normalizeMonitorSummaryPayload({
+    data: {
+      generated_at: '2026-08-05T20:00:00Z',
+      items: [{
+        code: 'A001-Plus',
+        group_id: 34,
+        rate_multiplier: 0.06,
+        visible_in_hall: true,
+        available: true,
+        probe_ttft_ms: 4373,
+        probe_e2e_ttft_ms: 4500,
+        user_avg_ttft_ms: 6085.5,
+        user_sample_count: 16,
+        user_has_data: true,
+        success_rates: { '5m': 1 },
+        last_probed_at: '2026-08-05T19:59:00Z',
+      }],
+    },
+  });
+
+  assert.equal(summary.generatedAt, '2026-08-05T20:00:00Z');
+  assert.deepEqual(summary.apis.map((row) => ({
+    id: row.id,
+    planType: row.planType,
+    priceMultiplier: row.priceMultiplier,
+    probe: row.probeFirstTokenLatencyMs,
+    user: row.userAvgTtftMs,
+    samples: row.userSampleCount,
+  })), [{ id: 34, planType: 'A001-Plus', priceMultiplier: 0.06, probe: 4373, user: 6085.5, samples: 16 }]);
+});
+
+test('normalizes the new provider series response for availability and user freshness', () => {
+  const at = Date.parse('2026-08-05T19:59:00Z');
+  const series = core.normalizeMonitorSeriesPayload({ data: {
+    generated_at: '2026-08-05T20:00:00Z',
+    items: [{ group_id: 34, probe: [[at, 1]], user_ttft: [{ at: '2026-08-05T19:58:00Z', avg_ttft_ms: 6000, sample_count: 3, has_data: true }] }],
+  } });
+
+  assert.deepEqual(series.seriesByApiId['34'], [[at, 1]]);
+  assert.equal(series.userTtftByGroupId['34'][0].sample_count, 3);
+  assert.equal(core.getLatestMonitorSampleAt(series), at);
+});
+
+test('selects real-user TTFT when sampled and falls back to probe TTFT without samples', () => {
+  const sampled = { firstTokenLatencyMs: 900, userAvgTtftMs: 1200, userSampleCount: 8, userHasData: true };
+  const empty = { firstTokenLatencyMs: 900, userAvgTtftMs: 0, userSampleCount: 0, userHasData: false };
+
+  assert.deepEqual(core.getLatencyMetric(sampled, 'user'), { value: 1200, source: 'user', fallback: false });
+  assert.deepEqual(core.getLatencyMetric(empty, 'user'), { value: 900, source: 'probe', fallback: true });
+  assert.equal(core.formatLatencyMetric(empty, 'user'), '用户平均 TTFT 900 ms（回退探测）');
+});
+
 test('normalizes the monitor freshness limit', () => {
   assert.equal(core.DEFAULT_CONFIG.maxMonitorAgeSeconds, 600);
   assert.equal(core.normalizeConfig({ maxMonitorAgeSeconds: '240' }).maxMonitorAgeSeconds, 600);
@@ -215,6 +275,16 @@ test('selects AIHub candidates for price, balance, and speed modes', () => {
   assert.equal(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'speed' })[0].planType, 'fast');
 });
 
+test('changes speed ranking when real-user TTFT collection is selected', () => {
+  const rows = [
+    { planType: 'probe-fast', group_id: 1, priceMultiplier: 0.05, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 100, userAvgTtftMs: 2000, userSampleCount: 5, userHasData: true, warningReasons: [] },
+    { planType: 'user-fast', group_id: 2, priceMultiplier: 0.05, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 500, userAvgTtftMs: 300, userSampleCount: 5, userHasData: true, warningReasons: [] },
+  ];
+
+  assert.equal(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'speed', latencySource: 'probe' })[0].planType, 'probe-fast');
+  assert.equal(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'speed', latencySource: 'user' })[0].planType, 'user-fast');
+});
+
 test('normalizes adjustable AIHub mode settings', () => {
   const config = core.normalizeConfig({ mode: 'balance', balanceMaxPrice: '0.1', balancePricePercent: 500 });
   assert.equal(config.mode, 'balance');
@@ -349,11 +419,12 @@ test('filters by successful monitor points or trailing consecutive points', () =
   assert.deepEqual(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, availabilityMode: 'consecutive', minConsecutiveSuccesses10m: 2 }).map((row) => row.planType), ['two-trailing']);
 });
 
-test('extracts and formats the current balance without exposing unrelated account data', () => {
+test('extracts and formats positive or negative balances without exposing unrelated account data', () => {
   assert.equal(core.getBalanceAmount({ data: { balance: '2.42650019', email: 'private@example.com' } }), 2.42650019);
-  assert.equal(core.getBalanceAmount({ data: { balance: -1 } }), null);
+  assert.equal(core.getBalanceAmount({ data: { balance: -1 } }), -1);
   assert.equal(core.getBalanceAmount({ data: { balance: 'unknown' } }), null);
   assert.equal(core.formatBalance(2.42650019), '2.4265');
+  assert.equal(core.formatBalance(-0.0153996), '-0.0154');
   assert.equal(core.formatBalance(Number.NaN), '暂无数据');
 });
 
@@ -485,6 +556,17 @@ test('formats dropdown status and first token metrics', () => {
     latencyText: '首 Token 暂无数据',
     latencyValueText: '',
   });
+});
+
+test('formats dropdown and key labels with the real-user TTFT source', () => {
+  const row = { available: true, userAvgTtftMs: 1384.6, userSampleCount: 12, userHasData: true };
+  assert.deepEqual(core.formatGroupDropdownMonitor(row, 'user'), {
+    statusText: '可用',
+    statusTone: 'available',
+    latencyText: '用户平均 TTFT 1385 ms',
+    latencyValueText: '1385 ms',
+  });
+  assert.equal(core.formatKeyOptionLabel({ name: 'main', groupName: 'A001' }, { multiplier: 0.05, latencyMs: 1384.6 }, 'user'), 'main · A001 · ×0.05 · 用户平均 TTFT 1385 ms');
 });
 
 test('formats target key options with current group metrics and safe placeholders', () => {

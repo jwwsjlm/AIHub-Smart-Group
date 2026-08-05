@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.5.8
+// @version      0.6.0
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,12 +28,16 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.5.8';
+  const SCRIPT_VERSION = '0.6.0';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
     balance: '平衡',
     speed: '速度',
+  });
+  const LATENCY_SOURCE_LABELS = Object.freeze({
+    probe: '主动探测首 Token',
+    user: '真实用户平均 TTFT',
   });
   const DEFAULT_CONFIG = Object.freeze({
     minSuccess10m: 0.10,
@@ -49,6 +53,7 @@
     availabilityMode: 'percent',
     minSuccessPoints10m: 1,
     minConsecutiveSuccesses10m: 2,
+    latencySource: 'probe',
   });
 
   function numberOr(value, fallback) {
@@ -89,6 +94,7 @@
       availabilityMode: normalizeAvailabilityMode(source.availabilityMode),
       minSuccessPoints10m: Math.round(clamp(numberOr(source.minSuccessPoints10m, DEFAULT_CONFIG.minSuccessPoints10m), 1, 60)),
       minConsecutiveSuccesses10m: Math.round(clamp(numberOr(source.minConsecutiveSuccesses10m, DEFAULT_CONFIG.minConsecutiveSuccesses10m), 1, 60)),
+      latencySource: normalizeLatencySource(source.latencySource),
     };
   }
 
@@ -104,14 +110,104 @@
     return value === 'successes' || value === 'consecutive' ? value : 'percent';
   }
 
+  function normalizeLatencySource(value) {
+    return value === 'user' ? 'user' : 'probe';
+  }
+
+  function getLatencyMetric(row, source = 'probe') {
+    const probe = nonNegativeNumberOrNull(
+      row?.probeFirstTokenLatencyMs
+      ?? row?.probe_ttft_ms
+      ?? row?.firstTokenLatencyMs
+      ?? row?.avg_ttft_ms,
+    );
+    const userValue = nonNegativeNumberOrNull(row?.userAvgTtftMs ?? row?.user_avg_ttft_ms);
+    const userSampleCount = Number(row?.userSampleCount ?? row?.user_sample_count);
+    const userHasData = row?.userHasData === true
+      || row?.user_has_data === true
+      || (Number.isFinite(userSampleCount) && userSampleCount > 0);
+    const user = userHasData && userValue !== null && userValue > 0 ? userValue : null;
+    if (source === 'user' && user !== null) return { value: user, source: 'user', fallback: false };
+    return { value: probe, source: 'probe', fallback: source === 'user' && probe !== null };
+  }
+
+  function formatLatencyMetric(row, source = 'probe') {
+    const metric = getLatencyMetric(row, source);
+    const valueText = metric.value === null ? '暂无数据' : formatLatency(metric.value);
+    if (source === 'user') {
+      return metric.fallback ? `用户平均 TTFT ${valueText}（回退探测）` : `用户平均 TTFT ${valueText}`;
+    }
+    return `首 Token ${valueText}`;
+  }
+
+  function normalizeMonitorRow(row) {
+    const source = row && typeof row === 'object' ? row : {};
+    const groupId = Number(source.group_id ?? source.groupId ?? source.id);
+    const visibleInHall = source.visible_in_hall ?? source.visibleInHall;
+    const warningReasons = Array.isArray(source.warningReasons)
+      ? source.warningReasons.slice()
+      : (Array.isArray(source.warning_reasons) ? source.warning_reasons.slice() : []);
+    if (source.response_valid === false && !warningReasons.includes('response_invalid')) warningReasons.push('response_invalid');
+    return {
+      ...source,
+      id: source.id ?? (Number.isInteger(groupId) ? groupId : undefined),
+      group_id: groupId,
+      planType: String(source.planType ?? source.code ?? source.name ?? `Group ${source.group_id ?? ''}`),
+      priceMultiplier: source.priceMultiplier ?? source.rate_multiplier ?? source.rateMultiplier,
+      available: source.available,
+      enabled: source.enabled ?? source.status !== 'disabled',
+      visibleInHall,
+      successRates: source.successRates ?? source.success_rates ?? {},
+      warningReasons,
+      checkedAt: source.checkedAt ?? source.last_probed_at ?? source.lastProbedAt,
+      probeFirstTokenLatencyMs: source.probeFirstTokenLatencyMs
+        ?? source.probe_ttft_ms
+        ?? source.firstTokenLatencyMs
+        ?? source.avg_ttft_ms,
+      probeE2eLatencyMs: source.probeE2eLatencyMs ?? source.probe_e2e_ttft_ms ?? source.avg_total_ms,
+      userAvgTtftMs: source.userAvgTtftMs ?? source.user_avg_ttft_ms,
+      userSampleCount: source.userSampleCount ?? source.user_sample_count,
+      userHasData: source.userHasData ?? source.user_has_data,
+    };
+  }
+
+  function normalizeMonitorSummaryPayload(payload) {
+    const data = payload?.data && typeof payload.data === 'object' ? payload.data : payload;
+    const sourceRows = Array.isArray(data?.apis) ? data.apis : (Array.isArray(data?.items) ? data.items : []);
+    return {
+      ...data,
+      generatedAt: data?.generatedAt ?? data?.generated_at ?? null,
+      apis: sourceRows.map(normalizeMonitorRow),
+    };
+  }
+
+  function normalizeMonitorSeriesPayload(payload) {
+    const data = payload?.data && typeof payload.data === 'object' ? payload.data : payload;
+    if (data?.seriesByApiId && typeof data.seriesByApiId === 'object') return data;
+    const seriesByApiId = {};
+    const userTtftByGroupId = {};
+    for (const item of Array.isArray(data?.items) ? data.items : []) {
+      const groupId = String(item?.group_id ?? item?.groupId ?? '');
+      if (!groupId) continue;
+      seriesByApiId[groupId] = Array.isArray(item?.probe) ? item.probe : [];
+      userTtftByGroupId[groupId] = Array.isArray(item?.user_ttft) ? item.user_ttft : [];
+    }
+    return {
+      ...data,
+      generatedAt: data?.generatedAt ?? data?.generated_at ?? null,
+      seriesByApiId,
+      userTtftByGroupId,
+    };
+  }
+
   function getBalanceAmount(payload) {
     const value = Number(payload?.data?.balance ?? payload?.balance);
-    return Number.isFinite(value) && value >= 0 ? value : null;
+    return Number.isFinite(value) ? value : null;
   }
 
   function formatBalance(value) {
     const amount = Number(value);
-    return Number.isFinite(amount) && amount >= 0
+    return Number.isFinite(amount)
       ? amount.toFixed(6).replace(/\.?0+$/, '')
       : '暂无数据';
   }
@@ -145,7 +241,7 @@
         counts.invalid += 1;
         continue;
       }
-      if (row.enabled === false || row.available !== true) {
+      if (row.enabled === false || row.visibleInHall === false || row.available !== true) {
         counts.unavailable += 1;
         continue;
       }
@@ -170,12 +266,15 @@
         counts.keywords += 1;
         continue;
       }
+      const latencyMetric = getLatencyMetric(row, normalizedConfig.latencySource);
       candidates.push({
         ...row,
         groupId,
         price,
         success10m,
-        latency: Number.isFinite(Number(row.firstTokenLatencyMs)) ? Number(row.firstTokenLatencyMs) : Number.POSITIVE_INFINITY,
+        latency: latencyMetric.value ?? Number.POSITIVE_INFINITY,
+        latencyMetricSource: latencyMetric.source,
+        latencyFallback: latencyMetric.fallback,
         name,
       });
       counts.eligible += 1;
@@ -237,6 +336,12 @@
     for (const samples of Object.values(seriesPayload?.seriesByApiId || {})) {
       for (const sample of Array.isArray(samples) ? samples : []) {
         const timestamp = Number(sample?.[0]);
+        if (Number.isFinite(timestamp) && (latest === null || timestamp > latest)) latest = timestamp;
+      }
+    }
+    for (const samples of Object.values(seriesPayload?.userTtftByGroupId || {})) {
+      for (const sample of Array.isArray(samples) ? samples : []) {
+        const timestamp = Date.parse(sample?.at);
         if (Number.isFinite(timestamp) && (latest === null || timestamp > latest)) latest = timestamp;
       }
     }
@@ -306,14 +411,15 @@
     return Number.isFinite(number) && number >= 0 ? number : null;
   }
 
-  function buildGroupMetricMap(rows) {
+  function buildGroupMetricMap(rows, config = DEFAULT_CONFIG) {
     const result = new Map();
+    const latencySource = normalizeLatencySource(config?.latencySource);
     for (const row of Array.isArray(rows) ? rows : []) {
       const groupId = Number(row?.group_id);
       if (!Number.isInteger(groupId) || groupId <= 0) continue;
       result.set(groupId, {
         multiplier: nonNegativeNumberOrNull(row?.priceMultiplier),
-        latencyMs: nonNegativeNumberOrNull(row?.firstTokenLatencyMs),
+        latencyMs: getLatencyMetric(row, latencySource).value,
       });
     }
     return result;
@@ -373,12 +479,16 @@
     return Number.isFinite(multiplier) && multiplier >= 0 ? multiplier : null;
   }
 
-  function formatGroupDropdownMonitor(row) {
-    const latency = nonNegativeNumberOrNull(row?.firstTokenLatencyMs);
+  function formatGroupDropdownMonitor(row, latencySource = 'probe') {
+    const metric = getLatencyMetric(row, latencySource);
+    const latency = metric.value;
+    const label = latencySource === 'user'
+      ? (metric.fallback ? '用户平均 TTFT（回退探测）' : '用户平均 TTFT')
+      : '首 Token';
     const latencyValueText = row && latency !== null ? `${Math.round(latency)} ms` : '';
     const latencyText = row && latency !== null
-      ? `首 Token ${latencyValueText}`
-      : '首 Token 暂无数据';
+      ? `${label} ${latencyValueText}`
+      : `${label} 暂无数据`;
     if (!row) return { statusText: '暂无监控', statusTone: 'unknown', latencyText, latencyValueText };
     if (row.enabled === false) return { statusText: '已停用', statusTone: 'disabled', latencyText, latencyValueText };
     if (row.available === true && Array.isArray(row.warningReasons) && row.warningReasons.length) {
@@ -394,13 +504,14 @@
     return safeTone ? `asg-key-group-badge-${safeTone}` : '';
   }
 
-  function formatKeyOptionLabel(key, metric) {
+  function formatKeyOptionLabel(key, metric, latencySource = 'probe') {
     const name = String(key?.name || `Key ${key?.id ?? ''}`).trim();
     const groupName = String(key?.groupName || '未分组').trim();
     const multiplier = nonNegativeNumberOrNull(metric?.multiplier);
     const latencyMs = nonNegativeNumberOrNull(metric?.latencyMs);
     const multiplierText = multiplier === null ? '倍率暂无数据' : formatMultiplier(multiplier);
-    const latencyText = latencyMs === null ? '首 Token 暂无数据' : `首 Token ${formatLatency(latencyMs)}`;
+    const latencyLabel = latencySource === 'user' ? '用户平均 TTFT' : '首 Token';
+    const latencyText = latencyMs === null ? `${latencyLabel} 暂无数据` : `${latencyLabel} ${formatLatency(latencyMs)}`;
     return `${name} · ${groupName} · ${multiplierText} · ${latencyText}`;
   }
 
@@ -613,11 +724,29 @@
   }
 
   async function fetchMonitorSummary() {
-    return apiRequest('/public/monitor/summary');
+    try {
+      const payload = await apiRequest('/public/providers?timezone=Asia%2FShanghai');
+      return normalizeMonitorSummaryPayload(payload);
+    } catch (primaryError) {
+      try {
+        return normalizeMonitorSummaryPayload(await apiRequest('/public/monitor/summary'));
+      } catch {
+        throw primaryError;
+      }
+    }
   }
 
   async function fetchMonitorSeries() {
-    return apiRequest('/public/monitor/series/6h');
+    try {
+      const payload = await apiRequest('/public/providers/series?range=6h&timezone=Asia%2FShanghai');
+      return normalizeMonitorSeriesPayload(payload);
+    } catch (primaryError) {
+      try {
+        return normalizeMonitorSeriesPayload(await apiRequest('/public/monitor/series/6h'));
+      } catch {
+        throw primaryError;
+      }
+    }
   }
 
   async function fetchCurrentBalance() {
@@ -632,7 +761,7 @@
       const query = new URLSearchParams({ page: String(page), page_size: '100', sort_by: 'created_at', sort_order: 'desc' });
       const result = await apiRequest(`/keys?${query}`);
       pages.push(result);
-      totalPages = Math.max(1, Number(result?.pages) || 1);
+      totalPages = Math.max(1, Number(result?.pages ?? result?.data?.pages) || 1);
       page += 1;
     } while (page <= totalPages);
     return projectKeys(mergeKeyPages(pages));
@@ -871,7 +1000,7 @@
           <div class="asg-main-column">
             <div class="asg-status-row"><div class="asg-status" data-field="status">准备检测</div><div class="asg-balance" data-field="balance">余额读取中...</div></div>
             <label for="asg-mode-select">模式</label>
-            <select id="asg-mode-select" data-field="mode"><option value="price">价格（最低价格）</option><option value="balance">平衡（倍率上限内首 Token 最快）</option><option value="speed">速度（最快首字）</option></select>
+            <select id="asg-mode-select" data-field="mode"><option value="price">价格（最低价格）</option><option value="balance">平衡（倍率上限内延迟最快）</option><option value="speed">速度（TTFT 最快）</option></select>
             <div class="asg-recommend" data-field="recommend"><div class="asg-muted">正在读取监控数据...</div></div>
             <label for="asg-key-select">目标密钥</label>
             <select id="asg-key-select" data-field="key"></select>
@@ -879,7 +1008,7 @@
               <div class="asg-key-detail"><span>密钥名</span><strong data-key-detail="name"></strong></div>
               <div class="asg-key-detail"><span>当前分组</span><strong data-key-detail="group"></strong></div>
               <div class="asg-key-detail"><span>倍率</span><strong class="asg-key-metric" data-key-detail="multiplier"></strong></div>
-              <div class="asg-key-detail"><span>最新首 Token</span><strong class="asg-key-metric" data-key-detail="latency"></strong></div>
+              <div class="asg-key-detail"><span data-key-detail-label="latency">最新首 Token</span><strong class="asg-key-metric" data-key-detail="latency"></strong></div>
             </div>
             <div class="asg-actions"><button data-action="refresh">检测</button><button data-action="switch" disabled>切换到推荐分组</button></div>
             <label class="asg-auto"><input type="checkbox" data-field="auto"> 自动切换（默认关闭）</label>
@@ -903,6 +1032,12 @@
                   <label class="asg-setting-wide" data-availability-setting="consecutive">连续成功监控点数<input type="number" min="1" max="60" step="1" data-setting="minConsecutiveSuccesses10m"></label>
                   <label class="asg-setting-wide" title="名称包含任一关键词的分组不会参与推荐或切换">排除分组关键词（使用 | 分隔）<input type="text" data-setting="excludedGroupKeywords" placeholder="例如 free|unstable"></label>
                   <span class="asg-setting-preview asg-setting-wide" data-field="excluded-preview" aria-live="polite"></span>
+                </div>
+              </section>
+              <section class="asg-settings-section">
+                <div class="asg-settings-head"><div class="asg-settings-title">TTFT 采集</div><label class="asg-settings-inline-label" for="asg-latency-source-setting">推荐、密钥详情和分组下拉使用的延迟指标</label></div>
+                <div class="asg-settings-grid">
+                  <label class="asg-setting-wide">采集指标<select id="asg-latency-source-setting" data-setting="latencySource"><option value="probe">主动探测首 Token</option><option value="user">真实用户平均 TTFT（无样本时回退探测）</option></select></label>
                 </div>
               </section>
               <section class="asg-settings-section">
@@ -1070,7 +1205,8 @@
         || normalizedDraft.minSuccessPoints10m !== this.config.minSuccessPoints10m
         || normalizedDraft.minConsecutiveSuccesses10m !== this.config.minConsecutiveSuccesses10m
         || normalizedDraft.requireNoWarnings !== this.config.requireNoWarnings
-        || normalizedDraft.excludedGroupKeywords !== this.config.excludedGroupKeywords;
+        || normalizedDraft.excludedGroupKeywords !== this.config.excludedGroupKeywords
+        || normalizedDraft.latencySource !== this.config.latencySource;
       const suffix = hasUnsavedFilter ? ' · 未保存' : '';
       const limit = formatMultiplier(normalizedDraft.balanceMaxPrice);
       if (!this.lastUpdated) {
@@ -1078,7 +1214,7 @@
       } else if (candidateCount === 0) {
         preview.textContent = `最高倍率 ${limit} · 当前没有符合条件的分组${suffix}`;
       } else {
-        preview.textContent = `只考虑倍率 ≤ ${limit} · ${candidateCount} 个分组可选 · 将选首 Token 最快${suffix}`;
+        preview.textContent = `只考虑倍率 ≤ ${limit} · ${candidateCount} 个分组可选 · 将选${LATENCY_SOURCE_LABELS[normalizedDraft.latencySource]} 最快${suffix}`;
       }
       preview.classList.toggle('asg-preview-pending', hasUnsavedFilter);
     }
@@ -1390,12 +1526,12 @@
           : this.config.availabilityMode === 'consecutive'
             ? `连续成功 ${winner.recentConsecutiveSuccessCount || 0} 点`
             : `可用率 ${formatPercent(winner.success10m)}`;
-        metrics.textContent = `10m ${availabilityText} · ${winner.recentSampleCount}次探测 · 首Token ${formatLatency(winner.latency)}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
+        metrics.textContent = `10m ${availabilityText} · ${winner.recentSampleCount}次探测 · ${formatLatencyMetric(winner, this.config.latencySource)}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
         recommend.append(title, metrics);
         if (this.config.mode === 'balance') {
           const reason = document.createElement('div');
           reason.className = 'asg-balance-reason';
-          reason.textContent = `倍率上限 ${formatMultiplier(this.config.balanceMaxPrice)} · 范围内首 Token 最快`;
+          reason.textContent = `倍率上限 ${formatMultiplier(this.config.balanceMaxPrice)} · 范围内${LATENCY_SOURCE_LABELS[this.config.latencySource]} 最快`;
           recommend.appendChild(reason);
         }
       }
@@ -1432,7 +1568,7 @@
 
     renderKeys() {
       const select = this.panel.querySelector('[data-field="key"]');
-      const metricMap = buildGroupMetricMap(this.rows);
+      const metricMap = buildGroupMetricMap(this.rows, this.config);
       select.replaceChildren();
       const placeholder = document.createElement('option');
       placeholder.value = '';
@@ -1443,7 +1579,7 @@
       for (const key of this.keys) {
         const option = document.createElement('option');
         option.value = key.id;
-        option.textContent = formatKeyOptionLabel(key, metricMap.get(key.groupId));
+        option.textContent = formatKeyOptionLabel(key, metricMap.get(key.groupId), this.config.latencySource);
         option.selected = String(key.id) === String(this.selectedKeyId);
         select.appendChild(option);
       }
@@ -1451,7 +1587,7 @@
       this.renderSelectedKeyDetails(metricMap);
     }
 
-    renderSelectedKeyDetails(metricMap = buildGroupMetricMap(this.rows)) {
+    renderSelectedKeyDetails(metricMap = buildGroupMetricMap(this.rows, this.config)) {
       const details = this.panel?.querySelector('[data-field="key-details"]');
       if (!details) return;
       const key = this.selectedKey();
@@ -1460,6 +1596,8 @@
       const metric = metricMap.get(key.groupId);
       const multiplier = nonNegativeNumberOrNull(metric?.multiplier);
       const latencyMs = nonNegativeNumberOrNull(metric?.latencyMs);
+      const latencyLabel = details.querySelector('[data-key-detail-label="latency"]');
+      if (latencyLabel) latencyLabel.textContent = this.config.latencySource === 'user' ? '真实用户平均 TTFT' : '最新首 Token';
       details.querySelector('[data-key-detail="name"]').textContent = key.name;
       details.querySelector('[data-key-detail="group"]').textContent = key.groupName;
       details.querySelector('[data-key-detail="multiplier"]').textContent = multiplier === null ? '暂无数据' : formatMultiplier(multiplier);
@@ -1513,6 +1651,7 @@
       this.loadFailed = false;
       this.lastAttemptAt = 0;
       this.lastErrorSignature = '';
+      this.latencySource = normalizeConfig(storageGet('config', DEFAULT_CONFIG)).latencySource;
     }
 
     start() {
@@ -1579,6 +1718,7 @@
       try {
         const summary = await fetchMonitorSummary();
         if (!this.active) return;
+        this.latencySource = normalizeConfig(storageGet('config', DEFAULT_CONFIG)).latencySource;
         this.monitorIndex = buildGroupDropdownMonitorIndex(summary?.apis);
         this.hasMonitorData = true;
         if (this.lastErrorSignature) writeRuntimeLog('aihub', 'info', '密钥分组监控读取已恢复');
@@ -1597,6 +1737,7 @@
 
     render() {
       if (!this.active) return;
+      this.latencySource = normalizeConfig(storageGet('config', DEFAULT_CONFIG)).latencySource;
       const menus = this.findMenus();
       if (!menus.length) return;
       if (!this.hasMonitorData && !this.loading && Date.now() - this.lastAttemptAt >= 60_000) this.refresh();
@@ -1624,12 +1765,13 @@
 
       let info;
       if (this.loadFailed) {
-        info = { statusText: '监控读取失败', statusTone: 'error', latencyText: '首 Token 暂无数据', latencyValueText: '' };
+        info = { ...formatGroupDropdownMonitor(null, this.latencySource), statusText: '监控读取失败', statusTone: 'error' };
       } else if (!this.hasMonitorData) {
-        info = { statusText: '监控读取中', statusTone: 'unknown', latencyText: '首 Token --', latencyValueText: '' };
+        const latencyLabel = this.latencySource === 'user' ? '用户平均 TTFT' : '首 Token';
+        info = { statusText: '监控读取中', statusTone: 'unknown', latencyText: `${latencyLabel} --`, latencyValueText: '' };
       } else {
         const multiplier = parseGroupOptionMultiplier(multiplierNode.textContent);
-        info = formatGroupDropdownMonitor(findGroupDropdownMonitor(this.monitorIndex, name, multiplier));
+        info = formatGroupDropdownMonitor(findGroupDropdownMonitor(this.monitorIndex, name, multiplier), this.latencySource);
       }
 
       const badgeToneClass = getGroupDropdownToneClass(info.statusTone);
@@ -1665,7 +1807,8 @@
           const value = document.createElement('strong');
           value.className = 'asg-key-group-latency-value';
           value.textContent = info.latencyValueText;
-          latency.replaceChildren(document.createTextNode('首 Token'), value);
+          const latencyLabel = info.latencyText.slice(0, Math.max(0, info.latencyText.length - info.latencyValueText.length)).trim();
+          latency.replaceChildren(document.createTextNode(latencyLabel), value);
         } else {
           latency.textContent = info.latencyText;
         }
@@ -1816,10 +1959,17 @@
   return {
     DEFAULT_CONFIG,
     GROUP_MODE_LABELS,
+    LATENCY_SOURCE_LABELS,
     normalizeConfig,
     normalizeGroupMode,
     normalizeAvailabilityMode,
+    normalizeLatencySource,
     normalizePanelTab,
+    getLatencyMetric,
+    formatLatencyMetric,
+    normalizeMonitorRow,
+    normalizeMonitorSummaryPayload,
+    normalizeMonitorSeriesPayload,
     getBalanceAmount,
     formatBalance,
     getExcludedGroupInfo,
