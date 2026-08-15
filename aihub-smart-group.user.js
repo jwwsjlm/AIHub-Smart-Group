@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.6.0
+// @version      0.7.0
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.6.0';
+  const SCRIPT_VERSION = '0.7.0';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
@@ -114,6 +114,80 @@
     return value === 'user' ? 'user' : 'probe';
   }
 
+  function normalizeCacheHitRate(value) {
+    if (value == null || value === '') return null;
+    const text = String(value).trim();
+    const percent = text.endsWith('%') ? Number(text.slice(0, -1).trim()) : Number(text);
+    if (!Number.isFinite(percent) || percent < 0) return null;
+    const normalized = text.endsWith('%') || percent > 1 ? percent / 100 : percent;
+    return normalized >= 0 && normalized <= 1 ? normalized : null;
+  }
+
+  function formatCacheHitRate(value) {
+    const normalized = normalizeCacheHitRate(value);
+    return normalized === null ? '缓存命中率暂无数据' : `缓存命中率 ${(normalized * 100).toFixed(1)}%`;
+  }
+
+  function normalizeModelHealth(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const result = {};
+    for (const model of ['sol', 'terra', 'luna']) {
+      const raw = value[model] ?? value[model.toUpperCase()] ?? value[model[0].toUpperCase() + model.slice(1)];
+      if (raw == null) continue;
+      const status = String(raw).trim().toLocaleLowerCase();
+      result[model] = ['healthy', 'ok', 'passed', 'available', 'success'].includes(status)
+        ? 'healthy'
+        : ['failed', 'error', 'unavailable', 'down'].includes(status)
+          ? 'failed'
+          : 'unknown';
+    }
+    return Object.keys(result).length ? result : null;
+  }
+
+  function summarizeModelHealth(value) {
+    const health = normalizeModelHealth(value) || {};
+    const healthy = Object.values(health).filter((status) => status === 'healthy').length;
+    const failed = Object.values(health).filter((status) => status === 'failed').length;
+    const total = Object.keys(health).length;
+    return { health, healthy, failed, total };
+  }
+
+  function normalizeModelDetection(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const rawStatus = String(value.status ?? '').trim().toLocaleLowerCase();
+    const status = ['passed', 'pass', 'ok', 'success'].includes(rawStatus)
+      ? 'passed'
+      : ['insufficient_evidence', 'insufficient-evidence', 'insufficient'].includes(rawStatus)
+        ? 'insufficient_evidence'
+        : ['failed', 'error', 'rejected'].includes(rawStatus)
+          ? 'failed'
+          : ['not_applicable', 'not-applicable', 'skipped'].includes(rawStatus)
+            ? 'not_applicable'
+            : rawStatus || null;
+    return { ...value, status };
+  }
+
+  function getModelDetection(row) {
+    return normalizeModelDetection(row?.modelDetection ?? row?.model_detection);
+  }
+
+  function getModelDetectionLabel(rowOrDetection) {
+    const looksLikeDetection = rowOrDetection && typeof rowOrDetection === 'object'
+      && ('status' in rowOrDetection || 'applicable' in rowOrDetection || 'reason_codes' in rowOrDetection);
+    const detection = looksLikeDetection ? normalizeModelDetection(rowOrDetection) : getModelDetection(rowOrDetection);
+    if (!detection) return '';
+    if (detection.status === 'passed') return '检测通过';
+    if (detection.status === 'insufficient_evidence') return '证据不足';
+    if (detection.status === 'failed') return '检测失败';
+    if (detection.status === 'not_applicable' || detection.applicable === false) return '不适用';
+    return '检测未知';
+  }
+
+  function hasModelDetectionWarning(row) {
+    const detection = getModelDetection(row);
+    return Boolean(detection && detection.applicable !== false && ['insufficient_evidence', 'failed'].includes(detection.status));
+  }
+
   function getLatencyMetric(row, source = 'probe') {
     const probe = nonNegativeNumberOrNull(
       row?.probeFirstTokenLatencyMs
@@ -148,6 +222,13 @@
       ? source.warningReasons.slice()
       : (Array.isArray(source.warning_reasons) ? source.warning_reasons.slice() : []);
     if (source.response_valid === false && !warningReasons.includes('response_invalid')) warningReasons.push('response_invalid');
+    const modelDetection = normalizeModelDetection(source.modelDetection ?? source.model_detection);
+    if (modelDetection && modelDetection.applicable !== false && ['insufficient_evidence', 'failed'].includes(modelDetection.status)) {
+      const reason = `model_detection_${modelDetection.status}`;
+      if (!warningReasons.includes(reason)) warningReasons.push(reason);
+    }
+    const modelHealth = normalizeModelHealth(source.modelHealth ?? source.model_health);
+    const cacheHitRate = normalizeCacheHitRate(source.cacheHitRate ?? source.cache_hit_rate);
     return {
       ...source,
       id: source.id ?? (Number.isInteger(groupId) ? groupId : undefined),
@@ -159,6 +240,9 @@
       visibleInHall,
       successRates: source.successRates ?? source.success_rates ?? {},
       warningReasons,
+      modelDetection,
+      modelHealth,
+      cacheHitRate,
       checkedAt: source.checkedAt ?? source.last_probed_at ?? source.lastProbedAt,
       probeFirstTokenLatencyMs: source.probeFirstTokenLatencyMs
         ?? source.probe_ttft_ms
@@ -257,7 +341,8 @@
         counts.lowSuccess += 1;
         continue;
       }
-      if (normalizedConfig.requireNoWarnings && Array.isArray(row.warningReasons) && row.warningReasons.length > 0) {
+      if (normalizedConfig.requireNoWarnings
+        && ((Array.isArray(row.warningReasons) && row.warningReasons.length > 0) || hasModelDetectionWarning(row))) {
         counts.warnings += 1;
         continue;
       }
@@ -417,10 +502,17 @@
     for (const row of Array.isArray(rows) ? rows : []) {
       const groupId = Number(row?.group_id);
       if (!Number.isInteger(groupId) || groupId <= 0) continue;
-      result.set(groupId, {
+      const metric = {
         multiplier: nonNegativeNumberOrNull(row?.priceMultiplier),
         latencyMs: getLatencyMetric(row, latencySource).value,
-      });
+      };
+      const detection = getModelDetection(row);
+      const cacheHitRate = normalizeCacheHitRate(row?.cacheHitRate ?? row?.cache_hit_rate);
+      if (detection) metric.detectionStatus = detection.status;
+      if (cacheHitRate !== null) metric.cacheHitRate = cacheHitRate;
+      const health = normalizeModelHealth(row?.modelHealth ?? row?.model_health);
+      if (health) metric.modelHealth = health;
+      result.set(groupId, metric);
     }
     return result;
   }
@@ -491,10 +583,15 @@
       : `${label} 暂无数据`;
     if (!row) return { statusText: '暂无监控', statusTone: 'unknown', latencyText, latencyValueText };
     if (row.enabled === false) return { statusText: '已停用', statusTone: 'disabled', latencyText, latencyValueText };
-    if (row.available === true && Array.isArray(row.warningReasons) && row.warningReasons.length) {
-      return { statusText: '可用 · 有警告', statusTone: 'warning', latencyText, latencyValueText };
+    if (row.available === true
+      && ((Array.isArray(row.warningReasons) && row.warningReasons.length) || hasModelDetectionWarning(row))) {
+      const detectionLabel = getModelDetectionLabel(row);
+      return { statusText: detectionLabel && detectionLabel !== '检测通过' ? `可用 · ${detectionLabel}` : '可用 · 有警告', statusTone: 'warning', latencyText, latencyValueText };
     }
-    if (row.available === true) return { statusText: '可用', statusTone: 'available', latencyText, latencyValueText };
+    if (row.available === true) {
+      const detectionLabel = getModelDetectionLabel(row);
+      return { statusText: detectionLabel ? `可用 · ${detectionLabel}` : '可用', statusTone: 'available', latencyText, latencyValueText };
+    }
     if (row.available === false) return { statusText: '不可用', statusTone: 'unavailable', latencyText, latencyValueText };
     return { statusText: '暂无监控', statusTone: 'unknown', latencyText, latencyValueText };
   }
@@ -512,7 +609,9 @@
     const multiplierText = multiplier === null ? '倍率暂无数据' : formatMultiplier(multiplier);
     const latencyLabel = latencySource === 'user' ? '用户平均 TTFT' : '首 Token';
     const latencyText = latencyMs === null ? `${latencyLabel} 暂无数据` : `${latencyLabel} ${formatLatency(latencyMs)}`;
-    return `${name} · ${groupName} · ${multiplierText} · ${latencyText}`;
+    const detectionText = metric?.detectionStatus ? ` · ${getModelDetectionLabel({ modelDetection: { status: metric.detectionStatus } })}` : '';
+    const cacheText = metric?.cacheHitRate == null ? '' : ` · 缓存 ${(metric.cacheHitRate * 100).toFixed(1)}%`;
+    return `${name} · ${groupName} · ${multiplierText} · ${latencyText}${detectionText}${cacheText}`;
   }
 
   function formatMultiplier(value) {
@@ -1009,6 +1108,8 @@
               <div class="asg-key-detail"><span>当前分组</span><strong data-key-detail="group"></strong></div>
               <div class="asg-key-detail"><span>倍率</span><strong class="asg-key-metric" data-key-detail="multiplier"></strong></div>
               <div class="asg-key-detail"><span data-key-detail-label="latency">最新首 Token</span><strong class="asg-key-metric" data-key-detail="latency"></strong></div>
+              <div class="asg-key-detail"><span>模型检测</span><strong data-key-detail="detection"></strong></div>
+              <div class="asg-key-detail"><span>缓存命中率</span><strong class="asg-key-metric" data-key-detail="cache"></strong></div>
             </div>
             <div class="asg-actions"><button data-action="refresh">检测</button><button data-action="switch" disabled>切换到推荐分组</button></div>
             <label class="asg-auto"><input type="checkbox" data-field="auto"> 自动切换（默认关闭）</label>
@@ -1526,7 +1627,13 @@
           : this.config.availabilityMode === 'consecutive'
             ? `连续成功 ${winner.recentConsecutiveSuccessCount || 0} 点`
             : `可用率 ${formatPercent(winner.success10m)}`;
-        metrics.textContent = `10m ${availabilityText} · ${winner.recentSampleCount}次探测 · ${formatLatencyMetric(winner, this.config.latencySource)}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
+        const detectionText = getModelDetectionLabel(winner);
+        const health = summarizeModelHealth(winner.modelHealth ?? winner.model_health);
+        const healthText = health.total ? ` · 健康模型 ${health.healthy}/${health.total}` : '';
+        const cacheText = normalizeCacheHitRate(winner.cacheHitRate ?? winner.cache_hit_rate) === null
+          ? ''
+          : ` · ${formatCacheHitRate(winner.cacheHitRate ?? winner.cache_hit_rate)}`;
+        metrics.textContent = `10m ${availabilityText} · ${winner.recentSampleCount}次探测 · ${formatLatencyMetric(winner, this.config.latencySource)}${detectionText ? ` · 模型${detectionText}` : ''}${healthText}${cacheText}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
         recommend.append(title, metrics);
         if (this.config.mode === 'balance') {
           const reason = document.createElement('div');
@@ -1539,7 +1646,8 @@
       const diagnostic = document.createElement('div');
       diagnostic.className = 'asg-recommend-meta';
       const overLimit = this.config.mode === 'balance' ? Math.max(0, Number(diagnostics.eligible || 0) - this.ranked.length) : 0;
-      diagnostic.textContent = `参与比较 ${this.ranked.length} · 排除关键词 ${diagnostics.keywords || 0} · 不可用 ${diagnostics.unavailable || 0} · 可用率不足 ${diagnostics.lowSuccess || 0} · 监控警告 ${diagnostics.warnings || 0}${overLimit ? ` · 超过倍率上限 ${overLimit}` : ''}`;
+      const detectionWarnings = this.rows.filter((row) => getModelDetection(row)?.status === 'insufficient_evidence').length;
+      diagnostic.textContent = `参与比较 ${this.ranked.length} · 排除关键词 ${diagnostics.keywords || 0} · 不可用 ${diagnostics.unavailable || 0} · 可用率不足 ${diagnostics.lowSuccess || 0} · 监控警告 ${diagnostics.warnings || 0}${detectionWarnings ? `（证据不足 ${detectionWarnings}）` : ''}${overLimit ? ` · 超过倍率上限 ${overLimit}` : ''}`;
       recommend.appendChild(diagnostic);
       const freshness = document.createElement('div');
       freshness.className = `asg-monitor-age${this.monitorFreshness.stale ? ' asg-stale' : ''}`;
@@ -1596,12 +1704,16 @@
       const metric = metricMap.get(key.groupId);
       const multiplier = nonNegativeNumberOrNull(metric?.multiplier);
       const latencyMs = nonNegativeNumberOrNull(metric?.latencyMs);
+      const detectionText = metric?.detectionStatus ? getModelDetectionLabel({ modelDetection: { status: metric.detectionStatus } }) : '暂无数据';
+      const cacheHitRate = normalizeCacheHitRate(metric?.cacheHitRate);
       const latencyLabel = details.querySelector('[data-key-detail-label="latency"]');
       if (latencyLabel) latencyLabel.textContent = this.config.latencySource === 'user' ? '真实用户平均 TTFT' : '最新首 Token';
       details.querySelector('[data-key-detail="name"]').textContent = key.name;
       details.querySelector('[data-key-detail="group"]').textContent = key.groupName;
       details.querySelector('[data-key-detail="multiplier"]').textContent = multiplier === null ? '暂无数据' : formatMultiplier(multiplier);
       details.querySelector('[data-key-detail="latency"]').textContent = latencyMs === null ? '暂无数据' : formatLatency(latencyMs);
+      details.querySelector('[data-key-detail="detection"]').textContent = detectionText;
+      details.querySelector('[data-key-detail="cache"]').textContent = cacheHitRate === null ? '暂无数据' : `${(cacheHitRate * 100).toFixed(1)}%`;
     }
 
     renderCandidates() {
@@ -1612,7 +1724,10 @@
         const name = document.createElement('span');
         name.textContent = candidate.name;
         const metrics = document.createElement('span');
-        metrics.textContent = `${candidate.price}x · 10m ${formatPercent(candidate.success10m)}`;
+        const detectionText = getModelDetectionLabel(candidate);
+        const cacheHitRate = normalizeCacheHitRate(candidate.cacheHitRate ?? candidate.cache_hit_rate);
+        const health = summarizeModelHealth(candidate.modelHealth ?? candidate.model_health);
+        metrics.textContent = `${candidate.price}x · 10m ${formatPercent(candidate.success10m)}${detectionText ? ` · ${detectionText}` : ''}${health.total ? ` · 健康 ${health.healthy}/${health.total}` : ''}${cacheHitRate === null ? '' : ` · 缓存 ${(cacheHitRate * 100).toFixed(1)}%`}`;
         item.append(name, metrics);
         list.appendChild(item);
       }
@@ -1964,6 +2079,14 @@
     normalizeGroupMode,
     normalizeAvailabilityMode,
     normalizeLatencySource,
+    normalizeCacheHitRate,
+    formatCacheHitRate,
+    normalizeModelHealth,
+    summarizeModelHealth,
+    normalizeModelDetection,
+    getModelDetection,
+    getModelDetectionLabel,
+    hasModelDetectionWarning,
     normalizePanelTab,
     getLatencyMetric,
     formatLatencyMetric,

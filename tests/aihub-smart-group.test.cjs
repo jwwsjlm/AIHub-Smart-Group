@@ -114,6 +114,37 @@ test('normalizes the new provider summary response and keeps both TTFT metrics',
   })), [{ id: 34, planType: 'A001-Plus', priceMultiplier: 0.06, probe: 4373, user: 6085.5, samples: 16 }]);
 });
 
+test('normalizes the new cache, model health, and model detection fields', () => {
+  const summary = core.normalizeMonitorSummaryPayload({ data: {
+    items: [{
+      code: 'A001-Plus',
+      group_id: 34,
+      rate_multiplier: 0.06,
+      available: true,
+      cache_hit_rate: '65.50%',
+      model_health: { sol: 'healthy', terra: 'healthy', luna: 'failed' },
+      model_detection: { status: 'insufficient_evidence', applicable: true },
+    }],
+  } });
+  const row = summary.apis[0];
+
+  assert.equal(row.cacheHitRate, 0.655);
+  assert.deepEqual(row.modelHealth, { sol: 'healthy', terra: 'healthy', luna: 'failed' });
+  assert.equal(row.modelDetection.status, 'insufficient_evidence');
+  assert.equal(row.warningReasons.includes('model_detection_insufficient_evidence'), true);
+  assert.deepEqual(core.summarizeModelHealth(row.modelHealth), {
+    health: { sol: 'healthy', terra: 'healthy', luna: 'failed' }, healthy: 2, failed: 1, total: 3,
+  });
+});
+
+test('parses cache hit rates from percentages and decimals', () => {
+  assert.equal(core.normalizeCacheHitRate('65.50%'), 0.655);
+  assert.equal(core.normalizeCacheHitRate(0.25), 0.25);
+  assert.equal(core.normalizeCacheHitRate(25), 0.25);
+  assert.equal(core.normalizeCacheHitRate('bad'), null);
+  assert.equal(core.formatCacheHitRate('65.50%'), '缓存命中率 65.5%');
+});
+
 test('normalizes the new provider series response for availability and user freshness', () => {
   const at = Date.parse('2026-08-05T19:59:00Z');
   const series = core.normalizeMonitorSeriesPayload({ data: {
@@ -273,6 +304,15 @@ test('selects AIHub candidates for price, balance, and speed modes', () => {
   assert.equal(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'price' })[0].planType, 'cheap');
   assert.equal(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'balance', balanceMaxPrice: 0.05 })[0].planType, 'balanced');
   assert.equal(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'speed' })[0].planType, 'fast');
+});
+
+test('treats explicit insufficient model evidence as a monitor warning', () => {
+  const rows = [{
+    planType: 'evidence-gap', group_id: 8, priceMultiplier: 0.01, available: true,
+    successRates: { '10m': 1 }, model_detection: { status: 'insufficient_evidence' },
+  }];
+  assert.deepEqual(core.rankCandidates(rows, core.DEFAULT_CONFIG), []);
+  assert.deepEqual(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, requireNoWarnings: false }).map((row) => row.name), ['evidence-gap']);
 });
 
 test('changes speed ranking when real-user TTFT collection is selected', () => {
@@ -556,6 +596,17 @@ test('formats dropdown status and first token metrics', () => {
     latencyText: '首 Token 暂无数据',
     latencyValueText: '',
   });
+});
+
+test('formats explicit model detection states in dropdown status', () => {
+  assert.deepEqual(core.formatGroupDropdownMonitor({ available: true, warningReasons: [], model_detection: { status: 'passed' } }), {
+    statusText: '可用 · 检测通过', statusTone: 'available', latencyText: '首 Token 暂无数据', latencyValueText: '',
+  });
+  assert.deepEqual(core.formatGroupDropdownMonitor({ available: true, warningReasons: [], model_detection: { status: 'insufficient_evidence' } }), {
+    statusText: '可用 · 证据不足', statusTone: 'warning', latencyText: '首 Token 暂无数据', latencyValueText: '',
+  });
+  assert.equal(core.getModelDetectionLabel({ applicable: false, status: 'not_applicable' }), '不适用');
+  assert.equal(core.hasModelDetectionWarning({ model_detection: { applicable: false, status: 'failed' } }), false);
 });
 
 test('formats dropdown and key labels with the real-user TTFT source', () => {
