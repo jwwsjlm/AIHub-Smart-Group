@@ -84,10 +84,15 @@ test('normalizes the selectable TTFT source and preserves the legacy default', (
 
 test('defaults provider hall auto sorting to multiplier priority', () => {
   assert.equal(core.DEFAULT_CONFIG.providerSortPreference, 'rate');
+  assert.equal(core.DEFAULT_CONFIG.providerAutoRefresh, true);
+  assert.equal(core.DEFAULT_CONFIG.providerRefreshIntervalSeconds, 60);
   assert.equal(core.normalizeConfig({}).providerSortPreference, 'rate');
   assert.equal(core.normalizeProviderSortPreference('default'), 'default');
   assert.equal(core.normalizeProviderSortPreference('user'), 'user');
   assert.equal(core.normalizeProviderSortPreference('unexpected'), 'rate');
+  assert.equal(core.normalizeConfig({ providerAutoRefresh: false }).providerAutoRefresh, false);
+  assert.equal(core.normalizeConfig({ providerRefreshIntervalSeconds: 2 }).providerRefreshIntervalSeconds, 15);
+  assert.equal(core.normalizeConfig({ providerRefreshIntervalSeconds: 9999 }).providerRefreshIntervalSeconds, 3600);
 });
 
 test('finds the requested provider hall sort button without matching table headers', () => {
@@ -99,6 +104,16 @@ test('finds the requested provider hall sort button without matching table heade
   assert.equal(core.findProviderSortButton(buttons, 'rate'), buttons[1]);
   assert.equal(core.findProviderSortButton(buttons, 'default'), buttons[0]);
   assert.equal(core.findProviderSortButton(buttons, 'user'), buttons[2]);
+});
+
+test('finds only the native provider hall refresh button', () => {
+  const buttons = [
+    { textContent: '检测' },
+    { textContent: '刷新' },
+    { textContent: ' 刷新中 ' },
+  ];
+  assert.equal(core.findProviderRefreshButton(buttons), buttons[1]);
+  assert.equal(core.findProviderRefreshButton([{ textContent: '检测' }]), null);
 });
 
 test('normalizes the new provider summary response and keeps both TTFT metrics', () => {

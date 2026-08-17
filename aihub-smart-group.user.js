@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.8.0
+// @version      0.9.0
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.8.0';
+  const SCRIPT_VERSION = '0.9.0';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const GROUP_MODE_LABELS = Object.freeze({
@@ -61,6 +61,8 @@
     minConsecutiveSuccesses10m: 2,
     latencySource: 'probe',
     providerSortPreference: 'rate',
+    providerAutoRefresh: true,
+    providerRefreshIntervalSeconds: 60,
   });
 
   function numberOr(value, fallback) {
@@ -103,6 +105,8 @@
       minConsecutiveSuccesses10m: Math.round(clamp(numberOr(source.minConsecutiveSuccesses10m, DEFAULT_CONFIG.minConsecutiveSuccesses10m), 1, 60)),
       latencySource: normalizeLatencySource(source.latencySource),
       providerSortPreference: normalizeProviderSortPreference(source.providerSortPreference),
+      providerAutoRefresh: source.providerAutoRefresh !== false,
+      providerRefreshIntervalSeconds: Math.round(clamp(numberOr(source.providerRefreshIntervalSeconds, DEFAULT_CONFIG.providerRefreshIntervalSeconds), 15, 3600)),
     };
   }
 
@@ -134,6 +138,10 @@
   function findProviderSortButton(buttons, preference) {
     const targetText = getProviderSortButtonText(preference);
     return [...(buttons || [])].find((button) => String(button?.textContent || '').trim().replace(/\s*[↑↓]$/, '') === targetText) || null;
+  }
+
+  function findProviderRefreshButton(buttons) {
+    return [...(buttons || [])].find((button) => String(button?.textContent || '').trim() === '刷新') || null;
   }
 
   function normalizeCacheHitRate(value) {
@@ -1168,7 +1176,9 @@
                 <div class="asg-settings-head"><div class="asg-settings-title">供应商大厅</div><label class="asg-settings-inline-label" for="asg-provider-sort-setting">打开页面后自动选择排序</label></div>
                 <div class="asg-settings-grid">
                   <label class="asg-setting-wide">自动排序<select id="asg-provider-sort-setting" data-setting="providerSortPreference"><option value="rate">倍率优先（从低到高）</option><option value="default">默认排序</option><option value="user">用户速度排序</option></select></label>
-                  <span class="asg-setting-preview asg-setting-wide">保存后立即应用；以后每次打开供应商大厅都会自动选择。</span>
+                  <label class="asg-setting-compact asg-auto"><input type="checkbox" data-setting="providerAutoRefresh"> 定时自动刷新</label>
+                  <label>刷新间隔（秒）<input type="number" min="15" max="3600" step="1" data-setting="providerRefreshIntervalSeconds"></label>
+                  <span class="asg-setting-preview asg-setting-wide">排序保存后立即应用；自动刷新会点击页面原生“刷新”按钮，不会整页重载。</span>
                 </div>
               </section>
               <section class="asg-settings-section">
@@ -2056,9 +2066,11 @@
       this.applied = false;
       this.observer = null;
       this.applyTimer = null;
+      this.refreshTimer = null;
       this.onConfigChanged = () => {
         this.applied = false;
         this.queueApply();
+        this.syncRefreshTimer();
       };
     }
 
@@ -2068,6 +2080,7 @@
       this.observer.observe(document.body, { childList: true, subtree: true });
       window.addEventListener(CONFIG_CHANGE_EVENT, this.onConfigChanged);
       this.queueApply();
+      this.syncRefreshTimer();
     }
 
     stop() {
@@ -2075,7 +2088,9 @@
       this.observer?.disconnect();
       this.observer = null;
       if (this.applyTimer) window.clearTimeout(this.applyTimer);
+      if (this.refreshTimer) window.clearInterval(this.refreshTimer);
       this.applyTimer = null;
+      this.refreshTimer = null;
       window.removeEventListener(CONFIG_CHANGE_EVENT, this.onConfigChanged);
     }
 
@@ -2096,6 +2111,23 @@
       const activeButton = [...buttons].find((button) => button.classList.contains('active')) || null;
       if (activeButton !== target) target.click();
       this.applied = true;
+      return true;
+    }
+
+    syncRefreshTimer() {
+      if (this.refreshTimer) window.clearInterval(this.refreshTimer);
+      this.refreshTimer = null;
+      if (!this.active) return;
+      const config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
+      if (!config.providerAutoRefresh) return;
+      this.refreshTimer = window.setInterval(() => this.refresh(), config.providerRefreshIntervalSeconds * 1000);
+    }
+
+    refresh() {
+      if (!this.active) return false;
+      const button = findProviderRefreshButton(document.querySelectorAll('main button'));
+      if (!button || button.disabled) return false;
+      button.click();
       return true;
     }
   }
@@ -2172,6 +2204,7 @@
     normalizeProviderSortPreference,
     getProviderSortButtonText,
     findProviderSortButton,
+    findProviderRefreshButton,
     normalizeCacheHitRate,
     formatCacheHitRate,
     normalizeModelHealth,
