@@ -82,6 +82,25 @@ test('normalizes the selectable TTFT source and preserves the legacy default', (
   assert.equal(core.normalizeConfig({ latencySource: 'unexpected' }).latencySource, 'probe');
 });
 
+test('defaults provider hall auto sorting to multiplier priority', () => {
+  assert.equal(core.DEFAULT_CONFIG.providerSortPreference, 'rate');
+  assert.equal(core.normalizeConfig({}).providerSortPreference, 'rate');
+  assert.equal(core.normalizeProviderSortPreference('default'), 'default');
+  assert.equal(core.normalizeProviderSortPreference('user'), 'user');
+  assert.equal(core.normalizeProviderSortPreference('unexpected'), 'rate');
+});
+
+test('finds the requested provider hall sort button without matching table headers', () => {
+  const buttons = [
+    { textContent: '默认 ↓' },
+    { textContent: '倍率' },
+    { textContent: '用户速度 ↑' },
+  ];
+  assert.equal(core.findProviderSortButton(buttons, 'rate'), buttons[1]);
+  assert.equal(core.findProviderSortButton(buttons, 'default'), buttons[0]);
+  assert.equal(core.findProviderSortButton(buttons, 'user'), buttons[2]);
+});
+
 test('normalizes the new provider summary response and keeps both TTFT metrics', () => {
   const summary = core.normalizeMonitorSummaryPayload({
     data: {
@@ -644,9 +663,9 @@ test('formats usage multipliers without unnecessary zeroes', () => {
 });
 
 test('enables the panel on every AIHub page only while logged in', () => {
-  assert.deepEqual(core.getPageFeatures('/providers', true), { panel: true, usage: false, keyGroups: false });
-  assert.deepEqual(core.getPageFeatures('/keys?page=1', true), { panel: true, usage: false, keyGroups: true });
-  assert.deepEqual(core.getPageFeatures('/usage', true), { panel: true, usage: true, keyGroups: false });
-  assert.deepEqual(core.getPageFeatures('/dashboard', true), { panel: true, usage: false, keyGroups: false });
-  assert.deepEqual(core.getPageFeatures('/usage', false), { panel: false, usage: false, keyGroups: false });
+  assert.deepEqual(core.getPageFeatures('/providers', true), { panel: true, usage: false, keyGroups: false, providerSort: true });
+  assert.deepEqual(core.getPageFeatures('/keys?page=1', true), { panel: true, usage: false, keyGroups: true, providerSort: false });
+  assert.deepEqual(core.getPageFeatures('/usage', true), { panel: true, usage: true, keyGroups: false, providerSort: false });
+  assert.deepEqual(core.getPageFeatures('/dashboard', true), { panel: true, usage: false, keyGroups: false, providerSort: false });
+  assert.deepEqual(core.getPageFeatures('/usage', false), { panel: false, usage: false, keyGroups: false, providerSort: false });
 });

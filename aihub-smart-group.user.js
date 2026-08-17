@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.7.0
+// @version      0.8.0
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,8 +28,9 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.7.0';
+  const SCRIPT_VERSION = '0.8.0';
   const STORAGE_PREFIX = 'aihub-smart-group:';
+  const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
     balance: '平衡',
@@ -38,6 +39,11 @@
   const LATENCY_SOURCE_LABELS = Object.freeze({
     probe: '主动探测首 Token',
     user: '真实用户平均 TTFT',
+  });
+  const PROVIDER_SORT_LABELS = Object.freeze({
+    rate: '倍率优先',
+    default: '默认排序',
+    user: '用户速度排序',
   });
   const DEFAULT_CONFIG = Object.freeze({
     minSuccess10m: 0.10,
@@ -54,6 +60,7 @@
     minSuccessPoints10m: 1,
     minConsecutiveSuccesses10m: 2,
     latencySource: 'probe',
+    providerSortPreference: 'rate',
   });
 
   function numberOr(value, fallback) {
@@ -95,6 +102,7 @@
       minSuccessPoints10m: Math.round(clamp(numberOr(source.minSuccessPoints10m, DEFAULT_CONFIG.minSuccessPoints10m), 1, 60)),
       minConsecutiveSuccesses10m: Math.round(clamp(numberOr(source.minConsecutiveSuccesses10m, DEFAULT_CONFIG.minConsecutiveSuccesses10m), 1, 60)),
       latencySource: normalizeLatencySource(source.latencySource),
+      providerSortPreference: normalizeProviderSortPreference(source.providerSortPreference),
     };
   }
 
@@ -112,6 +120,20 @@
 
   function normalizeLatencySource(value) {
     return value === 'user' ? 'user' : 'probe';
+  }
+
+  function normalizeProviderSortPreference(value) {
+    return Object.prototype.hasOwnProperty.call(PROVIDER_SORT_LABELS, value) ? value : 'rate';
+  }
+
+  function getProviderSortButtonText(preference) {
+    const normalized = normalizeProviderSortPreference(preference);
+    return normalized === 'default' ? '默认' : normalized === 'user' ? '用户速度' : '倍率';
+  }
+
+  function findProviderSortButton(buttons, preference) {
+    const targetText = getProviderSortButtonText(preference);
+    return [...(buttons || [])].find((button) => String(button?.textContent || '').trim().replace(/\s*[↑↓]$/, '') === targetText) || null;
   }
 
   function normalizeCacheHitRate(value) {
@@ -622,11 +644,12 @@
 
   function getPageFeatures(pathname, loggedIn) {
     const path = String(pathname || '').split('?')[0];
-    if (!loggedIn) return { panel: false, usage: false, keyGroups: false };
+    if (!loggedIn) return { panel: false, usage: false, keyGroups: false, providerSort: false };
     return {
       panel: true,
       usage: path === '/usage' || path.startsWith('/usage/'),
       keyGroups: path === '/keys' || path.startsWith('/keys/'),
+      providerSort: path === '/providers' || path.startsWith('/providers/'),
     };
   }
 
@@ -1142,6 +1165,13 @@
                 </div>
               </section>
               <section class="asg-settings-section">
+                <div class="asg-settings-head"><div class="asg-settings-title">供应商大厅</div><label class="asg-settings-inline-label" for="asg-provider-sort-setting">打开页面后自动选择排序</label></div>
+                <div class="asg-settings-grid">
+                  <label class="asg-setting-wide">自动排序<select id="asg-provider-sort-setting" data-setting="providerSortPreference"><option value="rate">倍率优先（从低到高）</option><option value="default">默认排序</option><option value="user">用户速度排序</option></select></label>
+                  <span class="asg-setting-preview asg-setting-wide">保存后立即应用；以后每次打开供应商大厅都会自动选择。</span>
+                </div>
+              </section>
+              <section class="asg-settings-section">
                 <div class="asg-settings-title">检测与切换</div>
                 <div class="asg-settings-grid">
                   <label>连续通过次数<input type="number" min="1" max="5" step="1" data-setting="consecutiveChecks"></label>
@@ -1367,6 +1397,7 @@
       next.mode = this.config.mode;
       this.config = normalizeConfig(next);
       storageSet('config', this.config);
+      window.dispatchEvent(new window.CustomEvent(CONFIG_CHANGE_EVENT));
       this.syncSettingsInputs();
       if (this.timer) window.clearInterval(this.timer);
       this.timer = window.setInterval(() => this.refresh(), this.config.pollIntervalSeconds * 1000);
@@ -2019,11 +2050,62 @@
     }
   }
 
+  class ProviderSortEnhancer {
+    constructor() {
+      this.active = false;
+      this.applied = false;
+      this.observer = null;
+      this.applyTimer = null;
+      this.onConfigChanged = () => {
+        this.applied = false;
+        this.queueApply();
+      };
+    }
+
+    start() {
+      this.active = true;
+      this.observer = new MutationObserver(() => this.queueApply());
+      this.observer.observe(document.body, { childList: true, subtree: true });
+      window.addEventListener(CONFIG_CHANGE_EVENT, this.onConfigChanged);
+      this.queueApply();
+    }
+
+    stop() {
+      this.active = false;
+      this.observer?.disconnect();
+      this.observer = null;
+      if (this.applyTimer) window.clearTimeout(this.applyTimer);
+      this.applyTimer = null;
+      window.removeEventListener(CONFIG_CHANGE_EVENT, this.onConfigChanged);
+    }
+
+    queueApply() {
+      if (!this.active || this.applied || this.applyTimer) return;
+      this.applyTimer = window.setTimeout(() => {
+        this.applyTimer = null;
+        this.apply();
+      }, 0);
+    }
+
+    apply() {
+      if (!this.active || this.applied) return false;
+      const preference = normalizeConfig(storageGet('config', DEFAULT_CONFIG)).providerSortPreference;
+      const buttons = document.querySelectorAll('button.monitor-sort-head');
+      const target = findProviderSortButton(buttons, preference);
+      if (!target) return false;
+      const activeButton = [...buttons].find((button) => button.classList.contains('active')) || null;
+      if (activeButton !== target) target.click();
+      this.applied = true;
+      return true;
+    }
+  }
+
   class AppRouter {
     constructor() {
       this.panel = null;
       this.usage = null;
       this.keyGroups = null;
+      this.providerSort = null;
       this.rejectedToken = '';
       this.timer = null;
     }
@@ -2068,6 +2150,13 @@
         this.keyGroups.stop();
         this.keyGroups = null;
       }
+      if (features.providerSort && !this.providerSort) {
+        this.providerSort = new ProviderSortEnhancer();
+        this.providerSort.start();
+      } else if (!features.providerSort && this.providerSort) {
+        this.providerSort.stop();
+        this.providerSort = null;
+      }
     }
   }
 
@@ -2075,10 +2164,14 @@
     DEFAULT_CONFIG,
     GROUP_MODE_LABELS,
     LATENCY_SOURCE_LABELS,
+    PROVIDER_SORT_LABELS,
     normalizeConfig,
     normalizeGroupMode,
     normalizeAvailabilityMode,
     normalizeLatencySource,
+    normalizeProviderSortPreference,
+    getProviderSortButtonText,
+    findProviderSortButton,
     normalizeCacheHitRate,
     formatCacheHitRate,
     normalizeModelHealth,
