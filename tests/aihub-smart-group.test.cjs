@@ -167,8 +167,29 @@ test('normalizes the new cache, model health, and model detection fields', () =>
   assert.equal(row.modelDetection.status, 'insufficient_evidence');
   assert.equal(row.warningReasons.includes('model_detection_insufficient_evidence'), true);
   assert.deepEqual(core.summarizeModelHealth(row.modelHealth), {
-    health: { sol: 'healthy', terra: 'healthy', luna: 'failed' }, healthy: 2, failed: 1, total: 3,
+    health: { sol: 'healthy', terra: 'healthy', luna: 'failed' },
+    healthy: 2,
+    failed: 1,
+    insufficient: 0,
+    unknown: 0,
+    total: 3,
   });
+});
+
+test('keeps insufficient model health distinct from healthy and failed states', () => {
+  const health = core.normalizeModelHealth({ sol: 'insufficient', terra: 'insufficient', luna: 'insufficient' });
+
+  assert.deepEqual(health, { sol: 'insufficient', terra: 'insufficient', luna: 'insufficient' });
+  assert.deepEqual(core.summarizeModelHealth(health), {
+    health,
+    healthy: 0,
+    failed: 0,
+    insufficient: 3,
+    unknown: 0,
+    total: 3,
+  });
+  assert.equal(core.formatModelHealthSummary(health), '模型健康：证据不足 3/3');
+  assert.equal(core.formatModelHealthSummary(null), '');
 });
 
 test('parses cache hit rates from percentages and decimals', () => {
@@ -189,6 +210,125 @@ test('normalizes the new provider series response for availability and user fres
   assert.deepEqual(series.seriesByApiId['34'], [[at, 1]]);
   assert.equal(series.userTtftByGroupId['34'][0].sample_count, 3);
   assert.equal(core.getLatestMonitorSampleAt(series), at);
+});
+
+test('deduplicates concurrent and short-lived provider summary requests', async () => {
+  const originalWindow = globalThis.window;
+  const originalLocalStorage = globalThis.localStorage;
+  let requestCount = 0;
+  const storage = { getItem: () => '' };
+  globalThis.localStorage = storage;
+  globalThis.window = {
+    localStorage: storage,
+    fetch: async () => {
+      requestCount += 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { items: [{ group_id: 1, code: 'shared' }] } }),
+      };
+    },
+  };
+  core.clearMonitorSummaryCache();
+
+  try {
+    const [left, right] = await Promise.all([core.fetchMonitorSummary(), core.fetchMonitorSummary()]);
+    const cached = await core.fetchMonitorSummary();
+    assert.equal(requestCount, 1);
+    assert.equal(left, right);
+    assert.equal(cached, left);
+
+    await core.fetchMonitorSummary({ force: true });
+    assert.equal(requestCount, 2);
+  } finally {
+    core.clearMonitorSummaryCache();
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = originalLocalStorage;
+  }
+});
+
+test('joins an in-flight forced provider refresh instead of returning stale cache', async () => {
+  const originalWindow = globalThis.window;
+  const originalLocalStorage = globalThis.localStorage;
+  let requestCount = 0;
+  let resolveRefresh;
+  const storage = { getItem: () => '' };
+  globalThis.localStorage = storage;
+  globalThis.window = {
+    localStorage: storage,
+    fetch: async () => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        return { ok: true, status: 200, json: async () => ({ data: { items: [{ group_id: 1, code: 'v1' }] } }) };
+      }
+      return new Promise((resolve) => { resolveRefresh = resolve; });
+    },
+  };
+  core.clearMonitorSummaryCache();
+
+  try {
+    const cached = await core.fetchMonitorSummary();
+    const forced = core.fetchMonitorSummary({ force: true });
+    await Promise.resolve();
+    const joined = core.fetchMonitorSummary();
+    assert.equal(requestCount, 2);
+    assert.equal(cached.apis[0].planType, 'v1');
+
+    resolveRefresh({ ok: true, status: 200, json: async () => ({ data: { items: [{ group_id: 1, code: 'v2' }] } }) });
+    const [fresh, shared] = await Promise.all([forced, joined]);
+    assert.equal(fresh, shared);
+    assert.equal(fresh.apis[0].planType, 'v2');
+  } finally {
+    core.clearMonitorSummaryCache();
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = originalLocalStorage;
+  }
+});
+
+test('clears a timed-out shared provider request so a later call can retry', async () => {
+  const originalWindow = globalThis.window;
+  const originalLocalStorage = globalThis.localStorage;
+  let requestCount = 0;
+  let succeed = false;
+  const storage = { getItem: () => '' };
+  globalThis.localStorage = storage;
+  globalThis.window = {
+    localStorage: storage,
+    AbortController: globalThis.AbortController,
+    setTimeout: globalThis.setTimeout,
+    clearTimeout: globalThis.clearTimeout,
+    fetch: async (_url, options) => {
+      requestCount += 1;
+      if (succeed) return { ok: true, status: 200, json: async () => ({ data: { items: [{ group_id: 1, code: 'retry' }] } }) };
+      return new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => {
+          const error = new Error('aborted');
+          error.name = 'AbortError';
+          reject(error);
+        }, { once: true });
+      });
+    },
+  };
+  core.clearMonitorSummaryCache();
+
+  try {
+    await assert.rejects(core.fetchMonitorSummary({ force: true, timeoutMs: 5 }), /请求超时/);
+    assert.equal(requestCount, 2);
+    succeed = true;
+    const retried = await core.fetchMonitorSummary({ force: true, timeoutMs: 5 });
+    assert.equal(requestCount, 3);
+    assert.equal(retried.apis[0].planType, 'retry');
+  } finally {
+    core.clearMonitorSummaryCache();
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = originalLocalStorage;
+  }
 });
 
 test('selects real-user TTFT when sampled and falls back to probe TTFT without samples', () => {
@@ -347,6 +487,85 @@ test('treats explicit insufficient model evidence as a monitor warning', () => {
   }];
   assert.deepEqual(core.rankCandidates(rows, core.DEFAULT_CONFIG), []);
   assert.deepEqual(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, requireNoWarnings: false }).map((row) => row.name), ['evidence-gap']);
+});
+
+test('normalizes and excludes all explicit non-passing model detection states', () => {
+  const cases = [
+    ['detection_failed', 'failed', '检测失败'],
+    ['suspected', 'suspected', '疑似'],
+    ['not_tested', 'not_tested', '未检测'],
+    ['skipped', 'not_tested', '未检测'],
+    ['future_review_state', 'future_review_state', '检测未知'],
+  ];
+
+  for (const [rawStatus, normalizedStatus, label] of cases) {
+    const row = {
+      planType: rawStatus,
+      group_id: 8,
+      priceMultiplier: 0.01,
+      available: true,
+      successRates: { '10m': 1 },
+      model_detection: { status: rawStatus, applicable: true },
+    };
+    assert.equal(core.normalizeModelDetection(row.model_detection).status, normalizedStatus);
+    assert.equal(core.getModelDetectionLabel(row), label);
+    assert.equal(core.hasModelDetectionWarning(row), true);
+    assert.deepEqual(core.rankCandidates([row], core.DEFAULT_CONFIG), []);
+  }
+});
+
+test('fails closed for incomplete applicable detections while preserving missing-field compatibility', () => {
+  const incomplete = {
+    planType: 'incomplete', group_id: 1, priceMultiplier: 0.01, available: true,
+    successRates: { '10m': 1 }, model_detection: { applicable: true },
+  };
+
+  assert.equal(core.getModelDetectionLabel(incomplete), '检测未知');
+  assert.equal(core.hasModelDetectionWarning(incomplete), true);
+  assert.equal(core.normalizeMonitorRow(incomplete).warningReasons.includes('model_detection_unknown'), true);
+  assert.deepEqual(core.rankCandidates([incomplete], core.DEFAULT_CONFIG), []);
+
+  const missing = { ...incomplete };
+  delete missing.model_detection;
+  assert.equal(core.getModelDetectionLabel(missing), '');
+  assert.equal(core.hasModelDetectionWarning(missing), false);
+  assert.equal(core.rankCandidates([missing], core.DEFAULT_CONFIG).length, 1);
+});
+
+test('preserves legacy candidate behavior when model detection is missing or not applicable', () => {
+  const rows = [
+    {
+      planType: 'legacy', group_id: 1, priceMultiplier: 0.01, available: true,
+      successRates: { '10m': 1 },
+    },
+    {
+      planType: 'not-applicable', group_id: 2, priceMultiplier: 0.02, available: true,
+      successRates: { '10m': 1 }, model_detection: { status: 'not_applicable', applicable: false },
+    },
+  ];
+
+  assert.equal(core.hasModelDetectionWarning(rows[0]), false);
+  assert.equal(core.hasModelDetectionWarning(rows[1]), false);
+  assert.deepEqual(core.rankCandidates(rows, core.DEFAULT_CONFIG).map((row) => row.name), ['legacy', 'not-applicable']);
+});
+
+test('adds normalized warning reasons for new model detection states', () => {
+  const failed = core.normalizeMonitorRow({ model_detection: { status: 'detection_failed' } });
+  const suspected = core.normalizeMonitorRow({ model_detection: { status: 'suspected' } });
+  const untested = core.normalizeMonitorRow({ model_detection: { status: 'not_tested' } });
+
+  assert.equal(failed.warningReasons.includes('model_detection_failed'), true);
+  assert.equal(suspected.warningReasons.includes('model_detection_suspected'), true);
+  assert.equal(untested.warningReasons.includes('model_detection_not_tested'), true);
+});
+
+test('uses nested model detection instead of a provider row status', () => {
+  const activeProvider = { status: 'active', model_detection: { status: 'passed' } };
+  const failedProviderStatus = { status: 'failed', model_detection: { status: 'passed' } };
+
+  assert.equal(core.getModelDetectionLabel(activeProvider), '检测通过');
+  assert.equal(core.getModelDetectionLabel(failedProviderStatus), '检测通过');
+  assert.equal(core.hasModelDetectionWarning(failedProviderStatus), false);
 });
 
 test('changes speed ranking when real-user TTFT collection is selected', () => {
@@ -639,7 +858,17 @@ test('formats explicit model detection states in dropdown status', () => {
   assert.deepEqual(core.formatGroupDropdownMonitor({ available: true, warningReasons: [], model_detection: { status: 'insufficient_evidence' } }), {
     statusText: '可用 · 证据不足', statusTone: 'warning', latencyText: '首 Token 暂无数据', latencyValueText: '',
   });
+  assert.deepEqual(core.formatGroupDropdownMonitor({ available: true, warningReasons: [], model_detection: { status: 'suspected' } }), {
+    statusText: '可用 · 疑似', statusTone: 'warning', latencyText: '首 Token 暂无数据', latencyValueText: '',
+  });
+  assert.deepEqual(core.formatGroupDropdownMonitor({ available: true, warningReasons: [], model_detection: { status: 'not_tested' } }), {
+    statusText: '可用 · 未检测', statusTone: 'warning', latencyText: '首 Token 暂无数据', latencyValueText: '',
+  });
   assert.equal(core.getModelDetectionLabel({ applicable: false, status: 'not_applicable' }), '不适用');
+  assert.equal(core.getModelDetectionLabel({ applicable: false, status: 'failed' }), '不适用');
+  assert.deepEqual(core.formatGroupDropdownMonitor({ available: true, warningReasons: [], model_detection: { status: 'failed', applicable: false } }), {
+    statusText: '可用 · 不适用', statusTone: 'available', latencyText: '首 Token 暂无数据', latencyValueText: '',
+  });
   assert.equal(core.hasModelDetectionWarning({ model_detection: { applicable: false, status: 'failed' } }), false);
 });
 

@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.9.0
+// @version      0.10.0
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,9 +28,12 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.9.0';
+  const SCRIPT_VERSION = '0.10.0';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
+  const API_REQUEST_TIMEOUT_MS = 15_000;
+  const MONITOR_SUMMARY_CACHE_TTL_MS = 2_000;
+  const ENHANCER_RENDER_DEBOUNCE_MS = 50;
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
     balance: '平衡',
@@ -169,7 +172,9 @@
         ? 'healthy'
         : ['failed', 'error', 'unavailable', 'down'].includes(status)
           ? 'failed'
-          : 'unknown';
+          : ['insufficient', 'insufficient_evidence', 'insufficient-evidence'].includes(status)
+            ? 'insufficient'
+            : 'unknown';
     }
     return Object.keys(result).length ? result : null;
   }
@@ -178,8 +183,21 @@
     const health = normalizeModelHealth(value) || {};
     const healthy = Object.values(health).filter((status) => status === 'healthy').length;
     const failed = Object.values(health).filter((status) => status === 'failed').length;
+    const insufficient = Object.values(health).filter((status) => status === 'insufficient').length;
+    const unknown = Object.values(health).filter((status) => status === 'unknown').length;
     const total = Object.keys(health).length;
-    return { health, healthy, failed, total };
+    return { health, healthy, failed, insufficient, unknown, total };
+  }
+
+  function formatModelHealthSummary(value) {
+    const summary = summarizeModelHealth(value);
+    if (!summary.total) return '';
+    const parts = [];
+    if (summary.healthy) parts.push(`健康 ${summary.healthy}/${summary.total}`);
+    if (summary.insufficient) parts.push(`证据不足 ${summary.insufficient}/${summary.total}`);
+    if (summary.failed) parts.push(`失败 ${summary.failed}/${summary.total}`);
+    if (summary.unknown) parts.push(`未知 ${summary.unknown}/${summary.total}`);
+    return `模型健康：${parts.join('、')}`;
   }
 
   function normalizeModelDetection(value) {
@@ -189,11 +207,17 @@
       ? 'passed'
       : ['insufficient_evidence', 'insufficient-evidence', 'insufficient'].includes(rawStatus)
         ? 'insufficient_evidence'
-        : ['failed', 'error', 'rejected'].includes(rawStatus)
+        : ['failed', 'detection_failed', 'detection-failed', 'error', 'rejected'].includes(rawStatus)
           ? 'failed'
-          : ['not_applicable', 'not-applicable', 'skipped'].includes(rawStatus)
-            ? 'not_applicable'
-            : rawStatus || null;
+          : ['suspected', 'suspicious'].includes(rawStatus)
+            ? 'suspected'
+            : ['not_tested', 'not-tested', 'untested'].includes(rawStatus)
+              ? 'not_tested'
+              : ['not_applicable', 'not-applicable'].includes(rawStatus)
+                ? 'not_applicable'
+                : rawStatus === 'skipped'
+                  ? (value.applicable === false ? 'not_applicable' : 'not_tested')
+                  : rawStatus || null;
     return { ...value, status };
   }
 
@@ -202,20 +226,34 @@
   }
 
   function getModelDetectionLabel(rowOrDetection) {
-    const looksLikeDetection = rowOrDetection && typeof rowOrDetection === 'object'
+    const hasNestedDetection = Boolean(rowOrDetection && typeof rowOrDetection === 'object'
+      && (Object.prototype.hasOwnProperty.call(rowOrDetection, 'modelDetection')
+        || Object.prototype.hasOwnProperty.call(rowOrDetection, 'model_detection')));
+    const nestedDetection = rowOrDetection?.modelDetection ?? rowOrDetection?.model_detection;
+    const looksLikeDetection = !hasNestedDetection && rowOrDetection && typeof rowOrDetection === 'object'
       && ('status' in rowOrDetection || 'applicable' in rowOrDetection || 'reason_codes' in rowOrDetection);
-    const detection = looksLikeDetection ? normalizeModelDetection(rowOrDetection) : getModelDetection(rowOrDetection);
+    const detection = hasNestedDetection
+      ? normalizeModelDetection(nestedDetection)
+      : (looksLikeDetection ? normalizeModelDetection(rowOrDetection) : getModelDetection(rowOrDetection));
     if (!detection) return '';
+    if (detection.applicable === false) return '不适用';
     if (detection.status === 'passed') return '检测通过';
     if (detection.status === 'insufficient_evidence') return '证据不足';
     if (detection.status === 'failed') return '检测失败';
-    if (detection.status === 'not_applicable' || detection.applicable === false) return '不适用';
+    if (detection.status === 'suspected') return '疑似';
+    if (detection.status === 'not_tested') return '未检测';
+    if (detection.status === 'not_applicable') return '不适用';
     return '检测未知';
   }
 
+  function isModelDetectionWarning(detection) {
+    if (!detection || detection.applicable === false) return false;
+    if (!detection.status) return detection.applicable === true;
+    return !['passed', 'not_applicable'].includes(detection.status);
+  }
+
   function hasModelDetectionWarning(row) {
-    const detection = getModelDetection(row);
-    return Boolean(detection && detection.applicable !== false && ['insufficient_evidence', 'failed'].includes(detection.status));
+    return isModelDetectionWarning(getModelDetection(row));
   }
 
   function getLatencyMetric(row, source = 'probe') {
@@ -253,8 +291,8 @@
       : (Array.isArray(source.warning_reasons) ? source.warning_reasons.slice() : []);
     if (source.response_valid === false && !warningReasons.includes('response_invalid')) warningReasons.push('response_invalid');
     const modelDetection = normalizeModelDetection(source.modelDetection ?? source.model_detection);
-    if (modelDetection && modelDetection.applicable !== false && ['insufficient_evidence', 'failed'].includes(modelDetection.status)) {
-      const reason = `model_detection_${modelDetection.status}`;
+    if (isModelDetectionWarning(modelDetection)) {
+      const reason = `model_detection_${modelDetection.status || 'unknown'}`;
       if (!warningReasons.includes(reason)) warningReasons.push(reason);
     }
     const modelHealth = normalizeModelHealth(source.modelHealth ?? source.model_health);
@@ -826,44 +864,108 @@
     return typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   }
 
+  function isPageVisible() {
+    return typeof document === 'undefined' || document.hidden !== true;
+  }
+
   async function apiRequest(path, options = {}) {
+    const { timeoutMs = API_REQUEST_TIMEOUT_MS, ...requestOptions } = options;
+    const requestTimeoutMs = Math.max(1, Number(timeoutMs) || API_REQUEST_TIMEOUT_MS);
+    const pageWindow = getPageWindow();
+    const AbortControllerCtor = pageWindow.AbortController || globalThis.AbortController;
+    const setTimer = typeof pageWindow.setTimeout === 'function'
+      ? pageWindow.setTimeout.bind(pageWindow)
+      : globalThis.setTimeout;
+    const clearTimer = typeof pageWindow.clearTimeout === 'function'
+      ? pageWindow.clearTimeout.bind(pageWindow)
+      : globalThis.clearTimeout;
+    const controller = !requestOptions.signal && typeof AbortControllerCtor === 'function'
+      ? new AbortControllerCtor()
+      : null;
+    const timeoutId = controller && typeof setTimer === 'function'
+      ? setTimer(() => controller.abort(), requestTimeoutMs)
+      : null;
     const headers = {
       Accept: 'application/json',
       ...buildApiHeaders(path, getAuthToken()),
-      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(options.headers || {}),
+      ...(requestOptions.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(requestOptions.headers || {}),
     };
-    const response = await getPageWindow().fetch(`/api/v1${path}`, {
-      credentials: 'include',
-      ...options,
-      headers,
-    });
-    let payload = null;
     try {
-      payload = await response.json();
-    } catch {
-      payload = null;
-    }
-    if (!response.ok) {
-      const detail = payload && (payload.detail || payload.message);
-      const error = new Error(detail ? String(detail) : `请求失败 (${response.status})`);
-      error.status = response.status;
+      const response = await pageWindow.fetch(`/api/v1${path}`, {
+        credentials: 'include',
+        ...requestOptions,
+        ...(controller ? { signal: controller.signal } : {}),
+        headers,
+      });
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch {
+        payload = null;
+      }
+      if (!response.ok) {
+        const detail = payload && (payload.detail || payload.message);
+        const error = new Error(detail ? String(detail) : `请求失败 (${response.status})`);
+        error.status = response.status;
+        throw error;
+      }
+      return payload;
+    } catch (error) {
+      if (controller?.signal.aborted && error?.name === 'AbortError') {
+        const timeoutLabel = requestTimeoutMs >= 1000 ? `${Math.ceil(requestTimeoutMs / 1000)} 秒` : `${requestTimeoutMs} 毫秒`;
+        throw new Error(`请求超时（${timeoutLabel}）`);
+      }
       throw error;
+    } finally {
+      if (timeoutId !== null && typeof clearTimer === 'function') clearTimer(timeoutId);
     }
-    return payload;
   }
 
-  async function fetchMonitorSummary() {
+  const monitorSummaryCache = {
+    value: null,
+    fetchedAt: 0,
+    pending: null,
+  };
+
+  function clearMonitorSummaryCache() {
+    monitorSummaryCache.value = null;
+    monitorSummaryCache.fetchedAt = 0;
+  }
+
+  async function requestMonitorSummary(options = {}) {
     try {
-      const payload = await apiRequest('/public/providers?timezone=Asia%2FShanghai');
+      const payload = await apiRequest('/public/providers?timezone=Asia%2FShanghai', options);
       return normalizeMonitorSummaryPayload(payload);
     } catch (primaryError) {
       try {
-        return normalizeMonitorSummaryPayload(await apiRequest('/public/monitor/summary'));
+        return normalizeMonitorSummaryPayload(await apiRequest('/public/monitor/summary', options));
       } catch {
         throw primaryError;
       }
     }
+  }
+
+  function fetchMonitorSummary(options = {}) {
+    const force = options?.force === true;
+    const now = Date.now();
+    if (monitorSummaryCache.pending) return monitorSummaryCache.pending;
+    if (!force
+      && monitorSummaryCache.value
+      && now - monitorSummaryCache.fetchedAt < MONITOR_SUMMARY_CACHE_TTL_MS) {
+      return Promise.resolve(monitorSummaryCache.value);
+    }
+    const pending = requestMonitorSummary({ timeoutMs: options?.timeoutMs })
+      .then((summary) => {
+        monitorSummaryCache.value = summary;
+        monitorSummaryCache.fetchedAt = Date.now();
+        return summary;
+      })
+      .finally(() => {
+        if (monitorSummaryCache.pending === pending) monitorSummaryCache.pending = null;
+      });
+    monitorSummaryCache.pending = pending;
+    return pending;
   }
 
   async function fetchMonitorSeries() {
@@ -1041,12 +1143,24 @@
     .dark .groupOptionItemBadge.asg-key-group-badge-disabled{color:#98a2b3!important;background:rgba(152,162,179,.12)!important}
   `;
 
-  function addStyle(css) {
-    if (typeof GM_addStyle === 'function') GM_addStyle(css);
+  function addStyle(css, id) {
+    if (id && document.getElementById(id)) return;
+    let added = null;
+    if (typeof GM_addStyle === 'function') added = GM_addStyle(css);
     else {
       const style = document.createElement('style');
       style.textContent = css;
       document.head.appendChild(style);
+      added = style;
+    }
+    if (id) {
+      if (added && typeof added.setAttribute === 'function') added.setAttribute('id', id);
+      else {
+        const marker = document.createElement('meta');
+        marker.id = id;
+        marker.dataset.asgStyleMarker = 'true';
+        document.head.appendChild(marker);
+      }
     }
   }
 
@@ -1085,6 +1199,7 @@
       this.monitorFreshness = getMonitorFreshness(null, Date.now(), this.config.maxMonitorAgeSeconds);
       this.candidateDiagnostics = analyzeCandidates([], this.config);
       this.lastKeysFetchedAt = 0;
+      this.lastRefreshStartedAt = 0;
       this.lastDetectionLogSignature = null;
       this.lastMonitorStaleLogState = null;
       this.lastAuthLogSignature = '';
@@ -1099,13 +1214,32 @@
       if (existing?.dataset.version === SCRIPT_VERSION) return;
       existing?.remove();
       document.getElementById(TOGGLE_ID)?.remove();
-      addStyle(STYLE);
+      addStyle(STYLE, 'aihub-smart-group-panel-style');
       this.renderShell();
       this.bindEvents();
       if (registerMenu && typeof GM_registerMenuCommand === 'function') GM_registerMenuCommand('显示 AIHub 智能分组', () => this.setMinimized(false));
       this.refresh();
-      this.timer = window.setInterval(() => this.refresh(), this.config.pollIntervalSeconds * 1000);
-      this.uiTimer = window.setInterval(() => this.renderTimeSensitiveState(), 1000);
+      this.syncPollingTimer();
+      this.uiTimer = window.setInterval(() => {
+        if (isPageVisible() && !this.minimized) this.renderTimeSensitiveState();
+      }, 1000);
+    }
+
+    syncPollingTimer() {
+      if (this.timer) window.clearInterval(this.timer);
+      this.timer = null;
+      if (!this.active) return;
+      this.timer = window.setInterval(() => {
+        const elapsed = Date.now() - this.lastRefreshStartedAt;
+        if (isPageVisible() && elapsed >= this.config.pollIntervalSeconds * 1000) this.refresh();
+      }, this.config.pollIntervalSeconds * 1000);
+    }
+
+    handleVisibilityChange() {
+      if (!this.active || !isPageVisible()) return;
+      this.renderTimeSensitiveState();
+      const elapsed = Date.now() - this.lastRefreshStartedAt;
+      if (elapsed >= this.config.pollIntervalSeconds * 1000) this.refresh();
     }
 
     stop() {
@@ -1275,10 +1409,12 @@
     }
 
     setMinimized(value) {
+      const wasMinimized = this.minimized;
       this.minimized = value === true;
       if (this.panel) this.panel.hidden = this.minimized;
       if (this.toggleButton) this.toggleButton.hidden = !this.minimized;
       storageSet('minimized', this.minimized);
+      if (wasMinimized && !this.minimized) this.renderTimeSensitiveState();
     }
 
     setSideTab(value) {
@@ -1409,8 +1545,7 @@
       storageSet('config', this.config);
       window.dispatchEvent(new window.CustomEvent(CONFIG_CHANGE_EVENT));
       this.syncSettingsInputs();
-      if (this.timer) window.clearInterval(this.timer);
-      this.timer = window.setInterval(() => this.refresh(), this.config.pollIntervalSeconds * 1000);
+      this.syncPollingTimer();
       this.setStatus('设置已保存');
       this.log('info', '设置已保存');
       this.refresh(true);
@@ -1449,12 +1584,13 @@
     async refresh(forceLog = false) {
       if (this.loading) return;
       this.loading = true;
+      this.lastRefreshStartedAt = Date.now();
       this.authError = '';
       this.setStatus('检测中...');
       this.renderActionState();
       try {
         const [summary, series, balanceResult] = await Promise.all([
-          fetchMonitorSummary(),
+          fetchMonitorSummary({ force: forceLog }),
           fetchMonitorSeries(),
           fetchCurrentBalance().then((payload) => ({ payload })).catch((error) => ({ error })),
         ]);
@@ -1669,12 +1805,11 @@
             ? `连续成功 ${winner.recentConsecutiveSuccessCount || 0} 点`
             : `可用率 ${formatPercent(winner.success10m)}`;
         const detectionText = getModelDetectionLabel(winner);
-        const health = summarizeModelHealth(winner.modelHealth ?? winner.model_health);
-        const healthText = health.total ? ` · 健康模型 ${health.healthy}/${health.total}` : '';
+        const healthText = formatModelHealthSummary(winner.modelHealth ?? winner.model_health);
         const cacheText = normalizeCacheHitRate(winner.cacheHitRate ?? winner.cache_hit_rate) === null
           ? ''
           : ` · ${formatCacheHitRate(winner.cacheHitRate ?? winner.cache_hit_rate)}`;
-        metrics.textContent = `10m ${availabilityText} · ${winner.recentSampleCount}次探测 · ${formatLatencyMetric(winner, this.config.latencySource)}${detectionText ? ` · 模型${detectionText}` : ''}${healthText}${cacheText}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
+        metrics.textContent = `10m ${availabilityText} · ${winner.recentSampleCount}次探测 · ${formatLatencyMetric(winner, this.config.latencySource)}${detectionText ? ` · 模型${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${cacheText}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
         recommend.append(title, metrics);
         if (this.config.mode === 'balance') {
           const reason = document.createElement('div');
@@ -1687,8 +1822,8 @@
       const diagnostic = document.createElement('div');
       diagnostic.className = 'asg-recommend-meta';
       const overLimit = this.config.mode === 'balance' ? Math.max(0, Number(diagnostics.eligible || 0) - this.ranked.length) : 0;
-      const detectionWarnings = this.rows.filter((row) => getModelDetection(row)?.status === 'insufficient_evidence').length;
-      diagnostic.textContent = `参与比较 ${this.ranked.length} · 排除关键词 ${diagnostics.keywords || 0} · 不可用 ${diagnostics.unavailable || 0} · 可用率不足 ${diagnostics.lowSuccess || 0} · 监控警告 ${diagnostics.warnings || 0}${detectionWarnings ? `（证据不足 ${detectionWarnings}）` : ''}${overLimit ? ` · 超过倍率上限 ${overLimit}` : ''}`;
+      const detectionWarnings = this.rows.filter(hasModelDetectionWarning).length;
+      diagnostic.textContent = `参与比较 ${this.ranked.length} · 排除关键词 ${diagnostics.keywords || 0} · 不可用 ${diagnostics.unavailable || 0} · 可用率不足 ${diagnostics.lowSuccess || 0} · 监控警告 ${diagnostics.warnings || 0}${detectionWarnings ? `（模型检测异常 ${detectionWarnings}）` : ''}${overLimit ? ` · 超过倍率上限 ${overLimit}` : ''}`;
       recommend.appendChild(diagnostic);
       const freshness = document.createElement('div');
       freshness.className = `asg-monitor-age${this.monitorFreshness.stale ? ' asg-stale' : ''}`;
@@ -1767,8 +1902,8 @@
         const metrics = document.createElement('span');
         const detectionText = getModelDetectionLabel(candidate);
         const cacheHitRate = normalizeCacheHitRate(candidate.cacheHitRate ?? candidate.cache_hit_rate);
-        const health = summarizeModelHealth(candidate.modelHealth ?? candidate.model_health);
-        metrics.textContent = `${candidate.price}x · 10m ${formatPercent(candidate.success10m)}${detectionText ? ` · ${detectionText}` : ''}${health.total ? ` · 健康 ${health.healthy}/${health.total}` : ''}${cacheHitRate === null ? '' : ` · 缓存 ${(cacheHitRate * 100).toFixed(1)}%`}`;
+        const healthText = formatModelHealthSummary(candidate.modelHealth ?? candidate.model_health);
+        metrics.textContent = `${candidate.price}x · 10m ${formatPercent(candidate.success10m)}${detectionText ? ` · ${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${cacheHitRate === null ? '' : ` · 缓存 ${(cacheHitRate * 100).toFixed(1)}%`}`;
         item.append(name, metrics);
         list.appendChild(item);
       }
@@ -1798,6 +1933,7 @@
     constructor() {
       this.monitorIndex = buildGroupDropdownMonitorIndex([]);
       this.observer = null;
+      this.menuObservers = new Map();
       this.renderTimer = null;
       this.refreshTimer = null;
       this.renderQueued = false;
@@ -1812,12 +1948,12 @@
 
     start() {
       this.active = true;
-      addStyle(KEY_GROUP_STYLE);
+      addStyle(KEY_GROUP_STYLE, 'aihub-smart-group-key-style');
       this.observer = new MutationObserver(() => this.queueRender());
-      this.observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+      this.observer.observe(document.body, { childList: true, subtree: true });
       this.queueRender();
       this.refreshTimer = window.setInterval(() => {
-        if (this.findMenus().length && Date.now() - this.lastAttemptAt >= 60_000) this.refresh();
+        if (isPageVisible() && this.findMenus().length && Date.now() - this.lastAttemptAt >= 60_000) this.refresh();
       }, 60_000);
     }
 
@@ -1825,6 +1961,8 @@
       this.active = false;
       this.observer?.disconnect();
       this.observer = null;
+      for (const observer of this.menuObservers.values()) observer.disconnect();
+      this.menuObservers.clear();
       if (this.renderTimer) window.clearTimeout(this.renderTimer);
       if (this.refreshTimer) window.clearInterval(this.refreshTimer);
       this.renderTimer = null;
@@ -1855,6 +1993,27 @@
         .filter(Boolean);
     }
 
+    syncMenuObservers(menus) {
+      const optionLists = new Set(menus.map(({ optionList }) => optionList));
+      for (const [optionList, observer] of this.menuObservers) {
+        if (optionLists.has(optionList) && optionList.isConnected) continue;
+        observer.disconnect();
+        this.menuObservers.delete(optionList);
+      }
+      for (const optionList of optionLists) {
+        if (this.menuObservers.has(optionList)) continue;
+        const observer = new MutationObserver(() => this.queueRender());
+        observer.observe(optionList, { childList: true, subtree: true, characterData: true });
+        this.menuObservers.set(optionList, observer);
+      }
+    }
+
+    handleVisibilityChange() {
+      if (!this.active || !isPageVisible()) return;
+      if (this.findMenus().length && Date.now() - this.lastAttemptAt >= 60_000) this.refresh();
+      else this.queueRender();
+    }
+
     queueRender() {
       if (!this.active || this.renderQueued) return;
       this.renderQueued = true;
@@ -1862,11 +2021,11 @@
         this.renderTimer = null;
         this.renderQueued = false;
         this.render();
-      }, 0);
+      }, ENHANCER_RENDER_DEBOUNCE_MS);
     }
 
     async refresh() {
-      if (!this.active || this.loading || Date.now() - this.lastAttemptAt < 60_000) return;
+      if (!this.active || !isPageVisible() || this.loading || Date.now() - this.lastAttemptAt < 60_000) return;
       this.loading = true;
       this.loadFailed = false;
       this.lastAttemptAt = Date.now();
@@ -1895,6 +2054,7 @@
       if (!this.active) return;
       this.latencySource = normalizeConfig(storageGet('config', DEFAULT_CONFIG)).latencySource;
       const menus = this.findMenus();
+      this.syncMenuObservers(menus);
       if (!menus.length) return;
       if (!this.hasMonitorData && !this.loading && Date.now() - this.lastAttemptAt >= 60_000) this.refresh();
       for (const { optionList } of menus) {
@@ -1981,15 +2141,19 @@
       this.active = false;
       this.refreshTimer = null;
       this.renderTimer = null;
+      this.loading = false;
+      this.lastAttemptAt = 0;
     }
 
     start() {
       this.active = true;
-      addStyle(USAGE_STYLE);
+      addStyle(USAGE_STYLE, 'aihub-smart-group-usage-style');
       this.observer = new MutationObserver(() => this.queueRender());
       this.observer.observe(document.body, { childList: true, subtree: true });
       this.refresh();
-      this.refreshTimer = window.setInterval(() => this.refresh(), 5 * 60 * 1000);
+      this.refreshTimer = window.setInterval(() => {
+        if (isPageVisible()) this.refresh();
+      }, 5 * 60 * 1000);
     }
 
     stop() {
@@ -2004,6 +2168,9 @@
     }
 
     async refresh() {
+      if (!this.active || !isPageVisible() || this.loading) return;
+      this.loading = true;
+      this.lastAttemptAt = Date.now();
       try {
         const summary = await fetchMonitorSummary();
         if (!this.active) return;
@@ -2011,21 +2178,29 @@
         this.render();
       } catch {
         // The usage page remains unchanged when current monitor data is unavailable.
+      } finally {
+        this.loading = false;
       }
     }
 
+    handleVisibilityChange() {
+      if (!this.active || !isPageVisible()) return;
+      if (Date.now() - this.lastAttemptAt >= 5 * 60_000) this.refresh();
+      else this.queueRender();
+    }
+
     queueRender() {
-      if (this.renderQueued) return;
+      if (!this.active || this.renderQueued) return;
       this.renderQueued = true;
       this.renderTimer = window.setTimeout(() => {
         this.renderTimer = null;
         this.renderQueued = false;
         this.render();
-      }, 0);
+      }, ENHANCER_RENDER_DEBOUNCE_MS);
     }
 
     render() {
-      if (!this.multiplierByGroup.size) return;
+      if (!this.active || !this.multiplierByGroup.size) return;
       for (const table of document.querySelectorAll('table')) {
         const headers = [...table.querySelectorAll('thead th')];
         const groupColumnIndex = headers.findIndex((header) => header.textContent.trim() === '分组');
@@ -2067,8 +2242,10 @@
       this.observer = null;
       this.applyTimer = null;
       this.refreshTimer = null;
+      this.lastRefreshAt = 0;
       this.onConfigChanged = () => {
         this.applied = false;
+        this.observeUntilApplied();
         this.queueApply();
         this.syncRefreshTimer();
       };
@@ -2076,11 +2253,17 @@
 
     start() {
       this.active = true;
-      this.observer = new MutationObserver(() => this.queueApply());
-      this.observer.observe(document.body, { childList: true, subtree: true });
+      this.lastRefreshAt = Date.now();
       window.addEventListener(CONFIG_CHANGE_EVENT, this.onConfigChanged);
+      this.observeUntilApplied();
       this.queueApply();
       this.syncRefreshTimer();
+    }
+
+    observeUntilApplied() {
+      if (!this.active || this.applied || this.observer) return;
+      this.observer = new MutationObserver(() => this.queueApply());
+      this.observer.observe(document.body, { childList: true, subtree: true });
     }
 
     stop() {
@@ -2099,7 +2282,7 @@
       this.applyTimer = window.setTimeout(() => {
         this.applyTimer = null;
         this.apply();
-      }, 0);
+      }, ENHANCER_RENDER_DEBOUNCE_MS);
     }
 
     apply() {
@@ -2111,6 +2294,8 @@
       const activeButton = [...buttons].find((button) => button.classList.contains('active')) || null;
       if (activeButton !== target) target.click();
       this.applied = true;
+      this.observer?.disconnect();
+      this.observer = null;
       return true;
     }
 
@@ -2123,11 +2308,21 @@
       this.refreshTimer = window.setInterval(() => this.refresh(), config.providerRefreshIntervalSeconds * 1000);
     }
 
+    handleVisibilityChange() {
+      if (!this.active || !isPageVisible()) return;
+      const config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
+      if (config.providerAutoRefresh
+        && Date.now() - this.lastRefreshAt >= config.providerRefreshIntervalSeconds * 1000) {
+        this.refresh();
+      }
+    }
+
     refresh() {
-      if (!this.active) return false;
+      if (!this.active || !isPageVisible()) return false;
       const button = findProviderRefreshButton(document.querySelectorAll('main button'));
       if (!button || button.disabled) return false;
       button.click();
+      this.lastRefreshAt = Date.now();
       return true;
     }
   }
@@ -2140,6 +2335,14 @@
       this.providerSort = null;
       this.rejectedToken = '';
       this.timer = null;
+      this.onVisibilityChange = () => {
+        if (!isPageVisible()) return;
+        this.sync();
+        this.panel?.handleVisibilityChange();
+        this.usage?.handleVisibilityChange();
+        this.keyGroups?.handleVisibilityChange();
+        this.providerSort?.handleVisibilityChange();
+      };
     }
 
     start() {
@@ -2149,7 +2352,10 @@
         });
       }
       this.sync();
-      this.timer = window.setInterval(() => this.sync(), 500);
+      this.timer = window.setInterval(() => {
+        if (isPageVisible()) this.sync();
+      }, 1000);
+      document.addEventListener('visibilitychange', this.onVisibilityChange);
     }
 
     sync() {
@@ -2209,9 +2415,11 @@
     formatCacheHitRate,
     normalizeModelHealth,
     summarizeModelHealth,
+    formatModelHealthSummary,
     normalizeModelDetection,
     getModelDetection,
     getModelDetectionLabel,
+    isModelDetectionWarning,
     hasModelDetectionWarning,
     normalizePanelTab,
     getLatencyMetric,
@@ -2250,6 +2458,9 @@
     buildApiHeaders,
     mergeKeyPages,
     shouldRefreshKeys,
+    isPageVisible,
+    fetchMonitorSummary,
+    clearMonitorSummaryCache,
     appendLogEntries,
     formatLogLine,
     start() {
