@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.10.0
+// @version      0.11.0
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,12 +28,27 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.10.0';
+  const SCRIPT_VERSION = '0.11.0';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const API_REQUEST_TIMEOUT_MS = 15_000;
   const MONITOR_SUMMARY_CACHE_TTL_MS = 2_000;
   const ENHANCER_RENDER_DEBOUNCE_MS = 50;
+  const USAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+  const USAGE_DETAIL_HEADERS = Object.freeze([
+    'API 密钥',
+    '模型',
+    '推理强度',
+    '端点',
+    'IP',
+    '分组',
+    '类型',
+    '计费模式',
+    'Token',
+    '费用',
+    '延迟',
+    '时间',
+  ]);
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
     balance: '平衡',
@@ -42,6 +57,24 @@
   const LATENCY_SOURCE_LABELS = Object.freeze({
     probe: '主动探测首 Token',
     user: '真实用户平均 TTFT',
+  });
+  const MODEL_PRICE_MODEL_LABELS = Object.freeze({
+    none: '不显示',
+    sol: 'Sol',
+    terra: 'Terra',
+    luna: 'Luna',
+  });
+  const MODEL_PRICE_CURRENCY_FORMATTER = new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  });
+  const USAGE_COST_CURRENCY_FORMATTER = new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 4,
+    maximumFractionDigits: 8,
   });
   const PROVIDER_SORT_LABELS = Object.freeze({
     rate: '倍率优先',
@@ -63,6 +96,10 @@
     minSuccessPoints10m: 1,
     minConsecutiveSuccesses10m: 2,
     latencySource: 'probe',
+    modelPriceModel: 'sol',
+    usageCostAuditEnabled: true,
+    usageCostAuditDisplay: 'anomalies',
+    usageCostAuditTolerancePercent: 1,
     providerSortPreference: 'rate',
     providerAutoRefresh: true,
     providerRefreshIntervalSeconds: 60,
@@ -75,6 +112,32 @@
 
   function clamp(value, min, max) {
     return Math.min(max, Math.max(min, value));
+  }
+
+  function isRefreshDue(now, lastCompletedAt, intervalMs) {
+    const current = Number(now);
+    const completedAt = Number(lastCompletedAt);
+    const interval = Math.max(0, Number(intervalMs) || 0);
+    return !Number.isFinite(completedAt)
+      || completedAt <= 0
+      || (Number.isFinite(current) ? current : Date.now()) - completedAt >= interval;
+  }
+
+  function shouldRunControllerRefresh({
+    active = true,
+    visible = true,
+    minimized = false,
+    autoSwitch = false,
+    loading = false,
+    now = Date.now(),
+    lastCompletedAt = 0,
+    intervalMs = DEFAULT_CONFIG.pollIntervalSeconds * 1000,
+  } = {}) {
+    return active === true
+      && visible === true
+      && loading !== true
+      && (minimized !== true || autoSwitch === true)
+      && isRefreshDue(now, lastCompletedAt, intervalMs);
   }
 
   function normalizeExcludedGroupKeywords(value) {
@@ -107,6 +170,10 @@
       minSuccessPoints10m: Math.round(clamp(numberOr(source.minSuccessPoints10m, DEFAULT_CONFIG.minSuccessPoints10m), 1, 60)),
       minConsecutiveSuccesses10m: Math.round(clamp(numberOr(source.minConsecutiveSuccesses10m, DEFAULT_CONFIG.minConsecutiveSuccesses10m), 1, 60)),
       latencySource: normalizeLatencySource(source.latencySource),
+      modelPriceModel: normalizeModelPriceModel(source.modelPriceModel),
+      usageCostAuditEnabled: source.usageCostAuditEnabled !== false,
+      usageCostAuditDisplay: source.usageCostAuditDisplay === 'all' ? 'all' : 'anomalies',
+      usageCostAuditTolerancePercent: clamp(numberOr(source.usageCostAuditTolerancePercent, DEFAULT_CONFIG.usageCostAuditTolerancePercent), 0.1, 100),
       providerSortPreference: normalizeProviderSortPreference(source.providerSortPreference),
       providerAutoRefresh: source.providerAutoRefresh !== false,
       providerRefreshIntervalSeconds: Math.round(clamp(numberOr(source.providerRefreshIntervalSeconds, DEFAULT_CONFIG.providerRefreshIntervalSeconds), 15, 3600)),
@@ -127,6 +194,10 @@
 
   function normalizeLatencySource(value) {
     return value === 'user' ? 'user' : 'probe';
+  }
+
+  function normalizeModelPriceModel(value) {
+    return Object.prototype.hasOwnProperty.call(MODEL_PRICE_MODEL_LABELS, value) ? value : 'sol';
   }
 
   function normalizeProviderSortPreference(value) {
@@ -159,6 +230,58 @@
   function formatCacheHitRate(value) {
     const normalized = normalizeCacheHitRate(value);
     return normalized === null ? '缓存命中率暂无数据' : `缓存命中率 ${(normalized * 100).toFixed(1)}%`;
+  }
+
+  function normalizeModelPrices(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const result = {};
+    for (const model of ['sol', 'terra', 'luna']) {
+      const raw = value[model] ?? value[model.toUpperCase()] ?? value[model[0].toUpperCase() + model.slice(1)];
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+      const price = {
+        inputPerMillion: nonNegativeNumberOrNull(raw.inputPerMillion ?? raw.input_per_million),
+        cacheInputPerMillion: nonNegativeNumberOrNull(raw.cacheInputPerMillion ?? raw.cache_input_per_million),
+        outputPerMillion: nonNegativeNumberOrNull(raw.outputPerMillion ?? raw.output_per_million),
+      };
+      if (Object.values(price).some((item) => item !== null)) result[model] = price;
+    }
+    return Object.keys(result).length ? result : null;
+  }
+
+  function getModelPrices(rowOrPrices) {
+    if (!rowOrPrices || typeof rowOrPrices !== 'object') return null;
+    const hasNestedPrices = Object.prototype.hasOwnProperty.call(rowOrPrices, 'modelPrices')
+      || Object.prototype.hasOwnProperty.call(rowOrPrices, 'model_prices');
+    return normalizeModelPrices(hasNestedPrices
+      ? (rowOrPrices.modelPrices ?? rowOrPrices.model_prices)
+      : rowOrPrices);
+  }
+
+  function getSelectedModelPrice(rowOrPrices, model = DEFAULT_CONFIG.modelPriceModel) {
+    const normalizedModel = normalizeModelPriceModel(model);
+    if (normalizedModel === 'none') return null;
+    return getModelPrices(rowOrPrices)?.[normalizedModel] || null;
+  }
+
+  function formatModelPriceAmount(value) {
+    const amount = nonNegativeNumberOrNull(value);
+    return amount === null ? '' : MODEL_PRICE_CURRENCY_FORMATTER.format(amount);
+  }
+
+  function formatModelPriceSummary(rowOrPrices, model = DEFAULT_CONFIG.modelPriceModel, compact = false) {
+    const normalizedModel = normalizeModelPriceModel(model);
+    if (normalizedModel === 'none') return '';
+    const price = getSelectedModelPrice(rowOrPrices, normalizedModel);
+    if (!price) return '';
+    const parts = [
+      ['输入', '入', price.inputPerMillion],
+      ['缓存输入', '缓', price.cacheInputPerMillion],
+      ['输出', '出', price.outputPerMillion],
+    ].filter(([, , amount]) => nonNegativeNumberOrNull(amount) !== null);
+    if (!parts.length) return '';
+    const label = MODEL_PRICE_MODEL_LABELS[normalizedModel];
+    if (compact) return `${label} ${parts.map(([, shortLabel, amount]) => `${shortLabel} ${formatModelPriceAmount(amount)}`).join(' / ')}`;
+    return `${label} 每 1M：${parts.map(([longLabel, , amount]) => `${longLabel} ${formatModelPriceAmount(amount)}`).join(' · ')}`;
   }
 
   function normalizeModelHealth(value) {
@@ -296,6 +419,7 @@
       if (!warningReasons.includes(reason)) warningReasons.push(reason);
     }
     const modelHealth = normalizeModelHealth(source.modelHealth ?? source.model_health);
+    const modelPrices = normalizeModelPrices(source.modelPrices ?? source.model_prices);
     const cacheHitRate = normalizeCacheHitRate(source.cacheHitRate ?? source.cache_hit_rate);
     return {
       ...source,
@@ -310,6 +434,7 @@
       warningReasons,
       modelDetection,
       modelHealth,
+      modelPrices,
       cacheHitRate,
       checkedAt: source.checkedAt ?? source.last_probed_at ?? source.lastProbedAt,
       probeFirstTokenLatencyMs: source.probeFirstTokenLatencyMs
@@ -580,6 +705,8 @@
       if (cacheHitRate !== null) metric.cacheHitRate = cacheHitRate;
       const health = normalizeModelHealth(row?.modelHealth ?? row?.model_health);
       if (health) metric.modelHealth = health;
+      const modelPrices = normalizeModelPrices(row?.modelPrices ?? row?.model_prices);
+      if (modelPrices) metric.modelPrices = modelPrices;
       result.set(groupId, metric);
     }
     return result;
@@ -637,6 +764,141 @@
     if (!match) return null;
     const multiplier = Number(match[1] ?? match[2]);
     return Number.isFinite(multiplier) && multiplier >= 0 ? multiplier : null;
+  }
+
+  function buildUsageModelPriceIndex(rows) {
+    const result = new Map();
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const name = row?.planType || row?.name;
+      const key = groupDropdownMonitorKey(name, row?.priceMultiplier);
+      const prices = getModelPrices(row);
+      if (!key || !prices) continue;
+      const current = result.get(key);
+      const newest = newerMonitorRow(current?.row, row);
+      if (!current || newest === row) result.set(key, { row, prices });
+    }
+    return result;
+  }
+
+  function findUsageModelPrice(index, groupName, multiplier, model) {
+    const normalizedModel = String(model ?? '').trim().toLocaleLowerCase();
+    if (!['sol', 'terra', 'luna'].includes(normalizedModel)) return null;
+    const key = groupDropdownMonitorKey(groupName, multiplier);
+    return key && index instanceof Map ? index.get(key)?.prices?.[normalizedModel] || null : null;
+  }
+
+  function parseCompactTokenCount(value) {
+    const text = String(value ?? '').trim().replaceAll(',', '');
+    const match = text.match(/^([0-9]+(?:\.[0-9]+)?)\s*([kmb])?$/i);
+    if (!match) return null;
+    const amount = Number(match[1]);
+    const scale = { k: 1_000, m: 1_000_000, b: 1_000_000_000 }[String(match[2] || '').toLocaleLowerCase()] || 1;
+    const normalized = amount * scale;
+    return Number.isFinite(normalized) && normalized >= 0 ? normalized : null;
+  }
+
+  function getCompactTokenRoundingUncertainty(value) {
+    const text = String(value ?? '').trim().replaceAll(',', '');
+    const match = text.match(/^([0-9]+(?:\.([0-9]+))?)\s*([kmb])$/i);
+    if (!match) return 0;
+    const scale = { k: 1_000, m: 1_000_000, b: 1_000_000_000 }[match[3].toLocaleLowerCase()];
+    const precision = match[2]?.length || 0;
+    return scale / (10 ** precision) / 2;
+  }
+
+  function parseUsageTokenBreakdown(value) {
+    const source = (Array.isArray(value) ? value : String(value ?? '').split(/\r?\n/))
+      .map((item) => String(item ?? '').trim())
+      .filter(Boolean);
+    if (source.length < 2 || source.length > 3) return null;
+    const counts = source.map(parseCompactTokenCount);
+    if (counts.some((item) => item === null)) return null;
+    return {
+      inputTokens: counts[0],
+      outputTokens: counts[1],
+      cacheInputTokens: counts[2] ?? 0,
+    };
+  }
+
+  function getUsageModelVariant(value) {
+    const normalized = String(value ?? '').trim().toLocaleLowerCase();
+    const variants = [...normalized.matchAll(/(?:^|[-_/])(sol|terra|luna)(?=$|[-_/])/g)].map((match) => match[1]);
+    const unique = [...new Set(variants)];
+    return unique.length === 1 ? unique[0] : null;
+  }
+
+  function parseUsageCost(value) {
+    const match = String(value ?? '').trim().replaceAll(',', '').match(/^\$\s*([0-9]+(?:\.[0-9]+)?)$/);
+    if (!match) return null;
+    return nonNegativeNumberOrNull(match[1]);
+  }
+
+  function calculateUsageCost(tokens, price) {
+    if (!tokens || !price) return null;
+    const inputTokens = nonNegativeNumberOrNull(tokens.inputTokens);
+    const outputTokens = nonNegativeNumberOrNull(tokens.outputTokens);
+    const cacheInputTokens = nonNegativeNumberOrNull(tokens.cacheInputTokens);
+    const inputPrice = nonNegativeNumberOrNull(price.inputPerMillion ?? price.input_per_million);
+    const outputPrice = nonNegativeNumberOrNull(price.outputPerMillion ?? price.output_per_million);
+    const cacheInputPrice = nonNegativeNumberOrNull(price.cacheInputPerMillion ?? price.cache_input_per_million);
+    if ([inputTokens, outputTokens, cacheInputTokens, inputPrice, outputPrice, cacheInputPrice].some((item) => item === null)) return null;
+    return ((inputTokens * inputPrice) + (outputTokens * outputPrice) + (cacheInputTokens * cacheInputPrice)) / 1_000_000;
+  }
+
+  function calculateUsageCostRoundingTolerance(tokenValues, price) {
+    const source = (Array.isArray(tokenValues) ? tokenValues : String(tokenValues ?? '').split(/\r?\n/))
+      .map((item) => String(item ?? '').trim())
+      .filter(Boolean);
+    if (source.length < 2 || source.length > 3 || !price) return null;
+    const inputPrice = nonNegativeNumberOrNull(price.inputPerMillion ?? price.input_per_million);
+    const outputPrice = nonNegativeNumberOrNull(price.outputPerMillion ?? price.output_per_million);
+    const cacheInputPrice = nonNegativeNumberOrNull(price.cacheInputPerMillion ?? price.cache_input_per_million);
+    if ([inputPrice, outputPrice, cacheInputPrice].some((item) => item === null)) return null;
+    const uncertainty = source.map(getCompactTokenRoundingUncertainty);
+    return ((uncertainty[0] * inputPrice)
+      + (uncertainty[1] * outputPrice)
+      + ((uncertainty[2] || 0) * cacheInputPrice)) / 1_000_000;
+  }
+
+  function classifyUsageCostDeviation(actualCost, estimatedCost, tolerancePercent = DEFAULT_CONFIG.usageCostAuditTolerancePercent, absoluteTolerance = 0.000005) {
+    const actual = nonNegativeNumberOrNull(actualCost);
+    const estimated = nonNegativeNumberOrNull(estimatedCost);
+    if (actual === null || estimated === null) return null;
+    const difference = actual - estimated;
+    const relativePercent = estimated > 0 ? (difference / estimated) * 100 : null;
+    const tolerance = Math.max(estimated * clamp(numberOr(tolerancePercent, DEFAULT_CONFIG.usageCostAuditTolerancePercent), 0.1, 100) / 100, Math.max(0, Number(absoluteTolerance) || 0));
+    return {
+      actual,
+      estimated,
+      difference,
+      relativePercent,
+      tolerance,
+      anomaly: Math.abs(difference) > tolerance,
+      direction: difference > 0 ? 'high' : difference < 0 ? 'low' : 'equal',
+    };
+  }
+
+  function auditUsageCostRecord(record, priceIndex, config = DEFAULT_CONFIG) {
+    const normalizedConfig = normalizeConfig(config);
+    if (!normalizedConfig.usageCostAuditEnabled) return { status: 'skipped', reason: 'disabled' };
+    if (String(record?.billingMode || '').trim() !== '按量') return { status: 'skipped', reason: 'billing_mode' };
+    const model = getUsageModelVariant(record?.model);
+    const multiplier = parseGroupOptionMultiplier(record?.groupMultiplier ?? record?.groupText);
+    const tokens = parseUsageTokenBreakdown(record?.tokenValues ?? record?.tokenText);
+    const actualCost = parseUsageCost(record?.actualCost);
+    const price = findUsageModelPrice(priceIndex, record?.groupName, multiplier, model);
+    if (!model || multiplier === null || !tokens || actualCost === null || !price) return { status: 'skipped', reason: 'missing_data' };
+    const estimatedCost = calculateUsageCost(tokens, price);
+    const roundingTolerance = calculateUsageCostRoundingTolerance(record?.tokenValues ?? record?.tokenText, price);
+    const absoluteTolerance = Math.max(0.000005, roundingTolerance || 0);
+    const deviation = classifyUsageCostDeviation(actualCost, estimatedCost, normalizedConfig.usageCostAuditTolerancePercent, absoluteTolerance);
+    if (!deviation) return { status: 'skipped', reason: 'invalid_cost' };
+    return { status: deviation.anomaly ? 'anomaly' : 'ok', model, multiplier, tokens, price, roundingTolerance, ...deviation };
+  }
+
+  function formatUsageCost(value) {
+    const amount = nonNegativeNumberOrNull(value);
+    return amount === null ? '' : USAGE_COST_CURRENCY_FORMATTER.format(amount);
   }
 
   function formatGroupDropdownMonitor(row, latencySource = 'probe') {
@@ -1111,6 +1373,13 @@
 
   const USAGE_STYLE = `
     .asg-usage-multiplier{margin-inline-start:6px;color:#15803d;font-weight:600;white-space:nowrap}
+    .asg-usage-cost-summary{display:flex;align-items:center;justify-content:flex-end;margin:0 0 8px;color:#475467;font-size:12px;line-height:1.4}
+    .asg-usage-cost-summary.asg-usage-cost-summary-warning{color:#b42318;font-weight:600}
+    .asg-usage-cost-audit{display:block;margin-top:3px;color:#15803d;font-size:11px;font-weight:600;line-height:1.35;white-space:nowrap}
+    .asg-usage-cost-audit.asg-usage-cost-anomaly{color:#b42318}
+    .dark .asg-usage-multiplier,.dark .asg-usage-cost-audit{color:#4ade80}
+    .dark .asg-usage-cost-summary{color:#98a2b3}
+    .dark .asg-usage-cost-summary.asg-usage-cost-summary-warning,.dark .asg-usage-cost-audit.asg-usage-cost-anomaly{color:#f87171}
   `;
 
   const KEY_GROUP_STYLE = `
@@ -1199,7 +1468,8 @@
       this.monitorFreshness = getMonitorFreshness(null, Date.now(), this.config.maxMonitorAgeSeconds);
       this.candidateDiagnostics = analyzeCandidates([], this.config);
       this.lastKeysFetchedAt = 0;
-      this.lastRefreshStartedAt = 0;
+      this.lastRefreshCompletedAt = 0;
+      this.keySelectSignature = '';
       this.lastDetectionLogSignature = null;
       this.lastMonitorStaleLogState = null;
       this.lastAuthLogSignature = '';
@@ -1218,33 +1488,52 @@
       this.renderShell();
       this.bindEvents();
       if (registerMenu && typeof GM_registerMenuCommand === 'function') GM_registerMenuCommand('显示 AIHub 智能分组', () => this.setMinimized(false));
-      this.refresh();
-      this.syncPollingTimer();
+      if (!this.minimized || this.config.autoSwitch) this.refresh();
+      else this.syncPollingTimer();
       this.uiTimer = window.setInterval(() => {
         if (isPageVisible() && !this.minimized) this.renderTimeSensitiveState();
       }, 1000);
     }
 
     syncPollingTimer() {
-      if (this.timer) window.clearInterval(this.timer);
+      if (this.timer) window.clearTimeout(this.timer);
       this.timer = null;
-      if (!this.active) return;
-      this.timer = window.setInterval(() => {
-        const elapsed = Date.now() - this.lastRefreshStartedAt;
-        if (isPageVisible() && elapsed >= this.config.pollIntervalSeconds * 1000) this.refresh();
-      }, this.config.pollIntervalSeconds * 1000);
+      if (!this.active || (this.minimized && !this.config.autoSwitch)) return;
+      const intervalMs = this.config.pollIntervalSeconds * 1000;
+      const elapsed = this.lastRefreshCompletedAt > 0 ? Date.now() - this.lastRefreshCompletedAt : intervalMs;
+      const delay = this.loading
+        ? 1000
+        : (isPageVisible() ? Math.max(250, intervalMs - Math.max(0, elapsed)) : intervalMs);
+      this.timer = window.setTimeout(() => {
+        this.timer = null;
+        if (this.shouldAutoRefresh()) this.refresh();
+        else this.syncPollingTimer();
+      }, delay);
+    }
+
+    shouldAutoRefresh(now = Date.now()) {
+      return shouldRunControllerRefresh({
+        active: this.active,
+        visible: isPageVisible(),
+        minimized: this.minimized,
+        autoSwitch: this.config.autoSwitch,
+        loading: this.loading,
+        now,
+        lastCompletedAt: this.lastRefreshCompletedAt,
+        intervalMs: this.config.pollIntervalSeconds * 1000,
+      });
     }
 
     handleVisibilityChange() {
       if (!this.active || !isPageVisible()) return;
-      this.renderTimeSensitiveState();
-      const elapsed = Date.now() - this.lastRefreshStartedAt;
-      if (elapsed >= this.config.pollIntervalSeconds * 1000) this.refresh();
+      if (!this.minimized) this.renderTimeSensitiveState();
+      if (this.shouldAutoRefresh()) this.refresh();
+      else this.syncPollingTimer();
     }
 
     stop() {
       this.active = false;
-      if (this.timer) window.clearInterval(this.timer);
+      if (this.timer) window.clearTimeout(this.timer);
       if (this.uiTimer) window.clearInterval(this.uiTimer);
       this.timer = null;
       this.uiTimer = null;
@@ -1274,6 +1563,7 @@
               <div class="asg-key-detail"><span>倍率</span><strong class="asg-key-metric" data-key-detail="multiplier"></strong></div>
               <div class="asg-key-detail"><span data-key-detail-label="latency">最新首 Token</span><strong class="asg-key-metric" data-key-detail="latency"></strong></div>
               <div class="asg-key-detail"><span>模型检测</span><strong data-key-detail="detection"></strong></div>
+              <div class="asg-key-detail" data-key-detail-row="model-price"><span data-key-detail-label="model-price">Sol 价格 / 1M</span><strong class="asg-key-metric" data-key-detail="model-price"></strong></div>
               <div class="asg-key-detail"><span>缓存命中率</span><strong class="asg-key-metric" data-key-detail="cache"></strong></div>
             </div>
             <div class="asg-actions"><button data-action="refresh">检测</button><button data-action="switch" disabled>切换到推荐分组</button></div>
@@ -1304,6 +1594,22 @@
                 <div class="asg-settings-head"><div class="asg-settings-title">TTFT 采集</div><label class="asg-settings-inline-label" for="asg-latency-source-setting">推荐、密钥详情和分组下拉使用的延迟指标</label></div>
                 <div class="asg-settings-grid">
                   <label class="asg-setting-wide">采集指标<select id="asg-latency-source-setting" data-setting="latencySource"><option value="probe">主动探测首 Token</option><option value="user">真实用户平均 TTFT（无样本时回退探测）</option></select></label>
+                </div>
+              </section>
+              <section class="asg-settings-section">
+                <div class="asg-settings-head"><div class="asg-settings-title">模型价格</div><label class="asg-settings-inline-label" for="asg-model-price-setting">显示 AIHub 后端分组价格</label></div>
+                <div class="asg-settings-grid">
+                  <label class="asg-setting-wide">价格模型<select id="asg-model-price-setting" data-setting="modelPriceModel"><option value="sol">Sol</option><option value="terra">Terra</option><option value="luna">Luna</option><option value="none">不显示</option></select></label>
+                  <span class="asg-setting-preview asg-setting-wide">价格单位为美元 / 每 1M Token，仅用于展示，不改变推荐、排序或自动切换目标。</span>
+                </div>
+              </section>
+              <section class="asg-settings-section">
+                <div class="asg-settings-head"><div class="asg-settings-title">用量费用核验</div><label class="asg-settings-inline-label" for="asg-usage-audit-display-setting">按历史分组倍率复算按量费用</label></div>
+                <div class="asg-settings-grid">
+                  <label class="asg-setting-compact asg-auto"><input type="checkbox" data-setting="usageCostAuditEnabled"> 开启费用核验</label>
+                  <label>显示结果<select id="asg-usage-audit-display-setting" data-setting="usageCostAuditDisplay"><option value="anomalies">仅显示异常</option><option value="all">显示全部</option></select></label>
+                  <label class="asg-setting-wide">相对容差（%）<input type="number" min="0.1" max="100" step="0.1" data-setting="usageCostAuditTolerancePercent"></label>
+                  <span class="asg-setting-preview asg-setting-wide">仅核验“按量”记录；按页面历史倍率严格匹配分组，并保留 $0.000005 的压缩 Token 绝对误差。</span>
                 </div>
               </section>
               <section class="asg-settings-section">
@@ -1395,6 +1701,7 @@
         this.config.autoSwitch = event.target.checked;
         storageSet('config', this.config);
         this.log('info', event.target.checked ? '已开启自动切换' : '已关闭自动切换');
+        this.syncPollingTimer();
         this.refresh();
       });
       this.panel.addEventListener('input', (event) => {
@@ -1414,7 +1721,14 @@
       if (this.panel) this.panel.hidden = this.minimized;
       if (this.toggleButton) this.toggleButton.hidden = !this.minimized;
       storageSet('minimized', this.minimized);
-      if (wasMinimized && !this.minimized) this.renderTimeSensitiveState();
+      if (wasMinimized === this.minimized) return;
+      if (wasMinimized && !this.minimized) {
+        this.renderTimeSensitiveState();
+        if (this.shouldAutoRefresh()) this.refresh();
+        else this.syncPollingTimer();
+      } else {
+        this.syncPollingTimer();
+      }
     }
 
     setSideTab(value) {
@@ -1583,8 +1897,9 @@
 
     async refresh(forceLog = false) {
       if (this.loading) return;
+      if (this.timer) window.clearTimeout(this.timer);
+      this.timer = null;
       this.loading = true;
-      this.lastRefreshStartedAt = Date.now();
       this.authError = '';
       this.setStatus('检测中...');
       this.renderActionState();
@@ -1662,7 +1977,11 @@
         this.renderActionState();
       } finally {
         this.loading = false;
-        if (this.active) this.renderActionState();
+        this.lastRefreshCompletedAt = Date.now();
+        if (this.active) {
+          this.renderActionState();
+          this.syncPollingTimer();
+        }
       }
     }
 
@@ -1806,10 +2125,11 @@
             : `可用率 ${formatPercent(winner.success10m)}`;
         const detectionText = getModelDetectionLabel(winner);
         const healthText = formatModelHealthSummary(winner.modelHealth ?? winner.model_health);
+        const modelPriceText = formatModelPriceSummary(winner, this.config.modelPriceModel);
         const cacheText = normalizeCacheHitRate(winner.cacheHitRate ?? winner.cache_hit_rate) === null
           ? ''
           : ` · ${formatCacheHitRate(winner.cacheHitRate ?? winner.cache_hit_rate)}`;
-        metrics.textContent = `10m ${availabilityText} · ${winner.recentSampleCount}次探测 · ${formatLatencyMetric(winner, this.config.latencySource)}${detectionText ? ` · 模型${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${cacheText}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
+        metrics.textContent = `10m ${availabilityText} · ${winner.recentSampleCount}次探测 · ${formatLatencyMetric(winner, this.config.latencySource)}${detectionText ? ` · 模型${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${modelPriceText ? ` · ${modelPriceText}` : ''}${cacheText}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
         recommend.append(title, metrics);
         if (this.config.mode === 'balance') {
           const reason = document.createElement('div');
@@ -1853,19 +2173,29 @@
     renderKeys() {
       const select = this.panel.querySelector('[data-field="key"]');
       const metricMap = buildGroupMetricMap(this.rows, this.config);
-      select.replaceChildren();
-      const placeholder = document.createElement('option');
-      placeholder.value = '';
-      placeholder.textContent = this.keys.length
+      const placeholderText = this.keys.length
         ? '选择要切换的密钥'
         : (this.authError || (this.keyCount !== null ? `接口返回 ${this.keyCount} 个密钥` : '未读取到密钥'));
-      select.appendChild(placeholder);
-      for (const key of this.keys) {
-        const option = document.createElement('option');
-        option.value = key.id;
-        option.textContent = formatKeyOptionLabel(key, metricMap.get(key.groupId), this.config.latencySource);
-        option.selected = String(key.id) === String(this.selectedKeyId);
-        select.appendChild(option);
+      const optionRows = this.keys.map((key) => ({
+        value: String(key.id),
+        text: formatKeyOptionLabel(key, metricMap.get(key.groupId), this.config.latencySource),
+      }));
+      const signature = JSON.stringify([placeholderText, String(this.selectedKeyId ?? ''), optionRows]);
+      if (signature !== this.keySelectSignature) {
+        const fragment = document.createDocumentFragment();
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = placeholderText;
+        fragment.appendChild(placeholder);
+        for (const row of optionRows) {
+          const option = document.createElement('option');
+          option.value = row.value;
+          option.textContent = row.text;
+          option.selected = row.value === String(this.selectedKeyId);
+          fragment.appendChild(option);
+        }
+        select.replaceChildren(fragment);
+        this.keySelectSignature = signature;
       }
       select.disabled = this.keys.length === 0;
       this.renderSelectedKeyDetails(metricMap);
@@ -1881,14 +2211,20 @@
       const multiplier = nonNegativeNumberOrNull(metric?.multiplier);
       const latencyMs = nonNegativeNumberOrNull(metric?.latencyMs);
       const detectionText = metric?.detectionStatus ? getModelDetectionLabel({ modelDetection: { status: metric.detectionStatus } }) : '暂无数据';
+      const modelPriceText = formatModelPriceSummary(metric?.modelPrices, this.config.modelPriceModel, true);
       const cacheHitRate = normalizeCacheHitRate(metric?.cacheHitRate);
       const latencyLabel = details.querySelector('[data-key-detail-label="latency"]');
+      const modelPriceRow = details.querySelector('[data-key-detail-row="model-price"]');
+      const modelPriceLabel = details.querySelector('[data-key-detail-label="model-price"]');
       if (latencyLabel) latencyLabel.textContent = this.config.latencySource === 'user' ? '真实用户平均 TTFT' : '最新首 Token';
+      if (modelPriceRow) modelPriceRow.hidden = this.config.modelPriceModel === 'none';
+      if (modelPriceLabel) modelPriceLabel.textContent = `${MODEL_PRICE_MODEL_LABELS[this.config.modelPriceModel]} 价格 / 1M`;
       details.querySelector('[data-key-detail="name"]').textContent = key.name;
       details.querySelector('[data-key-detail="group"]').textContent = key.groupName;
       details.querySelector('[data-key-detail="multiplier"]').textContent = multiplier === null ? '暂无数据' : formatMultiplier(multiplier);
       details.querySelector('[data-key-detail="latency"]').textContent = latencyMs === null ? '暂无数据' : formatLatency(latencyMs);
       details.querySelector('[data-key-detail="detection"]').textContent = detectionText;
+      details.querySelector('[data-key-detail="model-price"]').textContent = modelPriceText || '暂无数据';
       details.querySelector('[data-key-detail="cache"]').textContent = cacheHitRate === null ? '暂无数据' : `${(cacheHitRate * 100).toFixed(1)}%`;
     }
 
@@ -1903,7 +2239,8 @@
         const detectionText = getModelDetectionLabel(candidate);
         const cacheHitRate = normalizeCacheHitRate(candidate.cacheHitRate ?? candidate.cache_hit_rate);
         const healthText = formatModelHealthSummary(candidate.modelHealth ?? candidate.model_health);
-        metrics.textContent = `${candidate.price}x · 10m ${formatPercent(candidate.success10m)}${detectionText ? ` · ${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${cacheHitRate === null ? '' : ` · 缓存 ${(cacheHitRate * 100).toFixed(1)}%`}`;
+        const modelPriceText = formatModelPriceSummary(candidate, this.config.modelPriceModel, true);
+        metrics.textContent = `${candidate.price}x · 10m ${formatPercent(candidate.success10m)}${detectionText ? ` · ${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${modelPriceText ? ` · ${modelPriceText}` : ''}${cacheHitRate === null ? '' : ` · 缓存 ${(cacheHitRate * 100).toFixed(1)}%`}`;
         item.append(name, metrics);
         list.appendChild(item);
       }
@@ -1949,8 +2286,10 @@
     start() {
       this.active = true;
       addStyle(KEY_GROUP_STYLE, 'aihub-smart-group-key-style');
-      this.observer = new MutationObserver(() => this.queueRender());
-      this.observer.observe(document.body, { childList: true, subtree: true });
+      this.observer = new MutationObserver((records) => {
+        if (this.mutationsNeedMenuScan(records)) this.queueRender();
+      });
+      this.observer.observe(document.querySelector('main') || document.body, { childList: true, subtree: true });
       this.queueRender();
       this.refreshTimer = window.setInterval(() => {
         if (isPageVisible() && this.findMenus().length && Date.now() - this.lastAttemptAt >= 60_000) this.refresh();
@@ -1980,6 +2319,11 @@
         button.querySelector('.asg-key-group-rate-shell')?.classList.remove('asg-key-group-rate-shell');
         button.querySelector('.asg-key-group-rate')?.classList.remove('asg-key-group-rate');
       });
+    }
+
+    mutationsNeedMenuScan(records) {
+      return [...(records || [])].some((record) => [...record.addedNodes, ...record.removedNodes].some((node) => node.nodeType === 1
+        && (node.matches?.('input[placeholder="搜索分组..."]') || node.querySelector?.('input[placeholder="搜索分组..."]'))));
     }
 
     findMenus() {
@@ -2136,24 +2480,36 @@
   class UsageMultiplierEnhancer {
     constructor() {
       this.multiplierByGroup = new Map();
+      this.modelPriceIndex = buildUsageModelPriceIndex([]);
+      this.summaryByTable = new Map();
       this.observer = null;
       this.renderQueued = false;
       this.active = false;
       this.refreshTimer = null;
       this.renderTimer = null;
       this.loading = false;
-      this.lastAttemptAt = 0;
+      this.lastRefreshCompletedAt = 0;
+      this.hasMonitorData = false;
+      this.loadFailed = false;
+      this.config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
+      this.onConfigChanged = () => {
+        this.config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
+        this.queueRender();
+      };
     }
 
     start() {
       this.active = true;
       addStyle(USAGE_STYLE, 'aihub-smart-group-usage-style');
-      this.observer = new MutationObserver(() => this.queueRender());
-      this.observer.observe(document.body, { childList: true, subtree: true });
-      this.refresh();
+      window.addEventListener(CONFIG_CHANGE_EVENT, this.onConfigChanged);
+      this.observer = new MutationObserver((records) => {
+        if (this.mutationsNeedRender(records)) this.queueRender();
+      });
+      this.observer.observe(document.querySelector('main') || document.body, { childList: true, subtree: true, characterData: true });
+      this.refresh(true);
       this.refreshTimer = window.setInterval(() => {
-        if (isPageVisible()) this.refresh();
-      }, 5 * 60 * 1000);
+        if (isPageVisible() && isRefreshDue(Date.now(), this.lastRefreshCompletedAt, USAGE_REFRESH_INTERVAL_MS)) this.refresh();
+      }, USAGE_REFRESH_INTERVAL_MS);
     }
 
     stop() {
@@ -2164,28 +2520,46 @@
       if (this.renderTimer) window.clearTimeout(this.renderTimer);
       this.refreshTimer = null;
       this.renderTimer = null;
-      document.querySelectorAll('.asg-usage-multiplier').forEach((node) => node.remove());
+      window.removeEventListener(CONFIG_CHANGE_EVENT, this.onConfigChanged);
+      document.querySelectorAll('.asg-usage-multiplier,.asg-usage-cost-audit,.asg-usage-cost-summary').forEach((node) => node.remove());
+      this.summaryByTable.clear();
     }
 
-    async refresh() {
+    mutationsNeedRender(records) {
+      return [...(records || [])].some((record) => {
+        const target = record.target?.nodeType === 1 ? record.target : record.target?.parentElement;
+        if (target?.closest?.('.asg-usage-multiplier,.asg-usage-cost-audit,.asg-usage-cost-summary')) return false;
+        if (target?.closest?.('table')) return true;
+        return [...record.addedNodes, ...record.removedNodes].some((node) => node.nodeType === 1
+          && (node.matches?.('table') || node.querySelector?.('table')));
+      });
+    }
+
+    async refresh(force = false) {
       if (!this.active || !isPageVisible() || this.loading) return;
+      if (!force && !isRefreshDue(Date.now(), this.lastRefreshCompletedAt, USAGE_REFRESH_INTERVAL_MS)) return;
       this.loading = true;
-      this.lastAttemptAt = Date.now();
       try {
         const summary = await fetchMonitorSummary();
         if (!this.active) return;
         this.multiplierByGroup = buildGroupMultiplierMap(summary?.apis);
+        this.modelPriceIndex = buildUsageModelPriceIndex(summary?.apis);
+        this.hasMonitorData = true;
+        this.loadFailed = false;
         this.render();
       } catch {
-        // The usage page remains unchanged when current monitor data is unavailable.
+        if (!this.active) return;
+        this.loadFailed = !this.hasMonitorData;
+        this.render();
       } finally {
         this.loading = false;
+        this.lastRefreshCompletedAt = Date.now();
       }
     }
 
     handleVisibilityChange() {
       if (!this.active || !isPageVisible()) return;
-      if (Date.now() - this.lastAttemptAt >= 5 * 60_000) this.refresh();
+      if (isRefreshDue(Date.now(), this.lastRefreshCompletedAt, USAGE_REFRESH_INTERVAL_MS)) this.refresh();
       else this.queueRender();
     }
 
@@ -2200,38 +2574,173 @@
     }
 
     render() {
-      if (!this.active || !this.multiplierByGroup.size) return;
-      for (const table of document.querySelectorAll('table')) {
-        const headers = [...table.querySelectorAll('thead th')];
-        const groupColumnIndex = headers.findIndex((header) => header.textContent.trim() === '分组');
-        if (groupColumnIndex < 0) continue;
-        for (const row of table.querySelectorAll('tbody tr')) {
-          const cells = row.querySelectorAll('td');
-          const cell = cells[groupColumnIndex];
-          if (!cell) continue;
-          const existing = cell.querySelector('.asg-usage-multiplier');
-          const name = normalizeGroupName([...cell.childNodes]
-            .filter((node) => node !== existing)
-            .map((node) => node.textContent)
-            .join(' '));
-          const multiplier = this.multiplierByGroup.get(name);
-          if (multiplier == null) {
-            existing?.remove();
-            continue;
-          }
-          const text = formatMultiplier(multiplier);
-          if (existing) {
-            existing.dataset.groupName = name;
-            if (existing.textContent !== text) existing.textContent = text;
-          } else {
-            const badge = document.createElement('span');
-            badge.className = 'asg-usage-multiplier';
-            badge.dataset.groupName = name;
-            badge.textContent = text;
-            cell.appendChild(badge);
-          }
+      if (!this.active) return;
+      this.config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
+      const tables = [...document.querySelectorAll('table')];
+      for (const table of tables) this.renderMultipliers(table);
+      const detailTables = tables.filter((table) => this.isUsageDetailTable(table));
+      const activeTables = new Set(detailTables);
+      for (const [table, summary] of this.summaryByTable) {
+        if (table.isConnected && activeTables.has(table)) continue;
+        summary.remove();
+        this.summaryByTable.delete(table);
+      }
+      for (const table of detailTables) this.renderCostAudit(table);
+    }
+
+    getHeaderLabels(table) {
+      return [...table.querySelectorAll('thead th')].map((header) => header.textContent.trim());
+    }
+
+    isUsageDetailTable(table) {
+      const labels = this.getHeaderLabels(table);
+      return labels.length === USAGE_DETAIL_HEADERS.length
+        && labels.every((label, index) => label === USAGE_DETAIL_HEADERS[index]);
+    }
+
+    getGroupName(cell) {
+      if (!cell) return '';
+      const nativeMultiplier = cell.querySelector('[data-testid="usage-group-rate-multiplier"]');
+      const candidate = [...cell.querySelectorAll('span')].find((node) => {
+        if (node === nativeMultiplier || node.contains(nativeMultiplier)) return false;
+        if (node.closest('.asg-usage-multiplier,.asg-usage-cost-audit')) return false;
+        return Boolean(node.textContent.trim());
+      });
+      if (candidate) return normalizeGroupName(candidate.textContent);
+      const clone = cell.cloneNode(true);
+      clone.querySelectorAll('.asg-usage-multiplier,.asg-usage-cost-audit,[data-testid="usage-group-rate-multiplier"]').forEach((node) => node.remove());
+      return normalizeGroupName(clone.textContent);
+    }
+
+    renderMultipliers(table) {
+      if (!this.multiplierByGroup.size) return;
+      const headers = [...table.querySelectorAll('thead th')];
+      const groupColumnIndex = headers.findIndex((header) => header.textContent.trim() === '分组');
+      if (groupColumnIndex < 0) return;
+      for (const row of table.querySelectorAll('tbody tr')) {
+        const cells = row.querySelectorAll('td');
+        const cell = cells[groupColumnIndex];
+        if (!cell) continue;
+        const existing = cell.querySelector('.asg-usage-multiplier');
+        if (cell.querySelector('[data-testid="usage-group-rate-multiplier"]')) {
+          existing?.remove();
+          continue;
+        }
+        const name = this.getGroupName(cell);
+        const multiplier = this.multiplierByGroup.get(name);
+        if (multiplier == null) {
+          existing?.remove();
+          continue;
+        }
+        const text = formatMultiplier(multiplier);
+        if (existing) {
+          existing.dataset.groupName = name;
+          if (existing.textContent !== text) existing.textContent = text;
+        } else {
+          const badge = document.createElement('span');
+          badge.className = 'asg-usage-multiplier';
+          badge.dataset.groupName = name;
+          badge.textContent = text;
+          cell.appendChild(badge);
         }
       }
+    }
+
+    getCostAuditRecord(row, indexes) {
+      const cells = row.querySelectorAll('td');
+      const groupCell = cells[indexes.group];
+      const tokenCell = cells[indexes.tokens];
+      const costCell = cells[indexes.cost];
+      if (!groupCell || !tokenCell || !costCell) return null;
+      const modelCell = cells[indexes.model];
+      const billingCell = cells[indexes.billing];
+      const modelNode = modelCell?.querySelector('span.font-medium');
+      const tokenValues = [...tokenCell.querySelectorAll('span.font-medium')]
+        .filter((node) => !node.closest('.asg-usage-cost-audit'))
+        .map((node) => node.textContent.trim());
+      const nativeCostNode = costCell.querySelector('span.font-medium.text-green-600')
+        || [...costCell.querySelectorAll('span')].find((node) => !node.closest('.asg-usage-cost-audit') && parseUsageCost(node.textContent) !== null);
+      return {
+        costCell,
+        record: {
+          groupName: this.getGroupName(groupCell),
+          groupMultiplier: groupCell.querySelector('[data-testid="usage-group-rate-multiplier"]')?.textContent || '',
+          model: modelNode?.textContent?.trim() || modelCell?.textContent?.trim() || '',
+          billingMode: billingCell?.textContent?.trim() || '',
+          tokenValues,
+          actualCost: nativeCostNode?.textContent?.trim() || '',
+        },
+      };
+    }
+
+    ensureCostSummary(table) {
+      let summary = this.summaryByTable.get(table);
+      if (summary?.isConnected) return summary;
+      summary = document.createElement('div');
+      summary.className = 'asg-usage-cost-summary';
+      summary.setAttribute('role', 'status');
+      summary.setAttribute('aria-live', 'polite');
+      table.parentElement?.insertBefore(summary, table);
+      this.summaryByTable.set(table, summary);
+      return summary;
+    }
+
+    renderCostAudit(table) {
+      const summary = this.ensureCostSummary(table);
+      const rows = [...table.querySelectorAll('tbody tr')];
+      if (!this.config.usageCostAuditEnabled) {
+        rows.forEach((row) => row.querySelector('.asg-usage-cost-audit')?.remove());
+        summary.textContent = '费用校验：已关闭';
+        summary.classList.remove('asg-usage-cost-summary-warning');
+        return;
+      }
+      if (!this.hasMonitorData) {
+        rows.forEach((row) => row.querySelector('.asg-usage-cost-audit')?.remove());
+        summary.textContent = this.loadFailed ? '费用校验：模型价格读取失败' : '费用校验：正在读取模型价格…';
+        summary.classList.toggle('asg-usage-cost-summary-warning', this.loadFailed);
+        return;
+      }
+      const headers = this.getHeaderLabels(table);
+      const indexes = {
+        model: headers.indexOf('模型'),
+        group: headers.indexOf('分组'),
+        billing: headers.indexOf('计费模式'),
+        tokens: headers.indexOf('Token'),
+        cost: headers.indexOf('费用'),
+      };
+      const counts = { ok: 0, anomaly: 0, skipped: 0 };
+      for (const row of rows) {
+        const extracted = this.getCostAuditRecord(row, indexes);
+        if (!extracted) {
+          counts.skipped += 1;
+          continue;
+        }
+        const result = auditUsageCostRecord(extracted.record, this.modelPriceIndex, this.config);
+        counts[result.status] = (counts[result.status] || 0) + 1;
+        this.renderCostAuditResult(extracted.costCell, result);
+      }
+      summary.textContent = `费用校验：${counts.ok} 条正常 · ${counts.anomaly} 条异常 · ${counts.skipped} 条跳过`;
+      summary.classList.toggle('asg-usage-cost-summary-warning', counts.anomaly > 0);
+    }
+
+    renderCostAuditResult(costCell, result) {
+      let node = costCell.querySelector('.asg-usage-cost-audit');
+      const shouldDisplay = result.status === 'anomaly'
+        || (result.status === 'ok' && this.config.usageCostAuditDisplay === 'all');
+      if (!shouldDisplay) {
+        node?.remove();
+        return;
+      }
+      if (!node) {
+        node = document.createElement('span');
+        costCell.appendChild(node);
+      }
+      const relative = Number.isFinite(result.relativePercent) ? `${Math.abs(result.relativePercent).toFixed(1)}%` : formatUsageCost(Math.abs(result.difference));
+      const verdict = result.status === 'ok' ? '一致' : `${result.direction === 'low' ? '偏低' : '偏高'} ${relative}`;
+      node.className = `asg-usage-cost-audit${result.status === 'anomaly' ? ' asg-usage-cost-anomaly' : ''}`;
+      node.textContent = `预计 ${formatUsageCost(result.estimated)} · ${verdict}`;
+      const formatTokens = (value) => Math.round(value).toLocaleString('en-US');
+      node.title = `输入 ${formatTokens(result.tokens.inputTokens)} × ${formatModelPriceAmount(result.price.inputPerMillion)}/1M + 输出 ${formatTokens(result.tokens.outputTokens)} × ${formatModelPriceAmount(result.price.outputPerMillion)}/1M + 缓存输入 ${formatTokens(result.tokens.cacheInputTokens)} × ${formatModelPriceAmount(result.price.cacheInputPerMillion)}/1M = ${formatUsageCost(result.estimated)}；实际 ${formatUsageCost(result.actual)}；容差 ±${formatUsageCost(result.tolerance)}`;
     }
   }
 
@@ -2241,8 +2750,14 @@
       this.applied = false;
       this.observer = null;
       this.applyTimer = null;
+      this.observerDeadlineTimer = null;
+      this.retryTimer = null;
       this.refreshTimer = null;
       this.lastRefreshAt = 0;
+      this.onPageClick = (event) => {
+        const button = event.target?.closest?.('button');
+        if (button?.closest('main') && findProviderRefreshButton([button]) === button) this.lastRefreshAt = Date.now();
+      };
       this.onConfigChanged = () => {
         this.applied = false;
         this.observeUntilApplied();
@@ -2254,6 +2769,7 @@
     start() {
       this.active = true;
       this.lastRefreshAt = Date.now();
+      document.addEventListener('click', this.onPageClick, true);
       window.addEventListener(CONFIG_CHANGE_EVENT, this.onConfigChanged);
       this.observeUntilApplied();
       this.queueApply();
@@ -2262,8 +2778,33 @@
 
     observeUntilApplied() {
       if (!this.active || this.applied || this.observer) return;
-      this.observer = new MutationObserver(() => this.queueApply());
-      this.observer.observe(document.body, { childList: true, subtree: true });
+      if (this.retryTimer) window.clearInterval(this.retryTimer);
+      this.retryTimer = null;
+      this.observer = new MutationObserver((records) => {
+        if (this.mutationsNeedSortScan(records)) this.queueApply();
+      });
+      this.observer.observe(document.querySelector('main') || document.body, { childList: true, subtree: true });
+      if (this.observerDeadlineTimer) window.clearTimeout(this.observerDeadlineTimer);
+      this.observerDeadlineTimer = window.setTimeout(() => {
+        this.observerDeadlineTimer = null;
+        this.observer?.disconnect();
+        this.observer = null;
+        this.startLowFrequencyRetry();
+      }, 15_000);
+    }
+
+    mutationsNeedSortScan(records) {
+      return [...(records || [])].some((record) => {
+        const target = record.target?.nodeType === 1 ? record.target : record.target?.parentElement;
+        if (target?.closest?.('button.monitor-sort-head')) return true;
+        return [...record.addedNodes, ...record.removedNodes].some((node) => node.nodeType === 1
+          && (node.matches?.('button.monitor-sort-head') || node.querySelector?.('button.monitor-sort-head')));
+      });
+    }
+
+    startLowFrequencyRetry() {
+      if (!this.active || this.applied || this.retryTimer) return;
+      this.retryTimer = window.setInterval(() => this.queueApply(), 5_000);
     }
 
     stop() {
@@ -2271,9 +2812,14 @@
       this.observer?.disconnect();
       this.observer = null;
       if (this.applyTimer) window.clearTimeout(this.applyTimer);
+      if (this.observerDeadlineTimer) window.clearTimeout(this.observerDeadlineTimer);
+      if (this.retryTimer) window.clearInterval(this.retryTimer);
       if (this.refreshTimer) window.clearInterval(this.refreshTimer);
       this.applyTimer = null;
+      this.observerDeadlineTimer = null;
+      this.retryTimer = null;
       this.refreshTimer = null;
+      document.removeEventListener('click', this.onPageClick, true);
       window.removeEventListener(CONFIG_CHANGE_EVENT, this.onConfigChanged);
     }
 
@@ -2296,6 +2842,10 @@
       this.applied = true;
       this.observer?.disconnect();
       this.observer = null;
+      if (this.observerDeadlineTimer) window.clearTimeout(this.observerDeadlineTimer);
+      if (this.retryTimer) window.clearInterval(this.retryTimer);
+      this.observerDeadlineTimer = null;
+      this.retryTimer = null;
       return true;
     }
 
@@ -2305,7 +2855,10 @@
       if (!this.active) return;
       const config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
       if (!config.providerAutoRefresh) return;
-      this.refreshTimer = window.setInterval(() => this.refresh(), config.providerRefreshIntervalSeconds * 1000);
+      const intervalMs = config.providerRefreshIntervalSeconds * 1000;
+      this.refreshTimer = window.setInterval(() => {
+        if (isRefreshDue(Date.now(), this.lastRefreshAt, intervalMs)) this.refresh();
+      }, intervalMs);
     }
 
     handleVisibilityChange() {
@@ -2319,6 +2872,9 @@
 
     refresh() {
       if (!this.active || !isPageVisible()) return false;
+      const config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
+      if (!config.providerAutoRefresh
+        || !isRefreshDue(Date.now(), this.lastRefreshAt, config.providerRefreshIntervalSeconds * 1000)) return false;
       const button = findProviderRefreshButton(document.querySelectorAll('main button'));
       if (!button || button.disabled) return false;
       button.click();
@@ -2402,17 +2958,23 @@
     DEFAULT_CONFIG,
     GROUP_MODE_LABELS,
     LATENCY_SOURCE_LABELS,
+    MODEL_PRICE_MODEL_LABELS,
     PROVIDER_SORT_LABELS,
     normalizeConfig,
     normalizeGroupMode,
     normalizeAvailabilityMode,
     normalizeLatencySource,
+    normalizeModelPriceModel,
     normalizeProviderSortPreference,
     getProviderSortButtonText,
     findProviderSortButton,
     findProviderRefreshButton,
     normalizeCacheHitRate,
     formatCacheHitRate,
+    normalizeModelPrices,
+    getModelPrices,
+    getSelectedModelPrice,
+    formatModelPriceSummary,
     normalizeModelHealth,
     summarizeModelHealth,
     formatModelHealthSummary,
@@ -2442,6 +3004,18 @@
     buildGroupDropdownMonitorIndex,
     findGroupDropdownMonitor,
     parseGroupOptionMultiplier,
+    buildUsageModelPriceIndex,
+    findUsageModelPrice,
+    parseCompactTokenCount,
+    getCompactTokenRoundingUncertainty,
+    parseUsageTokenBreakdown,
+    getUsageModelVariant,
+    parseUsageCost,
+    calculateUsageCost,
+    calculateUsageCostRoundingTolerance,
+    classifyUsageCostDeviation,
+    auditUsageCostRecord,
+    formatUsageCost,
     formatGroupDropdownMonitor,
     getGroupDropdownToneClass,
     formatKeyOptionLabel,
@@ -2458,6 +3032,8 @@
     buildApiHeaders,
     mergeKeyPages,
     shouldRefreshKeys,
+    isRefreshDue,
+    shouldRunControllerRefresh,
     isPageVisible,
     fetchMonitorSummary,
     clearMonitorSummaryCache,

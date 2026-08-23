@@ -82,6 +82,27 @@ test('normalizes the selectable TTFT source and preserves the legacy default', (
   assert.equal(core.normalizeConfig({ latencySource: 'unexpected' }).latencySource, 'probe');
 });
 
+test('normalizes model price and usage cost audit settings', () => {
+  assert.equal(core.DEFAULT_CONFIG.modelPriceModel, 'sol');
+  assert.equal(core.DEFAULT_CONFIG.usageCostAuditEnabled, true);
+  assert.equal(core.DEFAULT_CONFIG.usageCostAuditDisplay, 'anomalies');
+  assert.equal(core.DEFAULT_CONFIG.usageCostAuditTolerancePercent, 1);
+
+  const config = core.normalizeConfig({
+    modelPriceModel: 'terra',
+    usageCostAuditEnabled: false,
+    usageCostAuditDisplay: 'all',
+    usageCostAuditTolerancePercent: 0,
+  });
+  assert.equal(config.modelPriceModel, 'terra');
+  assert.equal(config.usageCostAuditEnabled, false);
+  assert.equal(config.usageCostAuditDisplay, 'all');
+  assert.equal(config.usageCostAuditTolerancePercent, 0.1);
+  assert.equal(core.normalizeConfig({ modelPriceModel: 'unexpected' }).modelPriceModel, 'sol');
+  assert.equal(core.normalizeConfig({ usageCostAuditDisplay: 'unexpected' }).usageCostAuditDisplay, 'anomalies');
+  assert.equal(core.normalizeConfig({ usageCostAuditTolerancePercent: 999 }).usageCostAuditTolerancePercent, 100);
+});
+
 test('defaults provider hall auto sorting to multiplier priority', () => {
   assert.equal(core.DEFAULT_CONFIG.providerSortPreference, 'rate');
   assert.equal(core.DEFAULT_CONFIG.providerAutoRefresh, true);
@@ -198,6 +219,58 @@ test('parses cache hit rates from percentages and decimals', () => {
   assert.equal(core.normalizeCacheHitRate(25), 0.25);
   assert.equal(core.normalizeCacheHitRate('bad'), null);
   assert.equal(core.formatCacheHitRate('65.50%'), '缓存命中率 65.5%');
+});
+
+test('normalizes model prices across API casing and field conventions', () => {
+  assert.deepEqual(core.normalizeModelPrices({
+    SOL: {
+      input_per_million: '0.65',
+      cache_input_per_million: 0.065,
+      output_per_million: 3.9,
+    },
+    Terra: {
+      inputPerMillion: 0.7,
+      cacheInputPerMillion: 'invalid',
+      outputPerMillion: -1,
+    },
+    luna: 'invalid',
+  }), {
+    sol: {
+      inputPerMillion: 0.65,
+      cacheInputPerMillion: 0.065,
+      outputPerMillion: 3.9,
+    },
+    terra: {
+      inputPerMillion: 0.7,
+      cacheInputPerMillion: null,
+      outputPerMillion: null,
+    },
+  });
+  assert.equal(core.normalizeModelPrices(null), null);
+  assert.equal(core.normalizeModelPrices([]), null);
+  assert.equal(core.normalizeModelPrices({ sol: { input_per_million: 'invalid' } }), null);
+});
+
+test('formats selected model prices in full and compact forms', () => {
+  const row = {
+    model_prices: {
+      sol: {
+        input_per_million: 0.65,
+        cache_input_per_million: 0.065,
+        output_per_million: 3.9,
+      },
+      terra: {
+        input_per_million: 0.7,
+        output_per_million: 4.2,
+      },
+    },
+  };
+
+  assert.equal(core.formatModelPriceSummary(row, 'sol'), 'Sol 每 1M：输入 $0.65 · 缓存输入 $0.065 · 输出 $3.90');
+  assert.equal(core.formatModelPriceSummary(row, 'sol', true), 'Sol 入 $0.65 / 缓 $0.065 / 出 $3.90');
+  assert.equal(core.formatModelPriceSummary(row, 'terra'), 'Terra 每 1M：输入 $0.70 · 输出 $4.20');
+  assert.equal(core.formatModelPriceSummary(row, 'luna'), '');
+  assert.equal(core.formatModelPriceSummary(row, 'none'), '');
 });
 
 test('normalizes the new provider series response for availability and user freshness', () => {
@@ -737,6 +810,60 @@ test('refreshes keys when empty, forced, or older than five minutes', () => {
   assert.equal(core.shouldRefreshKeys({ now: 10, lastFetchedAt: 1, keyCount: 2, intervalMs }), false);
 });
 
+test('uses the last completed refresh time to suppress adjacent foreground refreshes', () => {
+  const completedAt = 10_000;
+  const intervalMs = 30_000;
+
+  assert.equal(core.isRefreshDue(completedAt + intervalMs - 1, completedAt, intervalMs), false);
+  assert.equal(core.isRefreshDue(completedAt + intervalMs, completedAt, intervalMs), true);
+  assert.equal(core.isRefreshDue(completedAt + intervalMs + 1, completedAt, intervalMs), true);
+  assert.equal(core.isRefreshDue(completedAt, 0, intervalMs), true);
+});
+
+test('runs controller polling when expanded and due', () => {
+  assert.equal(core.shouldRunControllerRefresh({
+    active: true,
+    visible: true,
+    minimized: false,
+    autoSwitch: false,
+    loading: false,
+    now: 40_000,
+    lastCompletedAt: 10_000,
+    intervalMs: 30_000,
+  }), true);
+});
+
+test('pauses minimized controller polling unless automatic switching is enabled', () => {
+  const dueState = {
+    active: true,
+    visible: true,
+    minimized: true,
+    loading: false,
+    now: 40_000,
+    lastCompletedAt: 10_000,
+    intervalMs: 30_000,
+  };
+
+  assert.equal(core.shouldRunControllerRefresh({ ...dueState, autoSwitch: false }), false);
+  assert.equal(core.shouldRunControllerRefresh({ ...dueState, autoSwitch: true }), true);
+});
+
+test('does not duplicate a foreground controller refresh before the completion interval elapses', () => {
+  const recentlyCompleted = {
+    active: true,
+    visible: true,
+    minimized: false,
+    autoSwitch: false,
+    loading: false,
+    now: 39_999,
+    lastCompletedAt: 10_000,
+    intervalMs: 30_000,
+  };
+
+  assert.equal(core.shouldRunControllerRefresh(recentlyCompleted), false);
+  assert.equal(core.shouldRunControllerRefresh({ ...recentlyCompleted, now: 40_000 }), true);
+});
+
 test('logs periodic detection state only when it changes unless forced', () => {
   assert.equal(core.shouldLogTransition(null, 'price:14', false), true);
   assert.equal(core.shouldLogTransition('price:14', 'price:14', false), false);
@@ -904,6 +1031,201 @@ test('formats usage multipliers without unnecessary zeroes', () => {
   assert.equal(core.formatMultiplier(1), '×1');
   assert.equal(core.formatMultiplier(0.0123456), '×0.012346');
   assert.equal(core.formatMultiplier(Number.NaN), '');
+});
+
+test('parses exact and compact token counts', () => {
+  assert.equal(core.parseCompactTokenCount('14,735'), 14735);
+  assert.equal(core.parseCompactTokenCount('181.6K'), 181600);
+  assert.equal(core.parseCompactTokenCount('2.6m'), 2600000);
+  assert.equal(core.parseCompactTokenCount('1B'), 1000000000);
+  assert.equal(core.parseCompactTokenCount('0'), 0);
+  assert.equal(core.parseCompactTokenCount('-1'), null);
+  assert.equal(core.parseCompactTokenCount('12 tokens'), null);
+  assert.equal(core.parseCompactTokenCount(''), null);
+  assert.equal(core.getCompactTokenRoundingUncertainty('14,735'), 0);
+  assert.equal(core.getCompactTokenRoundingUncertainty('181.6K'), 50);
+  assert.equal(core.getCompactTokenRoundingUncertainty('2.6M'), 50000);
+  assert.equal(core.getCompactTokenRoundingUncertainty('1B'), 500000000);
+});
+
+test('parses two or three usage token values and rejects four-item rows', () => {
+  assert.deepEqual(core.parseUsageTokenBreakdown(['14,735', '40']), {
+    inputTokens: 14735,
+    outputTokens: 40,
+    cacheInputTokens: 0,
+  });
+  assert.deepEqual(core.parseUsageTokenBreakdown('8,280\n673\n181.6K'), {
+    inputTokens: 8280,
+    outputTokens: 673,
+    cacheInputTokens: 181600,
+  });
+  assert.equal(core.parseUsageTokenBreakdown(['1', '2', '3', '4']), null);
+  assert.equal(core.parseUsageTokenBreakdown(['1']), null);
+});
+
+test('recognizes exactly one supported usage model variant', () => {
+  assert.equal(core.getUsageModelVariant('gpt-5.6-sol'), 'sol');
+  assert.equal(core.getUsageModelVariant('GPT_5.6_TERRA'), 'terra');
+  assert.equal(core.getUsageModelVariant('gpt/5.6/luna-preview'), 'luna');
+  assert.equal(core.getUsageModelVariant('gpt-5.6'), null);
+  assert.equal(core.getUsageModelVariant('gpt-sol-terra'), null);
+  assert.equal(core.getUsageModelVariant('consolation'), null);
+});
+
+test('indexes usage prices by normalized group name and exact historical multiplier', () => {
+  const index = core.buildUsageModelPriceIndex([
+    {
+      planType: ' A003-Plus ',
+      priceMultiplier: 0.11,
+      model_prices: {
+        sol: { input_per_million: 0.65, cache_input_per_million: 0.065, output_per_million: 3.9 },
+      },
+    },
+    {
+      planType: 'A003-Plus',
+      priceMultiplier: 0.12,
+      model_prices: {
+        sol: { input_per_million: 0.7, cache_input_per_million: 0.07, output_per_million: 4.2 },
+      },
+    },
+  ]);
+
+  assert.deepEqual(core.findUsageModelPrice(index, 'a003-plus', 0.11, 'sol'), {
+    inputPerMillion: 0.65,
+    cacheInputPerMillion: 0.065,
+    outputPerMillion: 3.9,
+  });
+  assert.deepEqual(core.findUsageModelPrice(index, ' A003-PLUS ', 0.12, 'sol'), {
+    inputPerMillion: 0.7,
+    cacheInputPerMillion: 0.07,
+    outputPerMillion: 4.2,
+  });
+  assert.equal(core.findUsageModelPrice(index, 'A003-Plus', 0.1, 'sol'), null);
+  assert.equal(core.findUsageModelPrice(index, 'A003-Plus', null, 'sol'), null);
+  assert.equal(core.findUsageModelPrice(index, 'A003-Plus', 0.11, 'unknown'), null);
+});
+
+test('calculates usage cost for Sol, Terra, and Luna prices', () => {
+  const tokens = { inputTokens: 1000000, outputTokens: 1000000, cacheInputTokens: 1000000 };
+  const cases = [
+    [{ inputPerMillion: 0.65, cacheInputPerMillion: 0.065, outputPerMillion: 3.9 }, 4.615],
+    [{ inputPerMillion: 0.7, cacheInputPerMillion: 0.07, outputPerMillion: 4.2 }, 4.97],
+    [{ inputPerMillion: 0.8, cacheInputPerMillion: 0.08, outputPerMillion: 4.8 }, 5.68],
+  ];
+
+  for (const [price, expected] of cases) {
+    assert.ok(Math.abs(core.calculateUsageCost(tokens, price) - expected) < 1e-12);
+  }
+  assert.equal(core.calculateUsageCost(tokens, { inputPerMillion: 1 }), null);
+  assert.equal(core.parseUsageCost('$0.016765'), 0.016765);
+  assert.equal(core.parseUsageCost('0.016765'), null);
+  assert.equal(core.formatUsageCost(0.0167629), '$0.0167629');
+  assert.ok(Math.abs(core.calculateUsageCostRoundingTolerance(
+    ['2.6M', '1,000', '181.6K'],
+    { inputPerMillion: 0.65, cacheInputPerMillion: 0.065, outputPerMillion: 3.9 },
+  ) - 0.03250325) < 1e-12);
+});
+
+test('applies relative tolerance with a five-micro-dollar absolute floor', () => {
+  const withinRelative = core.classifyUsageCostDeviation(0.01009, 0.01, 1);
+  const outsideRelative = core.classifyUsageCostDeviation(0.01011, 0.01, 1);
+  const withinAbsoluteFloor = core.classifyUsageCostDeviation(0.000104, 0.0001, 1);
+  const outsideAbsoluteFloor = core.classifyUsageCostDeviation(0.000106, 0.0001, 1);
+  const lower = core.classifyUsageCostDeviation(0.008, 0.01, 1);
+
+  assert.equal(withinRelative.anomaly, false);
+  assert.equal(outsideRelative.anomaly, true);
+  assert.equal(outsideRelative.direction, 'high');
+  assert.equal(withinAbsoluteFloor.tolerance, 0.000005);
+  assert.equal(withinAbsoluteFloor.anomaly, false);
+  assert.equal(outsideAbsoluteFloor.anomaly, true);
+  assert.equal(lower.direction, 'low');
+  assert.equal(core.classifyUsageCostDeviation(-1, 1), null);
+});
+
+test('audits metered usage against the matching model and multiplier', () => {
+  const index = core.buildUsageModelPriceIndex([{
+    planType: 'A003-Plus',
+    priceMultiplier: 0.11,
+    model_prices: {
+      sol: { input_per_million: 0.65, cache_input_per_million: 0.065, output_per_million: 3.9 },
+      terra: { input_per_million: 0.7, cache_input_per_million: 0.07, output_per_million: 4.2 },
+      luna: { input_per_million: 0.8, cache_input_per_million: 0.08, output_per_million: 4.8 },
+    },
+  }]);
+  const expectedByModel = { sol: 4.615, terra: 4.97, luna: 5.68 };
+
+  for (const [model, expected] of Object.entries(expectedByModel)) {
+    const result = core.auditUsageCostRecord({
+      billingMode: '按量',
+      model: `gpt-5.6-${model}`,
+      groupName: ' a003-plus ',
+      groupText: 'A003-Plus / 0.11x',
+      tokenValues: ['1,000,000', '1,000,000', '1,000,000'],
+      actualCost: `$${expected}`,
+    }, index);
+
+    assert.equal(result.status, 'ok');
+    assert.equal(result.model, model);
+    assert.equal(result.multiplier, 0.11);
+    assert.ok(Math.abs(result.estimated - expected) < 1e-12);
+  }
+
+  const anomaly = core.auditUsageCostRecord({
+    billingMode: '按量',
+    model: 'gpt-5.6-sol',
+    groupName: 'A003-Plus',
+    groupMultiplier: '0.11x',
+    tokenValues: ['1,000,000', '1,000,000', '1,000,000'],
+    actualCost: '$4.70',
+  }, index);
+  assert.equal(anomaly.status, 'anomaly');
+  assert.equal(anomaly.direction, 'high');
+
+  const compactRounding = core.auditUsageCostRecord({
+    billingMode: '按量',
+    model: 'gpt-5.6-sol',
+    groupName: 'A003-Plus',
+    groupMultiplier: '0.11x',
+    tokenValues: ['2.6M', '1,000', '0'],
+    actualCost: '$1.72',
+  }, index);
+  assert.equal(compactRounding.status, 'ok');
+  assert.ok(compactRounding.roundingTolerance > 0.03);
+});
+
+test('skips disabled, non-metered, incomplete, and historical-rate-mismatched usage', () => {
+  const index = core.buildUsageModelPriceIndex([{
+    planType: 'A003-Plus',
+    priceMultiplier: 0.12,
+    model_prices: {
+      sol: { input_per_million: 0.7, cache_input_per_million: 0.07, output_per_million: 4.2 },
+    },
+  }]);
+  const baseRecord = {
+    billingMode: '按量',
+    model: 'gpt-5.6-sol',
+    groupName: 'A003-Plus',
+    groupMultiplier: '0.12x',
+    tokenValues: ['1M', '1M'],
+    actualCost: '$4.90',
+  };
+
+  assert.deepEqual(core.auditUsageCostRecord(baseRecord, index, { usageCostAuditEnabled: false }), {
+    status: 'skipped', reason: 'disabled',
+  });
+  assert.deepEqual(core.auditUsageCostRecord({ ...baseRecord, billingMode: '包月' }, index), {
+    status: 'skipped', reason: 'billing_mode',
+  });
+  assert.deepEqual(core.auditUsageCostRecord({ ...baseRecord, groupMultiplier: '0.11x' }, index), {
+    status: 'skipped', reason: 'missing_data',
+  });
+  assert.deepEqual(core.auditUsageCostRecord({ ...baseRecord, tokenValues: ['1', '2', '3', '4'] }, index), {
+    status: 'skipped', reason: 'missing_data',
+  });
+  assert.deepEqual(core.auditUsageCostRecord({ ...baseRecord, model: 'gpt-5.6' }, index), {
+    status: 'skipped', reason: 'missing_data',
+  });
 });
 
 test('enables the panel on every AIHub page only while logged in', () => {
