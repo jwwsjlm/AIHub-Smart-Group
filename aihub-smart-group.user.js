@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.30
+// @version      0.14.31
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.30';
+  const SCRIPT_VERSION = '0.14.31';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -277,6 +277,7 @@
     'availabilityMode',
     'minSuccessPoints10m',
     'minConsecutiveSuccesses10m',
+    'minSla',
     'requireNoWarnings',
     'excludedGroupKeywords',
   ]);
@@ -294,6 +295,7 @@
     availabilityMode: 'percent',
     minSuccessPoints10m: 1,
     minConsecutiveSuccesses10m: 2,
+    minSla: 0,
     latencySource: 'probe',
     userTtftWindow: 'summary',
     minUserTtftSamples: 1,
@@ -507,6 +509,7 @@
       availabilityMode: normalizeAvailabilityMode(source.availabilityMode),
       minSuccessPoints10m: Math.round(clamp(numberOr(source.minSuccessPoints10m, DEFAULT_CONFIG.minSuccessPoints10m), 1, 60)),
       minConsecutiveSuccesses10m: Math.round(clamp(numberOr(source.minConsecutiveSuccesses10m, DEFAULT_CONFIG.minConsecutiveSuccesses10m), 1, 60)),
+      minSla: clamp(numberOr(source.minSla, DEFAULT_CONFIG.minSla), 0, 1),
       latencySource: normalizeLatencySource(source.latencySource),
       userTtftWindow: normalizeUserTtftWindow(source.userTtftWindow),
       minUserTtftSamples: normalizeUserTtftSampleCount(source.minUserTtftSamples),
@@ -546,6 +549,7 @@
       minSuccess10m: normalized.minSuccess10m,
       minSuccessPoints10m: normalized.minSuccessPoints10m,
       minConsecutiveSuccesses10m: normalized.minConsecutiveSuccesses10m,
+      minSla: normalized.minSla,
       requireNoWarnings: normalized.requireNoWarnings,
       excludedGroupKeywords: normalized.excludedGroupKeywords,
     });
@@ -1812,6 +1816,7 @@
       recommendationPriceBasis: normalizedConfig.mode === 'price' ? normalizedConfig.recommendationPriceBasis : 'nominal',
       availabilityMode: normalizedConfig.availabilityMode,
       availabilityThreshold,
+      minSla: normalizedConfig.minSla,
       requireNoWarnings: normalizedConfig.requireNoWarnings,
       excludedGroupKeywords: normalizedConfig.excludedGroupKeywords,
       latencySource: normalizedConfig.latencySource,
@@ -1834,6 +1839,8 @@
       warnings: 0,
       modelDetectionWarnings: 0,
       keywords: 0,
+      slaUnavailable: 0,
+      slaLow: 0,
       priceMetricUnavailable: 0,
       priceMetricUnavailableReasons: { notReady: 0, stale: 0, missing: 0 },
       userLatencySampleFallbacks: 0,
@@ -1873,6 +1880,12 @@
       if (excludedKeywords.some((keyword) => name.toLocaleLowerCase().includes(keyword))) {
         counts.keywords += 1;
         continue;
+      }
+      if (normalizedConfig.minSla > 0) {
+        const sla = normalizeSla(row.sla);
+        if (sla === null) counts.slaUnavailable += 1;
+        else if (sla < normalizedConfig.minSla) counts.slaLow += 1;
+        if (sla === null || sla < normalizedConfig.minSla) continue;
       }
       const rankingPrice = getRecommendationPriceMetric(row, rankingPriceBasis);
       if (!rankingPrice.available) {
@@ -2874,6 +2887,7 @@
       const payload = await apiRequest('/public/providers?timezone=Asia%2FShanghai', options);
       return normalizeMonitorSummaryPayload(payload);
     } catch (primaryError) {
+      if (![404, 410].includes(Number(primaryError?.status))) throw primaryError;
       try {
         return normalizeMonitorSummaryPayload(await apiRequest('/public/monitor/summary', options));
       } catch {
@@ -3435,6 +3449,7 @@
                   <label class="asg-setting-wide" data-availability-setting="percent" title="可自行修改，0.1 表示 10%">最近10分钟最低可用率（默认10%）<input type="number" min="0" max="1" step="0.01" data-setting="minSuccess10m"></label>
                   <label class="asg-setting-wide" data-availability-setting="successes">最近10分钟至少成功监控点数<input type="number" min="1" max="60" step="1" data-setting="minSuccessPoints10m"></label>
                   <label class="asg-setting-wide" data-availability-setting="consecutive">连续成功监控点数<input type="number" min="1" max="60" step="1" data-setting="minConsecutiveSuccesses10m"></label>
+                  <label class="asg-setting-wide" title="只保留历史 SLA 不低于该比例的供应商；设为 0 时不筛选，设置阈值后缺失 SLA 的供应商也会被排除">最低历史 SLA（0 表示不筛选）<input type="number" min="0" max="1" step="0.01" data-setting="minSla"></label>
                   <label class="asg-setting-wide" title="名称包含任一关键词的分组不会参与推荐或切换">排除分组关键词（使用 | 分隔）<input type="text" data-setting="excludedGroupKeywords" placeholder="例如 free|unstable"></label>
                   <span class="asg-setting-preview asg-setting-wide" data-field="excluded-preview" aria-live="polite"></span>
                 </div>
@@ -3719,6 +3734,7 @@
         || normalizedDraft.availabilityMode !== this.config.availabilityMode
         || normalizedDraft.minSuccessPoints10m !== this.config.minSuccessPoints10m
         || normalizedDraft.minConsecutiveSuccesses10m !== this.config.minConsecutiveSuccesses10m
+        || normalizedDraft.minSla !== this.config.minSla
         || normalizedDraft.requireNoWarnings !== this.config.requireNoWarnings
         || normalizedDraft.excludedGroupKeywords !== this.config.excludedGroupKeywords
         || normalizedDraft.latencySource !== this.config.latencySource
@@ -4105,6 +4121,10 @@
           && this.config.recommendationPriceBasis !== 'nominal'
           && this.candidateDiagnostics?.counts?.priceMetricUnavailable > 0) {
           empty.textContent = `没有具备可用${RECOMMENDATION_PRICE_BASIS_LABELS[this.config.recommendationPriceBasis]}且满足可靠性条件的分组`;
+        } else if (this.config.minSla > 0
+          && ((this.candidateDiagnostics?.counts?.slaUnavailable || 0) > 0
+            || (this.candidateDiagnostics?.counts?.slaLow || 0) > 0)) {
+          empty.textContent = `没有满足最低历史 SLA ${(this.config.minSla * 100).toFixed(1)}% 且符合当前可靠性条件的分组`;
         } else {
           empty.textContent = '没有符合当前可靠性条件的分组';
         }
@@ -4166,12 +4186,14 @@
       diagnostic.className = 'asg-recommend-meta';
       const overLimit = this.config.mode === 'balance' ? Math.max(0, Number(diagnostics.eligible || 0) - this.ranked.length) : 0;
       const detectionWarnings = Number(diagnostics.modelDetectionWarnings) || 0;
+      const slaUnavailable = Number(diagnostics.slaUnavailable) || 0;
+      const slaLow = Number(diagnostics.slaLow) || 0;
       const priceUnavailable = Number(diagnostics.priceMetricUnavailable) || 0;
       const priceUnavailableReasons = formatRecommendationPriceUnavailableReasons(diagnostics.priceMetricUnavailableReasons);
       const userLatencySampleFallbacks = this.config.latencySource === 'user'
         ? Number(diagnostics.userLatencySampleFallbacks) || 0
         : 0;
-      diagnostic.textContent = `参与比较 ${this.ranked.length} · 排除关键词 ${diagnostics.keywords || 0} · 不可用 ${diagnostics.unavailable || 0} · 可用率不足 ${diagnostics.lowSuccess || 0} · 监控警告 ${diagnostics.warnings || 0}${detectionWarnings ? `（模型检测异常 ${detectionWarnings}）` : ''}${userLatencySampleFallbacks ? ` · 真实用户样本不足回退 ${userLatencySampleFallbacks}` : ''}${priceUnavailable ? ` · 价格数据不可用 ${priceUnavailable}${priceUnavailableReasons ? `（${priceUnavailableReasons}）` : ''}` : ''}${overLimit ? ` · 超过倍率上限 ${overLimit}` : ''}`;
+      diagnostic.textContent = `参与比较 ${this.ranked.length} · 排除关键词 ${diagnostics.keywords || 0} · 不可用 ${diagnostics.unavailable || 0} · 可用率不足 ${diagnostics.lowSuccess || 0} · 监控警告 ${diagnostics.warnings || 0}${detectionWarnings ? `（模型检测异常 ${detectionWarnings}）` : ''}${slaUnavailable ? ` · SLA 无数据排除 ${slaUnavailable}` : ''}${slaLow ? ` · SLA 不足排除 ${slaLow}` : ''}${userLatencySampleFallbacks ? ` · 真实用户样本不足回退 ${userLatencySampleFallbacks}` : ''}${priceUnavailable ? ` · 价格数据不可用 ${priceUnavailable}${priceUnavailableReasons ? `（${priceUnavailableReasons}）` : ''}` : ''}${overLimit ? ` · 超过倍率上限 ${overLimit}` : ''}`;
       recommend.appendChild(diagnostic);
       const freshness = document.createElement('div');
       freshness.className = `asg-monitor-age${this.monitorFreshness.stale ? ' asg-stale' : ''}`;

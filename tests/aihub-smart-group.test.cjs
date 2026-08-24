@@ -386,6 +386,9 @@ test('normalizes model price and usage cost audit settings', () => {
   assert.equal(core.normalizeConfig({ modelPriceModel: 'unexpected' }).modelPriceModel, 'sol');
   assert.equal(core.normalizeConfig({ usageCostAuditDisplay: 'unexpected' }).usageCostAuditDisplay, 'anomalies');
   assert.equal(core.normalizeConfig({ usageCostAuditTolerancePercent: 999 }).usageCostAuditTolerancePercent, 100);
+  assert.equal(core.DEFAULT_CONFIG.minSla, 0);
+  assert.equal(core.normalizeConfig({ minSla: 0.82 }).minSla, 0.82);
+  assert.equal(core.normalizeConfig({ minSla: 2 }).minSla, 1);
 });
 
 test('defaults provider hall auto sorting to multiplier priority', () => {
@@ -471,6 +474,11 @@ test('exposes saved custom provider weights only for custom sorting', () => {
 test('exposes selectable real-user TTFT windows in settings', () => {
   assert.match(userscriptSource, /data-setting="userTtftWindow"/);
   assert.match(userscriptSource, /<option value="summary">AIHub 页面汇总（默认）<\/option><option value="10m">近 10 分钟<\/option><option value="1h">近 1 小时<\/option><option value="6h">近 6 小时<\/option>/);
+});
+
+test('exposes the optional historical SLA threshold in reliability settings', () => {
+  assert.match(userscriptSource, /data-setting="minSla"/);
+  assert.match(userscriptSource, /最低历史 SLA（0 表示不筛选）/);
 });
 
 test('updates only settings previews affected by the edited field', () => {
@@ -2029,11 +2037,72 @@ test('clears a timed-out shared provider request so a later call can retry', asy
 
   try {
     await assert.rejects(core.fetchMonitorSummary({ force: true, timeoutMs: 5 }), /请求超时/);
-    assert.equal(requestCount, 2);
+    assert.equal(requestCount, 1);
     succeed = true;
     const retried = await core.fetchMonitorSummary({ force: true, timeoutMs: 5 });
-    assert.equal(requestCount, 3);
+    assert.equal(requestCount, 2);
     assert.equal(retried.apis[0].planType, 'retry');
+  } finally {
+    core.clearMonitorSummaryCache();
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = originalLocalStorage;
+  }
+});
+
+test('uses the legacy provider summary endpoint only when the new endpoint is removed', async () => {
+  const originalWindow = globalThis.window;
+  const originalLocalStorage = globalThis.localStorage;
+  const requests = [];
+  const storage = { getItem: () => '' };
+  globalThis.localStorage = storage;
+  globalThis.window = {
+    localStorage: storage,
+    fetch: async (url) => {
+      requests.push(url);
+      if (url.includes('/public/providers?')) {
+        return { ok: false, status: 404, json: async () => ({ detail: 'removed' }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ data: { items: [{ group_id: 1, code: 'legacy' }] } }) };
+    },
+  };
+  core.clearMonitorSummaryCache();
+
+  try {
+    const summary = await core.fetchMonitorSummary({ force: true });
+    assert.deepEqual(requests, [
+      '/api/v1/public/providers?timezone=Asia%2FShanghai',
+      '/api/v1/public/monitor/summary',
+    ]);
+    assert.equal(summary.apis[0].planType, 'legacy');
+  } finally {
+    core.clearMonitorSummaryCache();
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = originalLocalStorage;
+  }
+});
+
+test('does not duplicate provider summary requests after a new-endpoint server error', async () => {
+  const originalWindow = globalThis.window;
+  const originalLocalStorage = globalThis.localStorage;
+  let requestCount = 0;
+  const storage = { getItem: () => '' };
+  globalThis.localStorage = storage;
+  globalThis.window = {
+    localStorage: storage,
+    fetch: async () => {
+      requestCount += 1;
+      return { ok: false, status: 503, json: async () => ({ detail: 'temporary' }) };
+    },
+  };
+  core.clearMonitorSummaryCache();
+
+  try {
+    await assert.rejects(core.fetchMonitorSummary({ force: true }), /temporary/);
+    assert.equal(requestCount, 1);
   } finally {
     core.clearMonitorSummaryCache();
     if (originalWindow === undefined) delete globalThis.window;
@@ -2157,12 +2226,28 @@ test('reports mutually exclusive candidate diagnostics', () => {
     warnings: 1,
     modelDetectionWarnings: 0,
     keywords: 1,
+    slaUnavailable: 0,
+    slaLow: 0,
     priceMetricUnavailable: 0,
     priceMetricUnavailableReasons: { notReady: 0, stale: 0, missing: 0 },
     userLatencySampleFallbacks: 0,
     eligible: 1,
   });
   assert.deepEqual(result.candidates.map((row) => row.name), ['eligible']);
+});
+
+test('filters candidates by optional historical SLA without changing the default', () => {
+  const rows = [
+    { planType: 'high-sla', group_id: 1, priceMultiplier: 0.01, available: true, sla: 0.99, successRates: { '10m': 1 }, warningReasons: [] },
+    { planType: 'low-sla', group_id: 2, priceMultiplier: 0.01, available: true, sla: 0.72, successRates: { '10m': 1 }, warningReasons: [] },
+    { planType: 'missing-sla', group_id: 3, priceMultiplier: 0.01, available: true, successRates: { '10m': 1 }, warningReasons: [] },
+  ];
+  const baseline = core.analyzeCandidates(rows, core.DEFAULT_CONFIG);
+  assert.equal(baseline.candidates.length, 3);
+  const filtered = core.analyzeCandidates(rows, { ...core.DEFAULT_CONFIG, minSla: 0.8 });
+  assert.deepEqual(filtered.candidates.map((row) => row.name), ['high-sla']);
+  assert.equal(filtered.counts.slaLow, 1);
+  assert.equal(filtered.counts.slaUnavailable, 1);
 });
 
 test('formats monitor freshness and treats invalid timestamps as stale', () => {
