@@ -430,9 +430,10 @@ test('normalizes the new provider summary response and keeps both TTFT metrics',
     planType: row.planType,
     priceMultiplier: row.priceMultiplier,
     probe: row.probeFirstTokenLatencyMs,
+    e2e: row.probeE2eLatencyMs,
     user: row.userAvgTtftMs,
     samples: row.userSampleCount,
-  })), [{ id: 34, planType: 'A001-Plus', priceMultiplier: 0.06, probe: 4373, user: 6085.5, samples: 16 }]);
+  })), [{ id: 34, planType: 'A001-Plus', priceMultiplier: 0.06, probe: 4373, e2e: 4500, user: 6085.5, samples: 16 }]);
 });
 
 test('normalizes the new cache, model health, and model detection fields', () => {
@@ -461,6 +462,18 @@ test('normalizes the new cache, model health, and model detection fields', () =>
     unknown: 0,
     total: 3,
   });
+});
+
+test('normalizes and deduplicates model detection reason code aliases', () => {
+  const detection = core.normalizeModelDetection({
+    status: 'suspected',
+    reason_codes: ['MIXED_VARIANT_SIGNAL', ' ', 'future_reason_code'],
+    reasonCodes: ['mixed_variant_signal', 'FINAL_REQUEST_ERRORS', null],
+  });
+
+  assert.deepEqual(detection.reasonCodes, ['MIXED_VARIANT_SIGNAL', 'future_reason_code', 'FINAL_REQUEST_ERRORS']);
+  assert.deepEqual(detection.reason_codes, detection.reasonCodes);
+  assert.deepEqual(core.normalizeModelDetectionReasonCodes(['A', 'a', '', null], ['B', 'A']), ['A', 'B']);
 });
 
 test('normalizes effective pricing, runtime cache, throughput, and provider capability fields', () => {
@@ -939,17 +952,30 @@ test('builds a weighted conservative provider series fallback from summary histo
   const failedAt = Date.parse('2026-08-24T02:13:00Z');
 
   assert.deepEqual(fallback.seriesByApiId['7'], [
-    [operationalAt, 1],
-    [operationalAt, 1],
-    [operationalAt, 1],
-    [degradedAt, 0],
-    [degradedAt, 0],
-    [failedAt, 0],
+    [operationalAt, 1, 3],
+    [degradedAt, 0, 2],
+    [failedAt, 0, 1],
   ]);
   assert.equal(fallback.range, 'summary-history');
   assert.equal(core.hasMonitorSeriesData(fallback), true);
   assert.equal(core.monitorHistoryStatusToAvailability('degraded'), 0);
   assert.equal(core.monitorHistoryStatusToAvailability('unknown'), null);
+});
+
+test('keeps large summary histories compact and caps aggregate sample weights', () => {
+  const history = Array.from({ length: 2_000 }, (_, index) => ({
+    timestamp: index + 1,
+    status: 'operational',
+    sampleCount: 1_000_000,
+  }));
+  const fallback = core.buildMonitorSeriesFromSummary({
+    generatedAt: '2026-08-24T02:20:00Z',
+    apis: [{ id: 'bulk', history }],
+  });
+
+  assert.equal(fallback.seriesByApiId.bulk.length, history.length);
+  assert.deepEqual(fallback.seriesByApiId.bulk[0], [1, 1, 60]);
+  assert.deepEqual(fallback.seriesByApiId.bulk.at(-1), [2_000, 1, 60]);
 });
 
 test('keeps slightly newer summary history samples inside the availability window', () => {
@@ -982,26 +1008,36 @@ test('keeps slightly newer summary history samples inside the availability windo
   assert.equal(core.getMonitorSeriesWindowAnchor({ seriesByApiId: {}, userTtftByGroupId: {} }), null);
 });
 
-test('merges provider series by filling only missing or empty groups from summary history', () => {
+test('merges, sorts, and deduplicates primary and fallback provider samples by timestamp', () => {
+  const primaryTenFieldSample = [300, 0, 9_999, 4, 5, 6, 7, 8, 9, 10];
   const primary = core.normalizeMonitorSeriesPayload({ data: {
     generated_at: '2026-08-24T02:20:00Z',
     range: '6h',
     items: [
-      { group_id: 1, probe: [[100, 1]], user_ttft: [{ at: '2026-08-24T02:19:00Z' }] },
+      { group_id: 1, probe: [primaryTenFieldSample, [100, 1]], user_ttft: [{ at: '2026-08-24T02:19:00Z' }] },
       { group_id: 2, probe: [] },
     ],
   } });
   const fallback = {
     generatedAt: '2026-08-24T02:21:00Z',
     range: 'summary-history',
-    seriesByApiId: { 1: [[50, 0]], 2: [[60, 1]], 3: [[70, 0]] },
+    seriesByApiId: {
+      1: [[200, 1, 3], [50, 0, 2], [100, 0, 4], [300, 1, 5]],
+      2: [[60, 1, 2]],
+      3: [[70, 0, 1]],
+    },
     userTtftByGroupId: { 2: [{ at: '2026-08-24T02:17:00Z' }] },
   };
   const merged = core.mergeMonitorSeries(primary, fallback);
 
-  assert.deepEqual(merged.seriesByApiId['1'], [[100, 1]]);
-  assert.deepEqual(merged.seriesByApiId['2'], [[60, 1]]);
-  assert.deepEqual(merged.seriesByApiId['3'], [[70, 0]]);
+  assert.deepEqual(merged.seriesByApiId['1'], [
+    [50, 0, 2],
+    [100, 1],
+    [200, 1, 3],
+    primaryTenFieldSample,
+  ]);
+  assert.deepEqual(merged.seriesByApiId['2'], [[60, 1, 2]]);
+  assert.deepEqual(merged.seriesByApiId['3'], [[70, 0, 1]]);
   assert.equal(merged.userTtftByGroupId['1'][0].at, '2026-08-24T02:19:00Z');
   assert.equal(merged.userTtftByGroupId['2'][0].at, '2026-08-24T02:17:00Z');
   assert.equal(merged.range, '6h');
@@ -1210,6 +1246,9 @@ test('selects real-user TTFT when sampled and falls back to probe TTFT without s
 
   assert.deepEqual(core.getLatencyMetric(sampled, 'user'), { value: 1200, source: 'user', fallback: false });
   assert.deepEqual(core.getLatencyMetric(empty, 'user'), { value: 900, source: 'probe', fallback: true });
+  assert.equal(core.getUserLatencySampleCount(sampled), 8);
+  assert.equal(core.getUserLatencySampleCount(empty), null);
+  assert.equal(core.formatLatencyMetric(sampled, 'user'), '运行时 P50 TTFT 1200 ms（8 条）');
   assert.equal(core.formatLatencyMetric(empty, 'user'), '运行时 P50 TTFT 900 ms（回退探测）');
 });
 
@@ -1351,6 +1390,32 @@ test('computes availability from valid monitor samples in the latest 10 minutes'
   assert.equal(enriched[1].recentSampleCount, 0);
 });
 
+test('weights compact fallback samples without treating live 10-field samples as weighted', () => {
+  const now = Date.parse('2026-08-24T05:10:00Z');
+  const liveTenFieldFailure = [now - 6 * 60_000, 0, 9_999, 4, 5, 6, 7, 8, 9, 10];
+  const series = {
+    generatedAt: new Date(now).toISOString(),
+    seriesByApiId: {
+      weighted: [
+        [now - 8 * 60_000, 1, 1_000_000],
+        [now - 7 * 60_000, 0, 2],
+        liveTenFieldFailure,
+        [now - 5 * 60_000, 1],
+        [now - 4 * 60_000, 1, 4.9],
+        [now - 3 * 60_000, 0, 0],
+        [now - 2 * 60_000, 1, -2],
+        [now - 1 * 60_000, 1, Number.NaN],
+      ],
+    },
+  };
+
+  const [enriched] = core.attachRecentAvailability([{ id: 'weighted', successRates: {} }], series);
+  assert.equal(enriched.recentSampleCount, 68);
+  assert.equal(enriched.recentSuccessCount, 65);
+  assert.equal(enriched.recentConsecutiveSuccessCount, 5);
+  assert.equal(enriched.successRates['10m'], 65 / 68);
+});
+
 test('selects AIHub candidates for price, balance, and speed modes', () => {
   const rows = [
     { planType: 'cheap', group_id: 1, priceMultiplier: 0.04, available: true, successRates: { '10m': 1, '24h': 1 }, firstTokenLatencyMs: 500, warningReasons: [] },
@@ -1361,6 +1426,155 @@ test('selects AIHub candidates for price, balance, and speed modes', () => {
   assert.equal(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'price' })[0].planType, 'cheap');
   assert.equal(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'balance', balanceMaxPrice: 0.05 })[0].planType, 'balanced');
   assert.equal(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'speed' })[0].planType, 'fast');
+});
+
+test('binds reusable candidate analyses to the current rows and relevant normalized settings', () => {
+  const rows = [
+    { planType: 'cached', group_id: 1, priceMultiplier: 0.04, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 100 },
+  ];
+  const config = { ...core.DEFAULT_CONFIG, mode: 'balance', balanceMaxPrice: 0.1 };
+  const analysis = core.analyzeCandidates(rows, config);
+
+  assert.equal(analysis.sourceRows, rows);
+  assert.equal(analysis.signature, core.getCandidateAnalysisSignature(config));
+  assert.equal(
+    core.getCandidateAnalysisSignature(config),
+    core.getCandidateAnalysisSignature({ ...config, balanceMaxPrice: 0.05 }),
+  );
+  analysis.candidates[0].cachedOnly = true;
+  assert.equal(core.rankCandidates(rows, { ...config, balanceMaxPrice: 0.05 }, analysis)[0].cachedOnly, true);
+
+  const replacementRows = [
+    { planType: 'replacement', group_id: 2, priceMultiplier: 0.03, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 50 },
+  ];
+  assert.equal(core.rankCandidates(replacementRows, config, analysis)[0].planType, 'replacement');
+  assert.equal(core.rankCandidates(rows, { ...config, latencySource: 'user' }, analysis)[0].cachedOnly, undefined);
+
+  const signatureVariants = [
+    { ...config, mode: 'price', recommendationPriceBasis: 'effectiveInput1h' },
+    { ...config, availabilityMode: 'successes', minSuccessPoints10m: 2 },
+    { ...config, minSuccess10m: 0.5 },
+    { ...config, requireNoWarnings: false },
+    { ...config, excludedGroupKeywords: 'cached' },
+    { ...config, latencySource: 'user' },
+  ];
+  for (const variant of signatureVariants) {
+    assert.notEqual(core.getCandidateAnalysisSignature(config), core.getCandidateAnalysisSignature(variant));
+  }
+});
+
+test('reanalyzes cached candidates when the price basis changes', () => {
+  const runtimeCache1h = { ready: true, stale: false };
+  const rows = [
+    {
+      planType: 'nominal-winner', group_id: 1, priceMultiplier: 0.01, available: true,
+      successRates: { '10m': 1 }, effectiveInputPricePerMillion1h: 0.9, runtimeCache1h,
+    },
+    {
+      planType: 'effective-winner', group_id: 2, priceMultiplier: 0.02, available: true,
+      successRates: { '10m': 1 }, effectiveInputPricePerMillion1h: 0.1, runtimeCache1h,
+    },
+  ];
+  const nominalConfig = { ...core.DEFAULT_CONFIG, mode: 'price', recommendationPriceBasis: 'nominal' };
+  const effectiveConfig = { ...nominalConfig, recommendationPriceBasis: 'effectiveInput1h' };
+  const nominalAnalysis = core.analyzeCandidates(rows, nominalConfig);
+
+  assert.equal(core.rankCandidates(rows, nominalConfig, nominalAnalysis)[0].planType, 'nominal-winner');
+  assert.equal(core.rankCandidates(rows, effectiveConfig, nominalAnalysis)[0].planType, 'effective-winner');
+});
+
+test('does not treat a missing availability value as zero when the threshold is zero', () => {
+  const rows = [
+    { planType: 'missing-sample', group_id: 1, priceMultiplier: 0.01, available: true, successRates: { '10m': null } },
+  ];
+  const config = { ...core.DEFAULT_CONFIG, minSuccess10m: 0 };
+  const analysis = core.analyzeCandidates(rows, config);
+
+  assert.equal(analysis.counts.lowSuccess, 1);
+  assert.deepEqual(core.rankCandidates(rows, config, analysis), []);
+});
+
+test('revalidates current price, balance, and speed winners before switching', () => {
+  const cases = [
+    {
+      mode: 'price',
+      config: { ...core.DEFAULT_CONFIG, mode: 'price' },
+      rows: [
+        { planType: 'price-target', group_id: 1, priceMultiplier: 0.01, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 500 },
+        { planType: 'price-other', group_id: 2, priceMultiplier: 0.02, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 100 },
+      ],
+      targetGroupId: 1,
+    },
+    {
+      mode: 'balance',
+      config: { ...core.DEFAULT_CONFIG, mode: 'balance', balanceMaxPrice: 0.05 },
+      rows: [
+        { planType: 'balance-target', group_id: 2, priceMultiplier: 0.04, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 100 },
+        { planType: 'balance-other', group_id: 1, priceMultiplier: 0.03, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 500 },
+        { planType: 'over-limit', group_id: 3, priceMultiplier: 0.08, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 10 },
+      ],
+      targetGroupId: 2,
+    },
+    {
+      mode: 'speed',
+      config: { ...core.DEFAULT_CONFIG, mode: 'speed' },
+      rows: [
+        { planType: 'speed-target', group_id: 3, priceMultiplier: 0.08, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 50 },
+        { planType: 'speed-other', group_id: 1, priceMultiplier: 0.01, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 500 },
+      ],
+      targetGroupId: 3,
+    },
+  ];
+
+  for (const entry of cases) {
+    const result = core.reanalyzeRecommendationForSwitch(
+      entry.rows,
+      entry.config,
+      { groupId: entry.targetGroupId, stable: true },
+      entry.targetGroupId,
+    );
+    assert.equal(result.reason, '', entry.mode);
+    assert.equal(result.winner.groupId, entry.targetGroupId, entry.mode);
+    assert.equal(result.target.groupId, entry.targetGroupId, entry.mode);
+    assert.equal(result.analysis.sourceRows, entry.rows, entry.mode);
+  }
+});
+
+test('blocks a switch when the previous target is no longer eligible', () => {
+  const rows = [
+    { planType: 'unavailable-target', group_id: 1, priceMultiplier: 0.01, available: false, successRates: { '10m': 1 }, firstTokenLatencyMs: 100 },
+    { planType: 'available-other', group_id: 2, priceMultiplier: 0.02, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 200 },
+  ];
+  const result = core.reanalyzeRecommendationForSwitch(rows, { ...core.DEFAULT_CONFIG, mode: 'price' }, { groupId: 1, stable: true }, 1);
+
+  assert.equal(result.reason, '推荐目标已不再符合当前筛选条件，请重新检测');
+  assert.equal(result.target, null);
+  assert.equal(result.winner.groupId, 2);
+});
+
+test('blocks a switch when a newly ranked group overtakes the stable target', () => {
+  const rows = [
+    { planType: 'old-target', group_id: 1, priceMultiplier: 0.04, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 200 },
+    { planType: 'new-winner', group_id: 2, priceMultiplier: 0.04, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 100 },
+  ];
+  const config = { ...core.DEFAULT_CONFIG, mode: 'balance', balanceMaxPrice: 0.05 };
+  const result = core.reanalyzeRecommendationForSwitch(rows, config, { groupId: 1, stable: true }, 1);
+
+  assert.equal(result.reason, '推荐第一名已变化，请重新检测');
+  assert.equal(result.target.groupId, 1);
+  assert.equal(result.winner.groupId, 2);
+});
+
+test('blocks a switch when the stable group and target group disagree', () => {
+  const rows = [
+    { planType: 'speed-target', group_id: 1, priceMultiplier: 0.04, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 100 },
+    { planType: 'stable-other', group_id: 2, priceMultiplier: 0.03, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 200 },
+  ];
+  const result = core.reanalyzeRecommendationForSwitch(rows, { ...core.DEFAULT_CONFIG, mode: 'speed' }, { groupId: 2, stable: true }, 1);
+
+  assert.equal(result.reason, '稳定推荐与切换目标不一致，请重新检测');
+  assert.equal(result.target.groupId, 1);
+  assert.equal(result.winner.groupId, 1);
 });
 
 test('treats explicit insufficient model evidence as a monitor warning', () => {
@@ -1395,6 +1609,48 @@ test('normalizes and excludes all explicit non-passing model detection states', 
     assert.equal(core.hasModelDetectionWarning(row), true);
     assert.deepEqual(core.rankCandidates([row], core.DEFAULT_CONFIG), []);
   }
+});
+
+test('formats readable model detection reasons without changing warning semantics', () => {
+  const suspected = {
+    status: 'suspected',
+    applicable: true,
+    reason_codes: [
+      'COT_NOT_RUN',
+      'MIXED_VARIANT_SIGNAL',
+      'JUICE_PASSED',
+      'VARIANT_MISMATCH',
+      'future_reason_code',
+    ],
+  };
+
+  assert.equal(core.getModelDetectionReasonLabel('create_failed'), '检测任务创建失败');
+  assert.equal(core.getModelDetectionReasonLabel('future_reason_code'), 'Future reason code');
+  assert.deepEqual(core.getModelDetectionReasonLabels(suspected, false), [
+    '检测到不同模型特征',
+    '检测模型与声明模型不一致',
+    'Future reason code',
+  ]);
+  assert.equal(core.formatModelDetectionReasonSummary(suspected), '检测到不同模型特征；检测模型与声明模型不一致');
+  assert.equal(core.formatModelDetectionSummary(suspected), '疑似（检测到不同模型特征；检测模型与声明模型不一致）');
+  assert.equal(
+    core.formatModelDetectionTitle(suspected),
+    '疑似：本次仅运行 Juice 指纹检测，未运行 COT 检测；检测到不同模型特征；Juice 指纹检测通过；检测模型与声明模型不一致；Future reason code',
+  );
+  assert.equal(core.hasModelDetectionWarning({ model_detection: suspected }), true);
+
+  const informationalOnly = { status: 'not_tested', reasonCodes: ['COT_NOT_RUN', 'JUICE_PASSED'] };
+  assert.equal(core.formatModelDetectionSummary(informationalOnly), '未检测');
+  assert.equal(core.formatModelDetectionTitle(informationalOnly), '未检测：本次仅运行 Juice 指纹检测，未运行 COT 检测；Juice 指纹检测通过');
+  assert.equal(core.formatModelDetectionReasonSummary({
+    status: 'suspected',
+    reason_codes: ['V4_PASSED', 'FINAL_REQUEST_ERRORS'],
+  }), '部分最终请求失败');
+
+  const passed = { status: 'passed', reason_codes: ['JUICE_PASSED', 'COT_NOT_RUN'] };
+  assert.equal(core.formatModelDetectionSummary(passed), '检测通过');
+  assert.deepEqual(core.getModelDetectionReasonLabels(passed), []);
+  assert.equal(core.formatModelDetectionTitle(passed), '');
 });
 
 test('fails closed for incomplete applicable detections while preserving missing-field compatibility', () => {
@@ -2205,6 +2461,7 @@ test('maps current group metrics by group id without filtering unavailable rows'
       effectiveMultiplier: 0.05,
       effectiveMultiplierReady: true,
       outputTps: 55,
+      model_detection: { status: 'suspected', reason_codes: ['MIXED_VARIANT_SIGNAL'] },
     },
     { group_id: 21, priceMultiplier: null, firstTokenLatencyMs: null },
     { group_id: 'invalid', priceMultiplier: 0.01, firstTokenLatencyMs: 10 },
@@ -2214,6 +2471,12 @@ test('maps current group metrics by group id without filtering unavailable rows'
   assert.deepEqual(metrics.get(20), {
     multiplier: 0.08,
     latencyMs: 320,
+    modelDetection: {
+      status: 'suspected',
+      reason_codes: ['MIXED_VARIANT_SIGNAL'],
+      reasonCodes: ['MIXED_VARIANT_SIGNAL'],
+    },
+    detectionStatus: 'suspected',
     effectivePricing: {
       inputPricePerMillion: 0.3,
       multiplier: 0.05,
@@ -2227,6 +2490,16 @@ test('maps current group metrics by group id without filtering unavailable rows'
   assert.deepEqual(metrics.get(21), { multiplier: null, latencyMs: null });
   assert.equal(metrics.has('same-name'), false);
   assert.equal(metrics.size, 3);
+
+  const userMetrics = core.buildGroupMetricMap([{
+    group_id: 22,
+    priceMultiplier: 0.1,
+    firstTokenLatencyMs: 900,
+    userAvgTtftMs: 1200,
+    userSampleCount: 3,
+    userHasData: true,
+  }], { ...core.DEFAULT_CONFIG, latencySource: 'user' });
+  assert.deepEqual(userMetrics.get(22), { multiplier: 0.1, latencyMs: 1200, latencySampleCount: 3 });
 });
 
 test('indexes dropdown monitor rows by normalized name and multiplier', () => {
@@ -2300,6 +2573,17 @@ test('formats explicit model detection states in dropdown status', () => {
   assert.deepEqual(core.formatGroupDropdownMonitor({ available: true, warningReasons: [], model_detection: { status: 'suspected' } }), {
     statusText: '可用 · 疑似', statusTone: 'warning', latencyText: '首 Token 暂无数据', latencyValueText: '',
   });
+  assert.deepEqual(core.formatGroupDropdownMonitor({
+    available: true,
+    warningReasons: [],
+    model_detection: { status: 'suspected', reason_codes: ['MIXED_VARIANT_SIGNAL', 'COT_NOT_RUN'] },
+  }), {
+    statusText: '可用 · 疑似',
+    statusTone: 'warning',
+    latencyText: '首 Token 暂无数据',
+    latencyValueText: '',
+    detectionTitle: '疑似：检测到不同模型特征；本次仅运行 Juice 指纹检测，未运行 COT 检测',
+  });
   assert.deepEqual(core.formatGroupDropdownMonitor({ available: true, warningReasons: [], model_detection: { status: 'not_tested' } }), {
     statusText: '可用 · 未检测', statusTone: 'warning', latencyText: '首 Token 暂无数据', latencyValueText: '',
   });
@@ -2316,10 +2600,14 @@ test('formats dropdown and key labels with the real-user TTFT source', () => {
   assert.deepEqual(core.formatGroupDropdownMonitor(row, 'user'), {
     statusText: '可用',
     statusTone: 'available',
-    latencyText: '运行时 P50 TTFT 1385 ms',
-    latencyValueText: '1385 ms',
+    latencyText: '运行时 P50 TTFT 1385 ms（12 条）',
+    latencyValueText: '1385 ms（12 条）',
   });
-  assert.equal(core.formatKeyOptionLabel({ name: 'main', groupName: 'A001' }, { multiplier: 0.05, latencyMs: 1384.6 }, 'user'), 'main · A001 · ×0.05 · 运行时 P50 TTFT 1385 ms');
+  assert.equal(core.formatKeyOptionLabel(
+    { name: 'main', groupName: 'A001' },
+    { multiplier: 0.05, latencyMs: 1384.6, latencySampleCount: 12 },
+    'user',
+  ), 'main · A001 · ×0.05 · 运行时 P50 TTFT 1385 ms（12 条）');
 });
 
 test('formats target key options with current group metrics and safe placeholders', () => {

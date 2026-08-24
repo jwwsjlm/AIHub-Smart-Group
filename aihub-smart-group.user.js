@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.13.1
+// @version      0.14.0
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.13.1';
+  const SCRIPT_VERSION = '0.14.0';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -82,6 +82,33 @@
     openrouter_reference_unavailable: '参考价格不可用',
     openrouter_reference_stale: '参考价格已过期',
   });
+  const MODEL_DETECTION_REASON_LABELS = Object.freeze({
+    MIXED_VARIANT_SIGNAL: '检测到不同模型特征',
+    VARIANT_MISMATCH: '检测模型与声明模型不一致',
+    OUTPUT_REWRITE_SUSPECTED: '输出可能被上游改写',
+    NEGATIVE_CONTROL_UNEXPECTED_MATCH: '阴性对照出现异常匹配',
+    JUICE_SAMPLES_INCOMPLETE: 'Juice 样本不完整',
+    OUTPUT_INTEGRITY_INCOMPLETE: '输出完整性对照不完整',
+    COT_CONTROLS_INCOMPLETE: 'COT 对照测试不完整',
+    COT_NOT_COMPATIBLE: 'COT 兼容证据不足',
+    COT_NOT_RUN: '本次仅运行 Juice 指纹检测，未运行 COT 检测',
+    JUICE_PASSED: 'Juice 指纹检测通过',
+    V4_PASSED: 'Juice 指纹检测通过',
+    V4_PROBABILITY_EVIDENCE_INSUFFICIENT: 'Juice 概率证据不足',
+    V4_EXECUTION_FAILED: 'Juice 检测执行失败',
+    FINAL_REQUEST_ERRORS: '部分最终请求失败',
+    TRANSIENT_RETRIES: '检测期间发生临时重试',
+    JOB_TIMEOUT: '检测任务超时',
+    SERVICE_RESTARTED_CREDENTIALS_DISCARDED: '检测服务重启，任务凭据已清除',
+    CREDENTIALS_UNAVAILABLE: '检测凭据不可用',
+    CANCELLED: '检测任务已取消',
+    CREATE_REJECTED: '检测器拒绝了任务参数',
+    CREATE_FAILED: '检测任务创建失败',
+    POLL_FAILED: '读取检测结果失败',
+    DETECTOR_TARGET_CYCLE_MISMATCH: '检测器结果不属于同一次检测',
+    DETECTOR_TARGET_ACCOUNT_MISMATCH: '检测器结果使用了不同账号',
+  });
+  const MODEL_DETECTION_INFORMATIONAL_REASON_CODES = Object.freeze(['COT_NOT_RUN', 'JUICE_PASSED', 'V4_PASSED']);
   const MODEL_PRICE_CURRENCY_FORMATTER = new Intl.NumberFormat('en-US', {
     style: 'currency',
     currency: 'USD',
@@ -650,6 +677,21 @@
     return `模型健康：${parts.join('、')}`;
   }
 
+  function normalizeModelDetectionReasonCodes(...values) {
+    const result = [];
+    const seen = new Set();
+    for (const value of values) {
+      for (const rawCode of Array.isArray(value) ? value : []) {
+        const code = String(rawCode ?? '').trim();
+        const identity = code.toLocaleUpperCase();
+        if (!code || seen.has(identity)) continue;
+        seen.add(identity);
+        result.push(code);
+      }
+    }
+    return result;
+  }
+
   function normalizeModelDetection(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
     const rawStatus = String(value.status ?? '').trim().toLocaleLowerCase();
@@ -668,23 +710,31 @@
                 : rawStatus === 'skipped'
                   ? (value.applicable === false ? 'not_applicable' : 'not_tested')
                   : rawStatus || null;
-    return { ...value, status };
+    const reasonCodes = normalizeModelDetectionReasonCodes(value.reason_codes, value.reasonCodes);
+    return { ...value, status, reasonCodes, reason_codes: reasonCodes };
   }
 
   function getModelDetection(row) {
     return normalizeModelDetection(row?.modelDetection ?? row?.model_detection);
   }
 
-  function getModelDetectionLabel(rowOrDetection) {
+  function resolveModelDetection(rowOrDetection) {
     const hasNestedDetection = Boolean(rowOrDetection && typeof rowOrDetection === 'object'
       && (Object.prototype.hasOwnProperty.call(rowOrDetection, 'modelDetection')
         || Object.prototype.hasOwnProperty.call(rowOrDetection, 'model_detection')));
     const nestedDetection = rowOrDetection?.modelDetection ?? rowOrDetection?.model_detection;
     const looksLikeDetection = !hasNestedDetection && rowOrDetection && typeof rowOrDetection === 'object'
-      && ('status' in rowOrDetection || 'applicable' in rowOrDetection || 'reason_codes' in rowOrDetection);
-    const detection = hasNestedDetection
+      && ('status' in rowOrDetection
+        || 'applicable' in rowOrDetection
+        || 'reason_codes' in rowOrDetection
+        || 'reasonCodes' in rowOrDetection);
+    return hasNestedDetection
       ? normalizeModelDetection(nestedDetection)
       : (looksLikeDetection ? normalizeModelDetection(rowOrDetection) : getModelDetection(rowOrDetection));
+  }
+
+  function getModelDetectionLabel(rowOrDetection) {
+    const detection = resolveModelDetection(rowOrDetection);
     if (!detection) return '';
     if (detection.applicable === false) return '不适用';
     if (detection.status === 'passed') return '检测通过';
@@ -694,6 +744,48 @@
     if (detection.status === 'not_tested') return '未检测';
     if (detection.status === 'not_applicable') return '不适用';
     return '检测未知';
+  }
+
+  function getModelDetectionReasonLabel(code) {
+    const normalized = String(code ?? '').trim();
+    if (!normalized) return '';
+    const known = MODEL_DETECTION_REASON_LABELS[normalized.toLocaleUpperCase()];
+    if (known) return known;
+    const readable = normalized
+      .replace(/([a-z\d])([A-Z])/g, '$1 $2')
+      .replace(/[_-]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLocaleLowerCase();
+    return readable ? `${readable.charAt(0).toLocaleUpperCase()}${readable.slice(1)}` : normalized;
+  }
+
+  function getModelDetectionReasonLabels(rowOrDetection, includeInformational = true) {
+    const detection = resolveModelDetection(rowOrDetection);
+    if (!detection || detection.applicable === false || detection.status === 'passed' || detection.status === 'not_applicable') return [];
+    return detection.reasonCodes
+      .filter((code) => includeInformational
+        || !MODEL_DETECTION_INFORMATIONAL_REASON_CODES.includes(String(code).toLocaleUpperCase()))
+      .map(getModelDetectionReasonLabel)
+      .filter(Boolean);
+  }
+
+  function formatModelDetectionReasonSummary(rowOrDetection, maxItems = 2) {
+    const limit = Math.max(0, Math.floor(Number(maxItems) || 0));
+    return getModelDetectionReasonLabels(rowOrDetection, false).slice(0, limit).join('；');
+  }
+
+  function formatModelDetectionSummary(rowOrDetection, maxReasons = 2) {
+    const label = getModelDetectionLabel(rowOrDetection);
+    if (!label) return '';
+    const reasons = formatModelDetectionReasonSummary(rowOrDetection, maxReasons);
+    return reasons ? `${label}（${reasons}）` : label;
+  }
+
+  function formatModelDetectionTitle(rowOrDetection) {
+    const label = getModelDetectionLabel(rowOrDetection);
+    const reasons = getModelDetectionReasonLabels(rowOrDetection, true);
+    return label && reasons.length ? `${label}：${reasons.join('；')}` : '';
   }
 
   function isModelDetectionWarning(detection) {
@@ -723,11 +815,18 @@
     return { value: probe, source: 'probe', fallback: source === 'user' && probe !== null };
   }
 
+  function getUserLatencySampleCount(row) {
+    const sampleCount = Number(row?.userSampleCount ?? row?.user_sample_count);
+    return Number.isFinite(sampleCount) && sampleCount > 0 ? Math.floor(sampleCount) : null;
+  }
+
   function formatLatencyMetric(row, source = 'probe') {
     const metric = getLatencyMetric(row, source);
     const valueText = metric.value === null ? '暂无数据' : formatLatency(metric.value);
     if (source === 'user') {
-      return metric.fallback ? `运行时 P50 TTFT ${valueText}（回退探测）` : `运行时 P50 TTFT ${valueText}`;
+      const sampleCount = metric.source === 'user' ? getUserLatencySampleCount(row) : null;
+      const sampleText = sampleCount === null ? '' : `（${sampleCount} 条）`;
+      return metric.fallback ? `运行时 P50 TTFT ${valueText}（回退探测）` : `运行时 P50 TTFT ${valueText}${sampleText}`;
     }
     return `首 Token ${valueText}`;
   }
@@ -892,12 +991,14 @@
       if (!groupId) continue;
       const samples = [];
       for (const item of Array.isArray(row?.history) ? row.history : []) {
+        const timestamp = Number(item?.timestamp);
+        if (!Number.isFinite(timestamp)) continue;
         const availability = monitorHistoryStatusToAvailability(item.status);
         if (availability === null) continue;
         const rawSampleCount = nonNegativeNumberOrNull(item.sampleCount);
         if (rawSampleCount === 0) continue;
         const sampleCount = Math.floor(clamp(rawSampleCount ?? 1, 1, MONITOR_HISTORY_SAMPLE_COUNT_CAP));
-        for (let index = 0; index < sampleCount; index += 1) samples.push([item.timestamp, availability]);
+        samples.push([timestamp, availability, sampleCount]);
       }
       if (samples.length) seriesByApiId[groupId] = samples;
     }
@@ -919,13 +1020,34 @@
     return valid[0]?.value ?? left ?? right ?? null;
   }
 
+  function mergeMonitorSampleLists(primarySamples, fallbackSamples) {
+    const byTimestamp = new Map();
+    const addSamples = (samples, overwrite) => {
+      for (const sample of Array.isArray(samples) ? samples : []) {
+        const timestamp = Number(sample?.[0]);
+        if (!Number.isFinite(timestamp)) continue;
+        if (overwrite || !byTimestamp.has(timestamp)) byTimestamp.set(timestamp, sample);
+      }
+    };
+    addSamples(fallbackSamples, false);
+    addSamples(primarySamples, true);
+    return [...byTimestamp.values()].sort((left, right) => Number(left[0]) - Number(right[0]));
+  }
+
   function mergeMonitorSeries(primary, fallback) {
     const normalizedPrimary = normalizeMonitorSeriesPayload(primary || {});
     const normalizedFallback = normalizeMonitorSeriesPayload(fallback || {});
-    const seriesByApiId = { ...normalizedPrimary.seriesByApiId };
+    const seriesByApiId = {};
     const userTtftByGroupId = { ...normalizedPrimary.userTtftByGroupId };
-    for (const [groupId, samples] of Object.entries(normalizedFallback.seriesByApiId)) {
-      if (!Array.isArray(seriesByApiId[groupId]) || !seriesByApiId[groupId].length) seriesByApiId[groupId] = samples;
+    const groupIds = new Set([
+      ...Object.keys(normalizedFallback.seriesByApiId),
+      ...Object.keys(normalizedPrimary.seriesByApiId),
+    ]);
+    for (const groupId of groupIds) {
+      seriesByApiId[groupId] = mergeMonitorSampleLists(
+        normalizedPrimary.seriesByApiId[groupId],
+        normalizedFallback.seriesByApiId[groupId],
+      );
     }
     for (const [groupId, samples] of Object.entries(normalizedFallback.userTtftByGroupId)) {
       if (!Array.isArray(userTtftByGroupId[groupId]) || !userTtftByGroupId[groupId].length) userTtftByGroupId[groupId] = samples;
@@ -968,10 +1090,28 @@
     return { keywords, matches };
   }
 
+  function getCandidateAnalysisSignature(config = DEFAULT_CONFIG) {
+    const normalizedConfig = normalizeConfig(config);
+    const availabilityThreshold = normalizedConfig.availabilityMode === 'successes'
+      ? normalizedConfig.minSuccessPoints10m
+      : normalizedConfig.availabilityMode === 'consecutive'
+        ? normalizedConfig.minConsecutiveSuccesses10m
+        : normalizedConfig.minSuccess10m;
+    return JSON.stringify({
+      recommendationPriceBasis: normalizedConfig.mode === 'price' ? normalizedConfig.recommendationPriceBasis : 'nominal',
+      availabilityMode: normalizedConfig.availabilityMode,
+      availabilityThreshold,
+      requireNoWarnings: normalizedConfig.requireNoWarnings,
+      excludedGroupKeywords: normalizedConfig.excludedGroupKeywords,
+      latencySource: normalizedConfig.latencySource,
+    });
+  }
+
   function analyzeCandidates(rows, config = DEFAULT_CONFIG) {
     const normalizedConfig = normalizeConfig(config);
     const excludedKeywords = normalizedConfig.excludedGroupKeywords.split('|').filter(Boolean);
     const sourceRows = Array.isArray(rows) ? rows : [];
+    const signature = getCandidateAnalysisSignature(normalizedConfig);
     const rankingPriceBasis = normalizedConfig.mode === 'price' ? normalizedConfig.recommendationPriceBasis : 'nominal';
     const counts = {
       total: sourceRows.length,
@@ -996,9 +1136,9 @@
         counts.unavailable += 1;
         continue;
       }
-      const success10m = Number(row.successRates?.['10m']);
-      const recentSuccessCount = Number(row.recentSuccessCount);
-      const recentConsecutiveSuccessCount = Number(row.recentConsecutiveSuccessCount);
+      const success10m = nonNegativeNumberOrNull(row.successRates?.['10m']);
+      const recentSuccessCount = nonNegativeNumberOrNull(row.recentSuccessCount);
+      const recentConsecutiveSuccessCount = nonNegativeNumberOrNull(row.recentConsecutiveSuccessCount);
       const availabilityPasses = normalizedConfig.availabilityMode === 'successes'
         ? Number.isFinite(recentSuccessCount) && recentSuccessCount >= normalizedConfig.minSuccessPoints10m
         : normalizedConfig.availabilityMode === 'consecutive'
@@ -1039,7 +1179,7 @@
       });
       counts.eligible += 1;
     }
-    return { candidates, counts };
+    return { candidates, counts, signature, sourceRows };
   }
 
   function getEligibleCandidates(rows, normalizedConfig) {
@@ -1064,10 +1204,39 @@
 
   function rankCandidates(rows, config = DEFAULT_CONFIG, analysis = null) {
     const normalizedConfig = normalizeConfig(config);
-    const candidates = (analysis?.candidates || getEligibleCandidates(rows, normalizedConfig)).slice();
+    const sourceRows = Array.isArray(rows) ? rows : [];
+    const signature = getCandidateAnalysisSignature(normalizedConfig);
+    const reusableAnalysis = analysis?.sourceRows === sourceRows
+      && analysis?.signature === signature
+      && Array.isArray(analysis?.candidates);
+    const currentAnalysis = reusableAnalysis ? analysis : analyzeCandidates(sourceRows, normalizedConfig);
+    const candidates = currentAnalysis.candidates.slice();
     if (normalizedConfig.mode === 'speed') return candidates.sort(compareSpeed);
     if (normalizedConfig.mode === 'balance') return candidates.filter((candidate) => candidate.price <= normalizedConfig.balanceMaxPrice).sort(compareSpeed);
     return candidates.sort(comparePrice);
+  }
+
+  function reanalyzeRecommendationForSwitch(rows, config = DEFAULT_CONFIG, stability = createStabilityState(), targetGroupId = null) {
+    const analysis = analyzeCandidates(rows, config);
+    const ranked = rankCandidates(rows, config, analysis);
+    const winner = ranked[0] || null;
+    const numericTargetGroupId = Number(targetGroupId);
+    const numericStableGroupId = Number(stability?.groupId);
+    const validTargetGroupId = Number.isInteger(numericTargetGroupId) && numericTargetGroupId > 0
+      ? numericTargetGroupId
+      : null;
+    const validStableGroupId = Number.isInteger(numericStableGroupId) && numericStableGroupId > 0
+      ? numericStableGroupId
+      : null;
+    const target = validTargetGroupId === null
+      ? null
+      : ranked.find((candidate) => candidate.groupId === validTargetGroupId) || null;
+    let reason = '';
+    if (validTargetGroupId === null) reason = '暂无可验证的推荐分组，请重新检测';
+    else if (!target) reason = '推荐目标已不再符合当前筛选条件，请重新检测';
+    else if (!winner || winner.groupId !== validTargetGroupId) reason = '推荐第一名已变化，请重新检测';
+    else if (validStableGroupId !== validTargetGroupId) reason = '稳定推荐与切换目标不一致，请重新检测';
+    return { analysis, ranked, winner, target, reason };
   }
 
   function formatRelativeAge(ageMs) {
@@ -1156,23 +1325,31 @@
       const samples = Array.isArray(seriesByApiId[groupId]) ? seriesByApiId[groupId] : [];
       const recent = [];
       let successes = 0;
+      let totalWeight = 0;
       for (const sample of samples) {
         const at = Number(sample?.[0]);
         const status = sample?.[1];
         if (!Number.isFinite(at) || at < cutoff || at > now || (status !== 0 && status !== 1)) continue;
-        recent.push(sample);
-        if (status === 1) successes += 1;
+        // Summary fallbacks use exactly three fields; live 10-field series keep their original meaning.
+        const rawWeight = Array.isArray(sample) && sample.length === 3 ? Number(sample[2]) : 1;
+        if (!Number.isFinite(rawWeight) || rawWeight <= 0) continue;
+        const weight = Math.floor(clamp(rawWeight, 1, MONITOR_HISTORY_SAMPLE_COUNT_CAP));
+        recent.push({ at, status, weight });
+        totalWeight += weight;
+        if (status === 1) successes += weight;
       }
-      recent.sort((left, right) => Number(left[0]) - Number(right[0]));
+      recent.sort((left, right) => left.at - right.at);
       let trailingSuccesses = 0;
-      for (let index = recent.length - 1; index >= 0 && recent[index][1] === 1; index -= 1) trailingSuccesses += 1;
+      for (let index = recent.length - 1; index >= 0 && recent[index].status === 1; index -= 1) {
+        trailingSuccesses += recent[index].weight;
+      }
       return {
         ...row,
         successRates: {
           ...(row?.successRates || {}),
-          '10m': recent.length ? successes / recent.length : Number.NaN,
+          '10m': totalWeight ? successes / totalWeight : Number.NaN,
         },
-        recentSampleCount: recent.length,
+        recentSampleCount: totalWeight,
         recentSuccessCount: successes,
         recentConsecutiveSuccessCount: trailingSuccesses,
       };
@@ -1205,13 +1382,19 @@
     for (const row of Array.isArray(rows) ? rows : []) {
       const groupId = Number(row?.group_id);
       if (!Number.isInteger(groupId) || groupId <= 0) continue;
+      const latencyMetric = getLatencyMetric(row, latencySource);
       const metric = {
         multiplier: nonNegativeNumberOrNull(row?.priceMultiplier),
-        latencyMs: getLatencyMetric(row, latencySource).value,
+        latencyMs: latencyMetric.value,
       };
+      const latencySampleCount = latencyMetric.source === 'user' ? getUserLatencySampleCount(row) : null;
+      if (latencySampleCount !== null) metric.latencySampleCount = latencySampleCount;
       const detection = getModelDetection(row);
       const cacheHitRate = normalizeCacheHitRate(row?.cacheHitRate ?? row?.cache_hit_rate);
-      if (detection) metric.detectionStatus = detection.status;
+      if (detection) {
+        metric.modelDetection = detection;
+        metric.detectionStatus = detection.status;
+      }
       if (cacheHitRate !== null) metric.cacheHitRate = cacheHitRate;
       const health = normalizeModelHealth(row?.modelHealth ?? row?.model_health);
       if (health) metric.modelHealth = health;
@@ -1443,23 +1626,27 @@
     const label = latencySource === 'user'
       ? (metric.fallback ? '运行时 P50 TTFT（回退探测）' : '运行时 P50 TTFT')
       : '首 Token';
-    const latencyValueText = row && latency !== null ? `${Math.round(latency)} ms` : '';
+    const sampleCount = latencySource === 'user' && metric.source === 'user' ? getUserLatencySampleCount(row) : null;
+    const sampleText = sampleCount === null ? '' : `（${sampleCount} 条）`;
+    const latencyValueText = row && latency !== null ? `${Math.round(latency)} ms${sampleText}` : '';
     const latencyText = row && latency !== null
       ? `${label} ${latencyValueText}`
       : `${label} 暂无数据`;
-    if (!row) return { statusText: '暂无监控', statusTone: 'unknown', latencyText, latencyValueText };
-    if (row.enabled === false) return { statusText: '已停用', statusTone: 'disabled', latencyText, latencyValueText };
+    const detectionTitle = formatModelDetectionTitle(row);
+    const withDetectionTitle = (result) => detectionTitle ? { ...result, detectionTitle } : result;
+    if (!row) return withDetectionTitle({ statusText: '暂无监控', statusTone: 'unknown', latencyText, latencyValueText });
+    if (row.enabled === false) return withDetectionTitle({ statusText: '已停用', statusTone: 'disabled', latencyText, latencyValueText });
     if (row.available === true
       && ((Array.isArray(row.warningReasons) && row.warningReasons.length) || hasModelDetectionWarning(row))) {
       const detectionLabel = getModelDetectionLabel(row);
-      return { statusText: detectionLabel && detectionLabel !== '检测通过' ? `可用 · ${detectionLabel}` : '可用 · 有警告', statusTone: 'warning', latencyText, latencyValueText };
+      return withDetectionTitle({ statusText: detectionLabel && detectionLabel !== '检测通过' ? `可用 · ${detectionLabel}` : '可用 · 有警告', statusTone: 'warning', latencyText, latencyValueText });
     }
     if (row.available === true) {
       const detectionLabel = getModelDetectionLabel(row);
-      return { statusText: detectionLabel ? `可用 · ${detectionLabel}` : '可用', statusTone: 'available', latencyText, latencyValueText };
+      return withDetectionTitle({ statusText: detectionLabel ? `可用 · ${detectionLabel}` : '可用', statusTone: 'available', latencyText, latencyValueText });
     }
-    if (row.available === false) return { statusText: '不可用', statusTone: 'unavailable', latencyText, latencyValueText };
-    return { statusText: '暂无监控', statusTone: 'unknown', latencyText, latencyValueText };
+    if (row.available === false) return withDetectionTitle({ statusText: '不可用', statusTone: 'unavailable', latencyText, latencyValueText });
+    return withDetectionTitle({ statusText: '暂无监控', statusTone: 'unknown', latencyText, latencyValueText });
   }
 
   function getGroupDropdownToneClass(tone) {
@@ -1474,8 +1661,11 @@
     const latencyMs = nonNegativeNumberOrNull(metric?.latencyMs);
     const multiplierText = multiplier === null ? '倍率暂无数据' : formatMultiplier(multiplier);
     const latencyLabel = latencySource === 'user' ? '运行时 P50 TTFT' : '首 Token';
-    const latencyText = latencyMs === null ? `${latencyLabel} 暂无数据` : `${latencyLabel} ${formatLatency(latencyMs)}`;
-    const detectionText = metric?.detectionStatus ? ` · ${getModelDetectionLabel({ modelDetection: { status: metric.detectionStatus } })}` : '';
+    const latencySampleCount = latencySource === 'user' ? nonNegativeNumberOrNull(metric?.latencySampleCount) : null;
+    const latencySampleText = latencySampleCount !== null && latencySampleCount > 0 ? `（${Math.floor(latencySampleCount)} 条）` : '';
+    const latencyText = latencyMs === null ? `${latencyLabel} 暂无数据` : `${latencyLabel} ${formatLatency(latencyMs)}${latencySampleText}`;
+    const detection = metric?.modelDetection ?? (metric?.detectionStatus ? { status: metric.detectionStatus } : null);
+    const detectionText = detection ? ` · ${getModelDetectionLabel(detection)}` : '';
     const cacheText = metric?.cacheHitRate == null ? '' : ` · 缓存 ${(metric.cacheHitRate * 100).toFixed(1)}%`;
     return `${name} · ${groupName} · ${multiplierText} · ${latencyText}${detectionText}${cacheText}`;
   }
@@ -2782,9 +2972,47 @@
     }
 
     async switchToRecommendation(fromAuto) {
-      const winner = this.ranked[0];
+      const reportBlock = (reason) => {
+        if (fromAuto) {
+          if (shouldLogTransition(this.lastAutoSkipLogSignature, reason)) this.log('info', `自动切换跳过：${reason}`);
+          this.lastAutoSkipLogSignature = reason;
+        } else {
+          this.setStatus(reason, Boolean(this.error || this.authError));
+        }
+        return false;
+      };
+      const cachedWinner = this.ranked[0] || null;
       const key = this.selectedKey();
-      const blockReason = getSwitchBlockReason({
+      const initialBlockReason = getSwitchBlockReason({
+        loading: this.loading,
+        allowWhileLoading: fromAuto,
+        error: this.error,
+        authError: this.authError,
+        monitorStale: this.monitorFreshness.stale,
+        monitorFreshnessText: this.monitorFreshness.label,
+        winner: cachedWinner,
+        key,
+        stability: this.stability,
+        requiredChecks: this.config.consecutiveChecks,
+        config: this.config,
+      });
+      if (initialBlockReason) return reportBlock(initialBlockReason);
+
+      const validation = reanalyzeRecommendationForSwitch(
+        this.rows,
+        this.config,
+        this.stability,
+        cachedWinner.groupId,
+      );
+      this.candidateDiagnostics = validation.analysis;
+      this.ranked = validation.ranked;
+      if (validation.reason) {
+        this.stability = createStabilityState();
+        this.renderData();
+        return reportBlock(validation.reason);
+      }
+      const winner = validation.winner;
+      const finalBlockReason = getSwitchBlockReason({
         loading: this.loading,
         allowWhileLoading: fromAuto,
         error: this.error,
@@ -2797,15 +3025,7 @@
         requiredChecks: this.config.consecutiveChecks,
         config: this.config,
       });
-      if (blockReason) {
-        if (fromAuto) {
-          if (shouldLogTransition(this.lastAutoSkipLogSignature, blockReason)) this.log('info', `自动切换跳过：${blockReason}`);
-          this.lastAutoSkipLogSignature = blockReason;
-        } else {
-          this.setStatus(blockReason, Boolean(this.error || this.authError));
-        }
-        return false;
-      }
+      if (finalBlockReason) return reportBlock(finalBlockReason);
       const now = Date.now();
       if (fromAuto && !canAutoSwitch({
         now,
@@ -2889,7 +3109,8 @@
           : this.config.availabilityMode === 'consecutive'
             ? `连续成功 ${winner.recentConsecutiveSuccessCount || 0} 点`
             : `可用率 ${formatPercent(winner.success10m)}`;
-        const detectionText = getModelDetectionLabel(winner);
+        const detectionText = formatModelDetectionSummary(winner);
+        const detectionTitle = formatModelDetectionTitle(winner);
         const healthText = formatModelHealthSummary(winner.modelHealth ?? winner.model_health);
         const modelPriceText = formatModelPriceSummary(winner, this.config.modelPriceModel);
         const effectivePriceText = formatEffectivePricingSummary(winner);
@@ -2898,6 +3119,7 @@
           ? ''
           : ` · ${formatCacheHitRate(winner.cacheHitRate ?? winner.cache_hit_rate)}`;
         metrics.textContent = `10m ${availabilityText} · ${winner.recentSampleCount}次探测 · ${formatLatencyMetric(winner, this.config.latencySource)}${detectionText ? ` · 模型${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${modelPriceText ? ` · ${modelPriceText}` : ''}${effectivePriceText ? ` · ${effectivePriceText}` : ''}${outputTpsText ? ` · ${outputTpsText}` : ''}${cacheText}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
+        if (detectionTitle) metrics.title = detectionTitle;
         recommend.append(title, metrics);
         if (this.config.mode === 'balance') {
           const reason = document.createElement('div');
@@ -2980,7 +3202,13 @@
       const metric = metricMap.get(key.groupId);
       const multiplier = nonNegativeNumberOrNull(metric?.multiplier);
       const latencyMs = nonNegativeNumberOrNull(metric?.latencyMs);
-      const detectionText = metric?.detectionStatus ? getModelDetectionLabel({ modelDetection: { status: metric.detectionStatus } }) : '暂无数据';
+      const detection = metric?.modelDetection ?? (metric?.detectionStatus ? { status: metric.detectionStatus } : null);
+      const detectionText = detection ? formatModelDetectionSummary(detection) : '暂无数据';
+      const detectionTitle = detection ? formatModelDetectionTitle(detection) : '';
+      const latencySampleCount = this.config.latencySource === 'user'
+        ? nonNegativeNumberOrNull(metric?.latencySampleCount)
+        : null;
+      const latencySampleText = latencySampleCount !== null && latencySampleCount > 0 ? `（${Math.floor(latencySampleCount)} 条）` : '';
       const modelPriceText = formatModelPriceSummary(metric?.modelPrices, this.config.modelPriceModel, true);
       const effectivePriceText = formatEffectivePricingSummary(metric?.effectivePricing, true, true);
       const outputTpsText = formatOutputThroughput(metric, true);
@@ -2994,8 +3222,10 @@
       details.querySelector('[data-key-detail="name"]').textContent = key.name;
       details.querySelector('[data-key-detail="group"]').textContent = key.groupName;
       details.querySelector('[data-key-detail="multiplier"]').textContent = multiplier === null ? '暂无数据' : formatMultiplier(multiplier);
-      details.querySelector('[data-key-detail="latency"]').textContent = latencyMs === null ? '暂无数据' : formatLatency(latencyMs);
-      details.querySelector('[data-key-detail="detection"]').textContent = detectionText;
+      details.querySelector('[data-key-detail="latency"]').textContent = latencyMs === null ? '暂无数据' : `${formatLatency(latencyMs)}${latencySampleText}`;
+      const detectionNode = details.querySelector('[data-key-detail="detection"]');
+      detectionNode.textContent = detectionText;
+      detectionNode.title = detectionTitle;
       details.querySelector('[data-key-detail="model-price"]').textContent = modelPriceText || '暂无数据';
       details.querySelector('[data-key-detail="effective-price"]').textContent = effectivePriceText || '暂无数据';
       details.querySelector('[data-key-detail="output-tps"]').textContent = outputTpsText || '暂无数据';
@@ -3010,13 +3240,15 @@
         const name = document.createElement('span');
         name.textContent = candidate.name;
         const metrics = document.createElement('span');
-        const detectionText = getModelDetectionLabel(candidate);
+        const detectionText = formatModelDetectionSummary(candidate);
+        const detectionTitle = formatModelDetectionTitle(candidate);
         const cacheHitRate = normalizeCacheHitRate(candidate.cacheHitRate ?? candidate.cache_hit_rate);
         const healthText = formatModelHealthSummary(candidate.modelHealth ?? candidate.model_health);
         const modelPriceText = formatModelPriceSummary(candidate, this.config.modelPriceModel, true);
         const effectivePriceText = formatEffectivePricingSummary(candidate, true);
         const outputTpsText = formatOutputThroughput(candidate, true);
         metrics.textContent = `${formatRecommendationPriceCriterion(candidate)} · 10m ${formatPercent(candidate.success10m)}${detectionText ? ` · ${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${modelPriceText ? ` · ${modelPriceText}` : ''}${effectivePriceText ? ` · ${effectivePriceText}` : ''}${outputTpsText ? ` · ${outputTpsText}` : ''}${cacheHitRate === null ? '' : ` · 缓存 ${(cacheHitRate * 100).toFixed(1)}%`}`;
+        if (detectionTitle) metrics.title = detectionTitle;
         item.append(name, metrics);
         list.appendChild(item);
       }
@@ -3256,6 +3488,8 @@
       const statusClass = `asg-key-group-status asg-key-group-status-${info.statusTone}`;
       if (status.className !== statusClass) status.className = statusClass;
       if (status.textContent !== info.statusText) status.textContent = info.statusText;
+      const statusTitle = info.detectionTitle || '';
+      if (status.title !== statusTitle) status.title = statusTitle;
 
       let latency = rightColumn.querySelector('.asg-key-group-latency');
       if (!latency) {
@@ -4134,6 +4368,7 @@
     GROUP_MODE_LABELS,
     LATENCY_SOURCE_LABELS,
     MODEL_PRICE_MODEL_LABELS,
+    MODEL_DETECTION_REASON_LABELS,
     PROVIDER_SORT_LABELS,
     RECOMMENDATION_PRICE_BASIS_LABELS,
     normalizeConfig,
@@ -4171,13 +4406,20 @@
     normalizeModelHealth,
     summarizeModelHealth,
     formatModelHealthSummary,
+    normalizeModelDetectionReasonCodes,
     normalizeModelDetection,
     getModelDetection,
     getModelDetectionLabel,
+    getModelDetectionReasonLabel,
+    getModelDetectionReasonLabels,
+    formatModelDetectionReasonSummary,
+    formatModelDetectionSummary,
+    formatModelDetectionTitle,
     isModelDetectionWarning,
     hasModelDetectionWarning,
     normalizePanelTab,
     getLatencyMetric,
+    getUserLatencySampleCount,
     formatLatencyMetric,
     normalizeMonitorRow,
     normalizeMonitorSummaryPayload,
@@ -4190,8 +4432,10 @@
     getBalanceAmount,
     formatBalance,
     getExcludedGroupInfo,
+    getCandidateAnalysisSignature,
     analyzeCandidates,
     rankCandidates,
+    reanalyzeRecommendationForSwitch,
     getMonitorFreshness,
     getLatestMonitorSampleAt,
     getMonitorSeriesWindowAnchor,
