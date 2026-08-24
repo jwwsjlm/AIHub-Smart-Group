@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.27
+// @version      0.14.28
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.27';
+  const SCRIPT_VERSION = '0.14.28';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -57,6 +57,8 @@
   const PROVIDER_RANGE_CONTROL_WAIT_TIMEOUT_MS = 5_000;
   const PROVIDER_REFRESH_RETRY_MS = 1_000;
   const PROVIDER_REFRESH_UNAVAILABLE_RETRY_MS = 5_000;
+  // A refresh with unchanged data gets one short retry, then returns to the normal interval.
+  const PROVIDER_REFRESH_NO_CHANGE_RETRY_LIMIT = 1;
   const PROVIDER_REFRESH_COMPLETION_CHECK_DEBOUNCE_MS = 50;
   const PROVIDER_REFRESH_COMPLETION_TIMEOUT_MS = 15_000;
   const PROVIDER_REFRESH_BUTTON_SELECTOR = [
@@ -5269,6 +5271,7 @@
       this.lastRefreshAt = 0;
       this.refreshing = false;
       this.refreshSawDataChange = false;
+      this.refreshNoChangeRetryCount = 0;
       this.sortClickCount = 0;
       this.sortConvergenceExhausted = false;
       this.sortClickPending = false;
@@ -5710,8 +5713,20 @@
     completeRefreshTracking(succeeded) {
       if (!this.refreshing) return;
       this.stopRefreshTracking();
-      if (succeeded) this.lastRefreshAt = Date.now();
-      if (this.active) this.syncRefreshTimer(false, !succeeded);
+      if (succeeded) {
+        this.lastRefreshAt = Date.now();
+        this.refreshNoChangeRetryCount = 0;
+      } else if (this.refreshNoChangeRetryCount < PROVIDER_REFRESH_NO_CHANGE_RETRY_LIMIT) {
+        this.refreshNoChangeRetryCount += 1;
+      } else {
+        // Do not poll every five seconds forever while the backend keeps the same snapshot.
+        this.lastRefreshAt = Date.now();
+        this.refreshNoChangeRetryCount = 0;
+      }
+      if (this.active) {
+        const shortRetry = !succeeded && this.refreshNoChangeRetryCount > 0;
+        this.syncRefreshTimer(false, shortRetry);
+      }
     }
 
     stopRefreshTracking() {

@@ -3026,7 +3026,8 @@ test('keeps provider auto refresh anchored to the last refresh time', () => {
   assert.match(providerEnhancerSource, /this\.refreshDataSnapshot = getProviderRefreshDataSnapshot\(observedRoot\);/);
   assert.match(providerEnhancerSource, /if \(hasProviderRefreshDataChanged\(this\.refreshDataSnapshot, root\)\) this\.refreshSawDataChange = true;/);
   assert.match(providerEnhancerSource, /if \(this\.refreshSawDataChange && !busy\) \{\s*this\.completeRefreshTracking\(true\);/);
-  assert.match(providerEnhancerSource, /this\.syncRefreshTimer\(false, !succeeded\);/);
+  assert.match(providerEnhancerSource, /const shortRetry = !succeeded && this\.refreshNoChangeRetryCount > 0;/);
+  assert.match(providerEnhancerSource, /this\.syncRefreshTimer\(false, shortRetry\);/);
   assert.match(providerEnhancerSource, /if \(!isPageVisible\(\)\) \{\s*if \(this\.refreshTimer\) window\.clearTimeout\(this\.refreshTimer\);/);
   assert.doesNotMatch(providerEnhancerSource, /this\.refreshTimer = window\.setInterval/);
 });
@@ -3279,6 +3280,82 @@ test('confirms provider auto refresh only after data changes, then backs off whe
     assert.equal(enhancer.lastRefreshAt, 181_000);
     assert.equal(enhancer.refreshing, false);
     assert.deepEqual(schedules, [[false, false]]);
+  } finally {
+    Date.now = originalDateNow;
+    if (originalMutationObserver === undefined) delete globalThis.MutationObserver;
+    else globalThis.MutationObserver = originalMutationObserver;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+});
+
+test('bounds unchanged provider refresh retries before returning to the normal interval', () => {
+  const originalWindow = globalThis.window;
+  const originalDocument = globalThis.document;
+  const originalMutationObserver = globalThis.MutationObserver;
+  const originalDateNow = Date.now;
+  let now = 60_000;
+  let observer = null;
+  const timers = [];
+  const root = {
+    contains: () => true,
+    querySelector: () => button,
+    querySelectorAll: () => [],
+  };
+  const button = {
+    disabled: false,
+    className: 'monitor-icon-button',
+    click: () => { button.disabled = true; },
+  };
+  globalThis.document = { hidden: false, querySelector: () => root };
+  globalThis.window = {
+    setTimeout: (callback, delay) => {
+      timers.push({ callback, delay });
+      return timers.length;
+    },
+    clearTimeout: () => {},
+  };
+  globalThis.MutationObserver = class {
+    constructor(callback) { this.callback = callback; observer = this; }
+    observe() {}
+    disconnect() {}
+  };
+  Date.now = () => now;
+
+  try {
+    const enhancer = new core.ProviderSortEnhancer();
+    enhancer.active = true;
+    enhancer.providerConfigLoaded = true;
+    enhancer.providerAutoRefresh = true;
+    enhancer.providerRefreshIntervalSeconds = 60;
+    const schedules = [];
+    enhancer.syncRefreshTimer = (...args) => schedules.push(args);
+    const runLastTimer = (delay) => {
+      const timer = timers.filter((item) => item.delay === delay).at(-1);
+      assert.ok(timer, `expected a pending ${delay} ms timer`);
+      timer.callback();
+    };
+
+    assert.equal(enhancer.refresh(undefined, now), true);
+    button.disabled = false;
+    observer.callback([{ target: button }]);
+    runLastTimer(50);
+    assert.equal(enhancer.refreshing, true);
+    runLastTimer(15_000);
+    assert.equal(enhancer.refreshing, false);
+    assert.deepEqual(schedules, [[false, true]]);
+
+    now = 65_000;
+    button.disabled = false;
+    assert.equal(enhancer.refresh(undefined, now), true);
+    button.disabled = false;
+    observer.callback([{ target: button }]);
+    runLastTimer(50);
+    runLastTimer(15_000);
+    assert.deepEqual(schedules, [[false, true], [false, false]]);
+    assert.equal(enhancer.lastRefreshAt, now);
   } finally {
     Date.now = originalDateNow;
     if (originalMutationObserver === undefined) delete globalThis.MutationObserver;
