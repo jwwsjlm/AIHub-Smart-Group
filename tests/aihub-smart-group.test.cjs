@@ -134,6 +134,7 @@ test('normalizes selectable availability criteria', () => {
 
 test('normalizes the selectable TTFT source and preserves the legacy default', () => {
   assert.equal(core.DEFAULT_CONFIG.latencySource, 'probe');
+  assert.equal(core.LATENCY_SOURCE_LABELS.user, '运行时 P50 TTFT');
   assert.equal(core.normalizeConfig({}).latencySource, 'probe');
   assert.equal(core.normalizeConfig({ latencySource: 'user' }).latencySource, 'user');
   assert.equal(core.normalizeConfig({ latencySource: 'unexpected' }).latencySource, 'probe');
@@ -183,6 +184,73 @@ test('defaults provider hall auto sorting to multiplier priority', () => {
   assert.equal(core.normalizeConfig({ providerAutoRefresh: false }).providerAutoRefresh, false);
   assert.equal(core.normalizeConfig({ providerRefreshIntervalSeconds: 2 }).providerRefreshIntervalSeconds, 15);
   assert.equal(core.normalizeConfig({ providerRefreshIntervalSeconds: 9999 }).providerRefreshIntervalSeconds, 3600);
+});
+
+test('updates only settings previews affected by the edited field', () => {
+  assert.deepEqual(core.getSettingsPreviewTargets(), {
+    recommendation: true,
+    balance: true,
+    excluded: true,
+    cooldown: true,
+  });
+  assert.deepEqual(core.getSettingsPreviewTargets('providerRefreshIntervalSeconds'), {
+    recommendation: false,
+    balance: false,
+    excluded: false,
+    cooldown: false,
+  });
+  assert.deepEqual(core.getSettingsPreviewTargets('recommendationPriceBasis'), {
+    recommendation: true,
+    balance: false,
+    excluded: false,
+    cooldown: false,
+  });
+  assert.deepEqual(core.getSettingsPreviewTargets('latencySource'), {
+    recommendation: false,
+    balance: true,
+    excluded: false,
+    cooldown: false,
+  });
+  assert.deepEqual(core.getSettingsPreviewTargets('excludedGroupKeywords'), {
+    recommendation: true,
+    balance: true,
+    excluded: true,
+    cooldown: false,
+  });
+  assert.deepEqual(core.getSettingsPreviewTargets('cooldownMinutes'), {
+    recommendation: false,
+    balance: false,
+    excluded: false,
+    cooldown: true,
+  });
+
+  const controllerSource = userscriptSource.slice(
+    userscriptSource.indexOf('class Controller'),
+    userscriptSource.indexOf('class UsageMultiplierEnhancer'),
+  );
+  assert.match(controllerSource, /renderSettingsPreviews\(event\.target\.dataset\.setting\)/);
+  assert.match(controllerSource, /targets\.recommendation \|\| targets\.balance \? this\.readDraftConfig\(\) : null/);
+});
+
+test('marks the price preview pending for unsaved candidate filters only', () => {
+  const signature = core.getRecommendationPricePreviewSignature(core.DEFAULT_CONFIG);
+  assert.notEqual(signature, core.getRecommendationPricePreviewSignature({
+    ...core.DEFAULT_CONFIG,
+    recommendationPriceBasis: 'effectiveInput1h',
+  }));
+  assert.notEqual(signature, core.getRecommendationPricePreviewSignature({
+    ...core.DEFAULT_CONFIG,
+    requireNoWarnings: false,
+  }));
+  assert.notEqual(signature, core.getRecommendationPricePreviewSignature({
+    ...core.DEFAULT_CONFIG,
+    excludedGroupKeywords: 'free',
+  }));
+  assert.equal(signature, core.getRecommendationPricePreviewSignature({
+    ...core.DEFAULT_CONFIG,
+    providerAutoRefresh: false,
+    latencySource: 'user',
+  }));
 });
 
 test('finds the requested provider hall sort button without matching table headers', () => {
@@ -1142,7 +1210,7 @@ test('selects real-user TTFT when sampled and falls back to probe TTFT without s
 
   assert.deepEqual(core.getLatencyMetric(sampled, 'user'), { value: 1200, source: 'user', fallback: false });
   assert.deepEqual(core.getLatencyMetric(empty, 'user'), { value: 900, source: 'probe', fallback: true });
-  assert.equal(core.formatLatencyMetric(empty, 'user'), '用户平均 TTFT 900 ms（回退探测）');
+  assert.equal(core.formatLatencyMetric(empty, 'user'), '运行时 P50 TTFT 900 ms（回退探测）');
 });
 
 test('normalizes the monitor freshness limit', () => {
@@ -1735,7 +1803,7 @@ test('backs off provider DOM scans only while the native refresh button is unava
     enhancer.lastRefreshAt = 0;
     enhancer.syncRefreshTimer(true);
     assert.equal(scheduledDelay, 5_000);
-    assert.equal(storageReads, 1);
+    assert.equal(storageReads, 0);
     assert.equal(mainLookups, 1);
     assert.equal(semanticScans, 1);
     assert.equal(fallbackScans, 0);
@@ -1756,7 +1824,7 @@ test('backs off provider DOM scans only while the native refresh button is unava
     enhancer.syncRefreshTimer(true);
     assert.equal(clicks, 0);
     assert.equal(scheduledDelay, 5_000);
-    assert.equal(storageReads, 1);
+    assert.equal(storageReads, 0);
     assert.equal(mainLookups, 1);
     assert.equal(semanticScans, 1);
     assert.equal(fallbackScans, 0);
@@ -1777,7 +1845,7 @@ test('backs off provider DOM scans only while the native refresh button is unava
     assert.equal(clicks, 1);
     assert.equal(enhancer.lastRefreshAt, 60_000);
     assert.equal(scheduledDelay, 60_000);
-    assert.equal(storageReads, 1);
+    assert.equal(storageReads, 0);
     assert.equal(mainLookups, 1);
     assert.equal(semanticScans, 1);
     assert.equal(fallbackScans, 0);
@@ -1790,7 +1858,7 @@ test('backs off provider DOM scans only while the native refresh button is unava
     enhancer.lastRefreshAt = 1_000;
     enhancer.syncRefreshTimer(true);
     assert.equal(scheduledDelay, 1_000);
-    assert.equal(storageReads, 1);
+    assert.equal(storageReads, 0);
     assert.equal(mainLookups, 0);
     assert.equal(semanticScans, 0);
     assert.equal(fallbackScans, 0);
@@ -1802,6 +1870,169 @@ test('backs off provider DOM scans only while the native refresh button is unava
     else globalThis.document = originalDocument;
     if (originalLocalStorage === undefined) delete globalThis.localStorage;
     else globalThis.localStorage = originalLocalStorage;
+  }
+});
+
+test('invalidates provider sorting and refresh scheduling only for their own settings', () => {
+  const originalLocalStorage = globalThis.localStorage;
+  let storedConfig = {
+    providerSortPreference: 'rate',
+    providerAutoRefresh: true,
+    providerRefreshIntervalSeconds: 60,
+  };
+  let storageReads = 0;
+  globalThis.localStorage = {
+    getItem: () => {
+      storageReads += 1;
+      return JSON.stringify(storedConfig);
+    },
+  };
+
+  try {
+    const enhancer = new core.ProviderSortEnhancer();
+    enhancer.loadProviderConfig();
+    enhancer.active = true;
+    enhancer.applied = true;
+    let observerStarts = 0;
+    let applyQueues = 0;
+    let refreshSchedules = 0;
+    enhancer.observeUntilApplied = () => { observerStarts += 1; };
+    enhancer.queueApply = () => { applyQueues += 1; };
+    enhancer.syncRefreshTimer = () => { refreshSchedules += 1; };
+
+    storedConfig = { ...storedConfig, latencySource: 'user' };
+    enhancer.onConfigChanged();
+    assert.equal(enhancer.applied, true);
+    assert.equal(observerStarts, 0);
+    assert.equal(applyQueues, 0);
+    assert.equal(refreshSchedules, 0);
+
+    storedConfig = { ...storedConfig, providerSortPreference: 'user' };
+    enhancer.onConfigChanged();
+    assert.equal(enhancer.providerSortPreference, 'user');
+    assert.equal(enhancer.applied, false);
+    assert.equal(observerStarts, 1);
+    assert.equal(applyQueues, 1);
+    assert.equal(refreshSchedules, 0);
+
+    enhancer.applied = true;
+    storedConfig = { ...storedConfig, providerAutoRefresh: false };
+    enhancer.onConfigChanged();
+    assert.equal(enhancer.providerAutoRefresh, false);
+    assert.equal(enhancer.applied, true);
+    assert.equal(observerStarts, 1);
+    assert.equal(applyQueues, 1);
+    assert.equal(refreshSchedules, 1);
+
+    storedConfig = { ...storedConfig, providerRefreshIntervalSeconds: 90 };
+    enhancer.onConfigChanged();
+    assert.equal(enhancer.providerRefreshIntervalSeconds, 90);
+    assert.equal(observerStarts, 1);
+    assert.equal(applyQueues, 1);
+    assert.equal(refreshSchedules, 2);
+    assert.equal(storageReads, 5);
+  } finally {
+    if (originalLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = originalLocalStorage;
+  }
+});
+
+test('converges a reversed provider sort through the native default state before applying', () => {
+  const originalDocument = globalThis.document;
+  let state = 'worst';
+  let clicks = 0;
+  let queuedVerifications = 0;
+  const controls = {};
+  const createButtons = () => {
+    const rate = {
+      textContent: state === 'best' ? '倍率 ↑' : state === 'worst' ? '倍率 ↓' : '倍率',
+      className: state === 'best' || state === 'worst' ? 'monitor-sort-head active' : 'monitor-sort-head',
+      closest: (selector) => (selector === '.monitor-sort-controls' ? controls : null),
+      click: () => { clicks += 1; },
+    };
+    const fallback = {
+      textContent: state === 'default' ? '默认 ↓' : '默认',
+      className: state === 'default' ? 'monitor-sort-head active' : 'monitor-sort-head',
+      closest: (selector) => (selector === '.monitor-sort-controls' ? controls : null),
+    };
+    return [fallback, rate];
+  };
+  globalThis.document = {
+    querySelectorAll: () => createButtons(),
+  };
+
+  try {
+    const enhancer = new core.ProviderSortEnhancer();
+    enhancer.active = true;
+    enhancer.providerConfigLoaded = true;
+    enhancer.providerSortPreference = 'rate';
+    enhancer.queueSortVerification = () => { queuedVerifications += 1; };
+
+    assert.equal(enhancer.apply(), false);
+    assert.equal(clicks, 1);
+    assert.equal(enhancer.applied, false);
+
+    assert.equal(enhancer.apply(), false);
+    assert.equal(enhancer.apply(), false);
+    assert.equal(clicks, 1);
+    assert.equal(enhancer.sortConvergenceExhausted, false);
+
+    state = 'default';
+    assert.equal(enhancer.apply(), false);
+    assert.equal(clicks, 2);
+    assert.equal(enhancer.applied, false);
+
+    state = 'best';
+    assert.equal(enhancer.apply(), true);
+    assert.equal(clicks, 2);
+    assert.equal(queuedVerifications, 2);
+    assert.equal(enhancer.applied, true);
+    assert.equal(enhancer.sortConvergenceExhausted, false);
+  } finally {
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+});
+
+test('bounds provider sort clicks without treating a non-target state as applied', () => {
+  const originalDocument = globalThis.document;
+  let state = 'worst';
+  let clicks = 0;
+  const controls = {};
+  const createButtons = () => [{
+    textContent: state === 'worst' ? '倍率 ↓' : '倍率',
+    className: state === 'worst' ? 'monitor-sort-head active' : 'monitor-sort-head',
+    closest: (selector) => (selector === '.monitor-sort-controls' ? controls : null),
+    click: () => { clicks += 1; },
+  }, {
+    textContent: state === 'default' ? '默认 ↓' : '默认',
+    className: state === 'default' ? 'monitor-sort-head active' : 'monitor-sort-head',
+    closest: (selector) => (selector === '.monitor-sort-controls' ? controls : null),
+  }, {
+    textContent: state === 'other' ? '用户速度 ↑' : '用户速度',
+    className: state === 'other' ? 'monitor-sort-head active' : 'monitor-sort-head',
+    closest: (selector) => (selector === '.monitor-sort-controls' ? controls : null),
+  }];
+  globalThis.document = { querySelectorAll: () => createButtons() };
+
+  try {
+    const enhancer = new core.ProviderSortEnhancer();
+    enhancer.active = true;
+    enhancer.providerConfigLoaded = true;
+    enhancer.providerSortPreference = 'rate';
+    enhancer.queueSortVerification = () => {};
+
+    assert.equal(enhancer.apply(), false);
+    state = 'default';
+    assert.equal(enhancer.apply(), false);
+    state = 'other';
+    assert.equal(enhancer.apply(), false);
+    assert.equal(clicks, 2);
+    assert.equal(enhancer.applied, false);
+    assert.equal(enhancer.sortConvergenceExhausted, true);
+  } finally {
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
   }
 });
 
@@ -2085,10 +2316,10 @@ test('formats dropdown and key labels with the real-user TTFT source', () => {
   assert.deepEqual(core.formatGroupDropdownMonitor(row, 'user'), {
     statusText: '可用',
     statusTone: 'available',
-    latencyText: '用户平均 TTFT 1385 ms',
+    latencyText: '运行时 P50 TTFT 1385 ms',
     latencyValueText: '1385 ms',
   });
-  assert.equal(core.formatKeyOptionLabel({ name: 'main', groupName: 'A001' }, { multiplier: 0.05, latencyMs: 1384.6 }, 'user'), 'main · A001 · ×0.05 · 用户平均 TTFT 1385 ms');
+  assert.equal(core.formatKeyOptionLabel({ name: 'main', groupName: 'A001' }, { multiplier: 0.05, latencyMs: 1384.6 }, 'user'), 'main · A001 · ×0.05 · 运行时 P50 TTFT 1385 ms');
 });
 
 test('formats target key options with current group metrics and safe placeholders', () => {
@@ -2679,10 +2910,11 @@ test('recognizes the usage detail table after optional columns are hidden or reo
   assert.equal(core.hasUsageDetailColumns(['分组', '请求', 'Token', '实际', '标准']), false);
 });
 
-test('enables the panel on every AIHub page only while logged in', () => {
+test('keeps the public provider controls active while gating account features by login', () => {
   assert.deepEqual(core.getPageFeatures('/providers', true), { panel: true, usage: false, keyGroups: false, providerSort: true });
   assert.deepEqual(core.getPageFeatures('/keys?page=1', true), { panel: true, usage: false, keyGroups: true, providerSort: false });
   assert.deepEqual(core.getPageFeatures('/usage', true), { panel: true, usage: true, keyGroups: false, providerSort: false });
   assert.deepEqual(core.getPageFeatures('/dashboard', true), { panel: true, usage: false, keyGroups: false, providerSort: false });
+  assert.deepEqual(core.getPageFeatures('/providers', false), { panel: false, usage: false, keyGroups: false, providerSort: true });
   assert.deepEqual(core.getPageFeatures('/usage', false), { panel: false, usage: false, keyGroups: false, providerSort: false });
 });

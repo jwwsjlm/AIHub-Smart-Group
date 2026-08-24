@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.13.0
+// @version      0.13.1
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.13.0';
+  const SCRIPT_VERSION = '0.13.1';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -43,6 +43,8 @@
   const USAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
   const USAGE_AUDIT_RETRY_MS = 15_000;
   const USAGE_AUDIT_CACHE_LIMIT = 8;
+  const PROVIDER_SORT_MAX_CLICKS = 2;
+  const PROVIDER_SORT_VERIFY_DELAY_MS = 250;
   const PROVIDER_REFRESH_RETRY_MS = 1_000;
   const PROVIDER_REFRESH_UNAVAILABLE_RETRY_MS = 5_000;
   const PROVIDER_REFRESH_BUTTON_SELECTOR = [
@@ -65,7 +67,7 @@
   });
   const LATENCY_SOURCE_LABELS = Object.freeze({
     probe: '主动探测首 Token',
-    user: '真实用户平均 TTFT',
+    user: '运行时 P50 TTFT',
   });
   const MODEL_PRICE_MODEL_LABELS = Object.freeze({
     none: '不显示',
@@ -129,6 +131,14 @@
     stale: '已过期',
     missing: '缺失',
   });
+  const CANDIDATE_FILTER_SETTING_KEYS = Object.freeze([
+    'minSuccess10m',
+    'availabilityMode',
+    'minSuccessPoints10m',
+    'minConsecutiveSuccesses10m',
+    'requireNoWarnings',
+    'excludedGroupKeywords',
+  ]);
   const DEFAULT_CONFIG = Object.freeze({
     minSuccess10m: 0.10,
     requireNoWarnings: true,
@@ -251,6 +261,31 @@
     };
   }
 
+  function getSettingsPreviewTargets(changedKey) {
+    const key = String(changedKey || '');
+    const renderAll = !key;
+    const candidateFilterChanged = CANDIDATE_FILTER_SETTING_KEYS.includes(key);
+    return {
+      recommendation: renderAll || candidateFilterChanged || key === 'recommendationPriceBasis',
+      balance: renderAll || candidateFilterChanged || key === 'balanceMaxPrice' || key === 'latencySource',
+      excluded: renderAll || key === 'excludedGroupKeywords',
+      cooldown: renderAll || key === 'cooldownMinutes',
+    };
+  }
+
+  function getRecommendationPricePreviewSignature(config = DEFAULT_CONFIG) {
+    const normalized = normalizeConfig(config);
+    return JSON.stringify({
+      recommendationPriceBasis: normalized.recommendationPriceBasis,
+      availabilityMode: normalized.availabilityMode,
+      minSuccess10m: normalized.minSuccess10m,
+      minSuccessPoints10m: normalized.minSuccessPoints10m,
+      minConsecutiveSuccesses10m: normalized.minConsecutiveSuccesses10m,
+      requireNoWarnings: normalized.requireNoWarnings,
+      excludedGroupKeywords: normalized.excludedGroupKeywords,
+    });
+  }
+
   function normalizeGroupMode(value) {
     return Object.prototype.hasOwnProperty.call(GROUP_MODE_LABELS, value) ? value : 'price';
   }
@@ -315,6 +350,16 @@
       || String(button?.className || '').split(/\s+/).includes('active'))
       || candidates.find((button) => Boolean(getProviderSortButtonDirection(button)))
       || null;
+  }
+
+  function getProviderSortStateSignature(buttons) {
+    const activeButton = findActiveProviderSortButton(buttons);
+    if (!activeButton) return '';
+    const label = String(activeButton.textContent || '')
+      .trim()
+      .replace(/\s*[↑↓]$/, '')
+      .toLocaleLowerCase();
+    return `${label}|${getProviderSortButtonDirection(activeButton)}`;
   }
 
   function findProviderSortButton(buttons, preference) {
@@ -682,7 +727,7 @@
     const metric = getLatencyMetric(row, source);
     const valueText = metric.value === null ? '暂无数据' : formatLatency(metric.value);
     if (source === 'user') {
-      return metric.fallback ? `用户平均 TTFT ${valueText}（回退探测）` : `用户平均 TTFT ${valueText}`;
+      return metric.fallback ? `运行时 P50 TTFT ${valueText}（回退探测）` : `运行时 P50 TTFT ${valueText}`;
     }
     return `首 Token ${valueText}`;
   }
@@ -1396,7 +1441,7 @@
     const metric = getLatencyMetric(row, latencySource);
     const latency = metric.value;
     const label = latencySource === 'user'
-      ? (metric.fallback ? '用户平均 TTFT（回退探测）' : '用户平均 TTFT')
+      ? (metric.fallback ? '运行时 P50 TTFT（回退探测）' : '运行时 P50 TTFT')
       : '首 Token';
     const latencyValueText = row && latency !== null ? `${Math.round(latency)} ms` : '';
     const latencyText = row && latency !== null
@@ -1428,7 +1473,7 @@
     const multiplier = nonNegativeNumberOrNull(metric?.multiplier);
     const latencyMs = nonNegativeNumberOrNull(metric?.latencyMs);
     const multiplierText = multiplier === null ? '倍率暂无数据' : formatMultiplier(multiplier);
-    const latencyLabel = latencySource === 'user' ? '用户平均 TTFT' : '首 Token';
+    const latencyLabel = latencySource === 'user' ? '运行时 P50 TTFT' : '首 Token';
     const latencyText = latencyMs === null ? `${latencyLabel} 暂无数据` : `${latencyLabel} ${formatLatency(latencyMs)}`;
     const detectionText = metric?.detectionStatus ? ` · ${getModelDetectionLabel({ modelDetection: { status: metric.detectionStatus } })}` : '';
     const cacheText = metric?.cacheHitRate == null ? '' : ` · 缓存 ${(metric.cacheHitRate * 100).toFixed(1)}%`;
@@ -1443,12 +1488,13 @@
 
   function getPageFeatures(pathname, loggedIn) {
     const path = String(pathname || '').split('?')[0];
-    if (!loggedIn) return { panel: false, usage: false, keyGroups: false, providerSort: false };
+    const providerSort = path === '/providers' || path.startsWith('/providers/');
+    if (!loggedIn) return { panel: false, usage: false, keyGroups: false, providerSort };
     return {
       panel: true,
       usage: path === '/usage' || path.startsWith('/usage/'),
       keyGroups: path === '/keys' || path.startsWith('/keys/'),
-      providerSort: path === '/providers' || path.startsWith('/providers/'),
+      providerSort,
     };
   }
 
@@ -2250,7 +2296,7 @@
               <section class="asg-settings-section">
                 <div class="asg-settings-head"><div class="asg-settings-title">TTFT 采集</div><label class="asg-settings-inline-label" for="asg-latency-source-setting">推荐、密钥详情和分组下拉使用的延迟指标</label></div>
                 <div class="asg-settings-grid">
-                  <label class="asg-setting-wide">采集指标<select id="asg-latency-source-setting" data-setting="latencySource"><option value="probe">主动探测首 Token</option><option value="user">真实用户平均 TTFT（无样本时回退探测）</option></select></label>
+                  <label class="asg-setting-wide">采集指标<select id="asg-latency-source-setting" data-setting="latencySource"><option value="probe">主动探测首 Token</option><option value="user">运行时 P50 TTFT（无样本时回退探测）</option></select></label>
                 </div>
               </section>
               <section class="asg-settings-section">
@@ -2371,12 +2417,14 @@
         this.refresh();
       });
       this.panel.addEventListener('input', (event) => {
-        if (event.target.matches('[data-setting]')) this.renderSettingsPreviews();
+        if (event.target.matches('[data-setting]') && event.target.dataset.setting !== 'availabilityMode') {
+          this.renderSettingsPreviews(event.target.dataset.setting);
+        }
       });
       this.panel.addEventListener('change', (event) => {
         if (event.target.matches('[data-setting="availabilityMode"]')) {
           this.syncAvailabilityInputs();
-          this.renderSettingsPreviews();
+          this.renderSettingsPreviews('availabilityMode');
         }
       });
     }
@@ -2437,12 +2485,13 @@
       return normalizeConfig(draft);
     }
 
-    renderSettingsPreviews() {
-      const normalizedDraft = this.readDraftConfig();
-      this.renderRecommendationPricePreview(normalizedDraft);
-      this.renderBalancePreview(normalizedDraft);
-      this.renderExcludedPreview();
-      this.renderCooldownPreview();
+    renderSettingsPreviews(changedKey) {
+      const targets = getSettingsPreviewTargets(changedKey);
+      const normalizedDraft = targets.recommendation || targets.balance ? this.readDraftConfig() : null;
+      if (targets.recommendation) this.renderRecommendationPricePreview(normalizedDraft);
+      if (targets.balance) this.renderBalancePreview(normalizedDraft);
+      if (targets.excluded) this.renderExcludedPreview();
+      if (targets.cooldown) this.renderCooldownPreview();
     }
 
     renderRecommendationPricePreview(normalizedDraft = this.readDraftConfig()) {
@@ -2450,7 +2499,8 @@
       if (!preview) return;
       const basis = normalizedDraft.recommendationPriceBasis;
       const label = RECOMMENDATION_PRICE_BASIS_LABELS[basis];
-      const unsaved = basis !== this.config.recommendationPriceBasis;
+      const unsaved = getRecommendationPricePreviewSignature(normalizedDraft)
+        !== getRecommendationPricePreviewSignature(this.config);
       const suffix = unsaved ? ' · 未保存' : '';
       if (basis === 'nominal') {
         preview.textContent = `价格模式按${label}排序；平衡上限和费用核验也继续使用标称倍率${suffix}`;
@@ -2938,7 +2988,7 @@
       const latencyLabel = details.querySelector('[data-key-detail-label="latency"]');
       const modelPriceRow = details.querySelector('[data-key-detail-row="model-price"]');
       const modelPriceLabel = details.querySelector('[data-key-detail-label="model-price"]');
-      if (latencyLabel) latencyLabel.textContent = this.config.latencySource === 'user' ? '真实用户平均 TTFT' : '最新首 Token';
+      if (latencyLabel) latencyLabel.textContent = this.config.latencySource === 'user' ? '运行时 P50 TTFT' : '最新首 Token';
       if (modelPriceRow) modelPriceRow.hidden = this.config.modelPriceModel === 'none';
       if (modelPriceLabel) modelPriceLabel.textContent = `${MODEL_PRICE_MODEL_LABELS[this.config.modelPriceModel]} 价格 / 1M`;
       details.querySelector('[data-key-detail="name"]').textContent = key.name;
@@ -3179,7 +3229,7 @@
       if (this.loadFailed) {
         info = { ...formatGroupDropdownMonitor(null, this.latencySource), statusText: '监控读取失败', statusTone: 'error' };
       } else if (!this.hasMonitorData) {
-        const latencyLabel = this.latencySource === 'user' ? '用户平均 TTFT' : '首 Token';
+        const latencyLabel = this.latencySource === 'user' ? '运行时 P50 TTFT' : '首 Token';
         info = { statusText: '监控读取中', statusTone: 'unknown', latencyText: `${latencyLabel} --`, latencyValueText: '' };
       } else {
         const multiplier = parseGroupOptionMultiplier(multiplierNode.textContent);
@@ -3729,9 +3779,18 @@
       this.applyTimer = null;
       this.observerDeadlineTimer = null;
       this.retryTimer = null;
+      this.sortVerifyTimer = null;
       this.refreshTimer = null;
       this.lastRefreshAt = 0;
       this.refreshing = false;
+      this.sortClickCount = 0;
+      this.sortConvergenceExhausted = false;
+      this.sortClickPending = false;
+      this.sortPendingStateSignature = '';
+      this.providerConfigLoaded = false;
+      this.providerSortPreference = DEFAULT_CONFIG.providerSortPreference;
+      this.providerAutoRefresh = DEFAULT_CONFIG.providerAutoRefresh;
+      this.providerRefreshIntervalSeconds = DEFAULT_CONFIG.providerRefreshIntervalSeconds;
       this.onPageClick = (event) => {
         const button = event.target?.closest?.('button');
         const root = button?.closest?.('[data-testid="llm-monitor-panel"]') || button?.closest?.('main');
@@ -3743,15 +3802,32 @@
         }
       };
       this.onConfigChanged = () => {
-        this.applied = false;
-        this.observeUntilApplied();
-        this.queueApply();
-        this.syncRefreshTimer();
+        const previous = this.getProviderConfig();
+        const next = this.loadProviderConfig();
+        const sortChanged = next.providerSortPreference !== previous.providerSortPreference;
+        const refreshChanged = next.providerAutoRefresh !== previous.providerAutoRefresh
+          || next.providerRefreshIntervalSeconds !== previous.providerRefreshIntervalSeconds;
+        if (sortChanged) {
+          this.applied = false;
+          this.sortClickCount = 0;
+          this.sortConvergenceExhausted = false;
+          this.sortClickPending = false;
+          this.sortPendingStateSignature = '';
+          this.observeUntilApplied();
+          this.queueApply();
+        }
+        if (refreshChanged) this.syncRefreshTimer();
       };
     }
 
     start() {
+      this.loadProviderConfig();
       this.active = true;
+      this.applied = false;
+      this.sortClickCount = 0;
+      this.sortConvergenceExhausted = false;
+      this.sortClickPending = false;
+      this.sortPendingStateSignature = '';
       this.lastRefreshAt = Date.now();
       document.addEventListener('click', this.onPageClick, true);
       window.addEventListener(CONFIG_CHANGE_EVENT, this.onConfigChanged);
@@ -3760,14 +3836,37 @@
       this.syncRefreshTimer();
     }
 
+    loadProviderConfig() {
+      const config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
+      this.providerSortPreference = config.providerSortPreference;
+      this.providerAutoRefresh = config.providerAutoRefresh;
+      this.providerRefreshIntervalSeconds = config.providerRefreshIntervalSeconds;
+      this.providerConfigLoaded = true;
+      return this.getProviderConfig();
+    }
+
+    getProviderConfig() {
+      if (!this.providerConfigLoaded) return this.loadProviderConfig();
+      return {
+        providerSortPreference: this.providerSortPreference,
+        providerAutoRefresh: this.providerAutoRefresh,
+        providerRefreshIntervalSeconds: this.providerRefreshIntervalSeconds,
+      };
+    }
+
     observeUntilApplied() {
-      if (!this.active || this.applied || this.observer) return;
+      if (!this.active || this.applied || this.sortConvergenceExhausted || this.observer) return;
       if (this.retryTimer) window.clearInterval(this.retryTimer);
       this.retryTimer = null;
       this.observer = new MutationObserver((records) => {
         if (this.mutationsNeedSortScan(records)) this.queueApply();
       });
-      this.observer.observe(document.querySelector('main') || document.body, { childList: true, subtree: true });
+      this.observer.observe(document.querySelector('main') || document.body, {
+        attributes: true,
+        characterData: true,
+        childList: true,
+        subtree: true,
+      });
       if (this.observerDeadlineTimer) window.clearTimeout(this.observerDeadlineTimer);
       this.observerDeadlineTimer = window.setTimeout(() => {
         this.observerDeadlineTimer = null;
@@ -3787,7 +3886,7 @@
     }
 
     startLowFrequencyRetry() {
-      if (!this.active || this.applied || this.retryTimer) return;
+      if (!this.active || this.applied || this.sortConvergenceExhausted || this.retryTimer) return;
       this.retryTimer = window.setInterval(() => this.queueApply(), 5_000);
     }
 
@@ -3798,47 +3897,85 @@
       if (this.applyTimer) window.clearTimeout(this.applyTimer);
       if (this.observerDeadlineTimer) window.clearTimeout(this.observerDeadlineTimer);
       if (this.retryTimer) window.clearInterval(this.retryTimer);
+      if (this.sortVerifyTimer) window.clearTimeout(this.sortVerifyTimer);
       if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
       this.applyTimer = null;
       this.observerDeadlineTimer = null;
       this.retryTimer = null;
+      this.sortVerifyTimer = null;
       this.refreshTimer = null;
       document.removeEventListener('click', this.onPageClick, true);
       window.removeEventListener(CONFIG_CHANGE_EVENT, this.onConfigChanged);
     }
 
     queueApply() {
-      if (!this.active || this.applied || this.applyTimer) return;
+      if (!this.active || this.applied || this.sortConvergenceExhausted || this.applyTimer) return;
       this.applyTimer = window.setTimeout(() => {
         this.applyTimer = null;
         this.apply();
       }, ENHANCER_RENDER_DEBOUNCE_MS);
     }
 
+    queueSortVerification() {
+      if (!this.active) return;
+      if (this.sortVerifyTimer) window.clearTimeout(this.sortVerifyTimer);
+      this.sortVerifyTimer = window.setTimeout(() => {
+        this.sortVerifyTimer = null;
+        this.apply();
+      }, PROVIDER_SORT_VERIFY_DELAY_MS);
+    }
+
     apply() {
-      if (!this.active || this.applied) return false;
-      const preference = normalizeConfig(storageGet('config', DEFAULT_CONFIG)).providerSortPreference;
+      if (!this.active || this.applied || this.sortConvergenceExhausted) return false;
+      const preference = this.getProviderConfig().providerSortPreference;
       const scopedButtons = document.querySelectorAll('[data-testid="llm-monitor-panel"] .monitor-sort-controls button.monitor-sort-head');
       const buttons = scopedButtons.length ? scopedButtons : document.querySelectorAll('button.monitor-sort-head');
       const target = findProviderSortButton(buttons, preference);
       if (!target) return false;
       const activeButton = findActiveProviderSortButton(buttons);
-      if (shouldActivateProviderSort(target, activeButton, preference)) target.click();
+      const stateSignature = getProviderSortStateSignature(buttons);
+      if (this.sortClickPending) {
+        if (!stateSignature || stateSignature === this.sortPendingStateSignature) return false;
+        this.sortClickPending = false;
+        this.sortPendingStateSignature = '';
+      }
+      if (shouldActivateProviderSort(target, activeButton, preference)) {
+        if (this.sortClickCount >= PROVIDER_SORT_MAX_CLICKS) {
+          this.sortConvergenceExhausted = true;
+          this.stopSortRetries();
+          return false;
+        }
+        this.sortClickCount += 1;
+        this.sortClickPending = true;
+        this.sortPendingStateSignature = stateSignature;
+        target.click();
+        this.queueSortVerification();
+        return false;
+      }
       this.applied = true;
+      this.sortClickCount = 0;
+      this.sortClickPending = false;
+      this.sortPendingStateSignature = '';
+      this.stopSortRetries();
+      return true;
+    }
+
+    stopSortRetries() {
       this.observer?.disconnect();
       this.observer = null;
       if (this.observerDeadlineTimer) window.clearTimeout(this.observerDeadlineTimer);
       if (this.retryTimer) window.clearInterval(this.retryTimer);
+      if (this.sortVerifyTimer) window.clearTimeout(this.sortVerifyTimer);
       this.observerDeadlineTimer = null;
       this.retryTimer = null;
-      return true;
+      this.sortVerifyTimer = null;
     }
 
     syncRefreshTimer(refreshIfDue = true) {
       if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
       if (!this.active || !isPageVisible()) return;
-      const config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
+      const config = this.getProviderConfig();
       if (!config.providerAutoRefresh) return;
       const intervalMs = config.providerRefreshIntervalSeconds * 1000;
       const now = Date.now();
@@ -3863,7 +4000,7 @@
 
     refresh(config, now = Date.now()) {
       if (!this.active || !isPageVisible()) return false;
-      const currentConfig = config || normalizeConfig(storageGet('config', DEFAULT_CONFIG));
+      const currentConfig = config || this.getProviderConfig();
       if (!currentConfig.providerAutoRefresh
         || !isRefreshDue(now, this.lastRefreshAt, currentConfig.providerRefreshIntervalSeconds * 1000)) return false;
       const button = findProviderRefreshButtonInRoot(document.querySelector('main'));
@@ -4000,6 +4137,8 @@
     PROVIDER_SORT_LABELS,
     RECOMMENDATION_PRICE_BASIS_LABELS,
     normalizeConfig,
+    getSettingsPreviewTargets,
+    getRecommendationPricePreviewSignature,
     normalizeGroupMode,
     normalizeAvailabilityMode,
     normalizeLatencySource,
