@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.11.7
+// @version      0.11.8
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.11.7';
+  const SCRIPT_VERSION = '0.11.8';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const API_REQUEST_TIMEOUT_MS = 15_000;
@@ -36,6 +36,7 @@
   const ENHANCER_RENDER_DEBOUNCE_MS = 50;
   const ROUTER_SYNC_INTERVAL_MS = 2_000;
   const USAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+  const PROVIDER_REFRESH_RETRY_MS = 1_000;
   const USAGE_DETAIL_REQUIRED_HEADERS = Object.freeze([
     'API 密钥',
     '模型',
@@ -90,6 +91,15 @@
     successRate: '成功率',
     custom: '自定义',
   });
+  const PROVIDER_SORT_DIRECTIONS = Object.freeze({
+    rate: '↑',
+    default: '↓',
+    realPrice: '↑',
+    user: '↑',
+    cacheHit: '↓',
+    successRate: '↓',
+    custom: '↓',
+  });
   const DEFAULT_CONFIG = Object.freeze({
     minSuccess10m: 0.10,
     requireNoWarnings: true,
@@ -135,6 +145,14 @@
     return !Number.isFinite(completedAt)
       || completedAt <= 0
       || (Number.isFinite(current) ? current : Date.now()) - completedAt >= interval;
+  }
+
+  function getProviderRefreshDelay(now, lastRefreshAt, intervalMs) {
+    const current = Number(now);
+    const refreshedAt = Number(lastRefreshAt);
+    const interval = Number(intervalMs);
+    if (!Number.isFinite(current) || !Number.isFinite(refreshedAt) || !Number.isFinite(interval) || interval <= 0) return 0;
+    return Math.max(0, interval - Math.max(0, current - refreshedAt));
   }
 
   function shouldRunControllerRefresh({
@@ -220,6 +238,21 @@
 
   function getProviderSortButtonText(preference) {
     return PROVIDER_SORT_BUTTON_TEXTS[normalizeProviderSortPreference(preference)];
+  }
+
+  function getProviderSortDirection(preference) {
+    return PROVIDER_SORT_DIRECTIONS[normalizeProviderSortPreference(preference)];
+  }
+
+  function getProviderSortButtonDirection(button) {
+    return String(button?.textContent || '').trim().match(/([↑↓])$/)?.[1] || '';
+  }
+
+  function shouldActivateProviderSort(target, activeButton, preference) {
+    if (!target) return false;
+    if (activeButton !== target) return true;
+    const currentDirection = getProviderSortButtonDirection(target);
+    return Boolean(currentDirection && currentDirection !== getProviderSortDirection(preference));
   }
 
   function findProviderSortButton(buttons, preference) {
@@ -2900,9 +2933,13 @@
       this.retryTimer = null;
       this.refreshTimer = null;
       this.lastRefreshAt = 0;
+      this.refreshing = false;
       this.onPageClick = (event) => {
         const button = event.target?.closest?.('button');
-        if (button?.closest('main') && findProviderRefreshButton([button]) === button) this.lastRefreshAt = Date.now();
+        if (button?.closest('main') && findProviderRefreshButton([button]) === button) {
+          this.lastRefreshAt = Date.now();
+          if (!this.refreshing) this.syncRefreshTimer(false);
+        }
       };
       this.onConfigChanged = () => {
         this.applied = false;
@@ -2960,7 +2997,7 @@
       if (this.applyTimer) window.clearTimeout(this.applyTimer);
       if (this.observerDeadlineTimer) window.clearTimeout(this.observerDeadlineTimer);
       if (this.retryTimer) window.clearInterval(this.retryTimer);
-      if (this.refreshTimer) window.clearInterval(this.refreshTimer);
+      if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
       this.applyTimer = null;
       this.observerDeadlineTimer = null;
       this.retryTimer = null;
@@ -2984,7 +3021,7 @@
       const target = findProviderSortButton(buttons, preference);
       if (!target) return false;
       const activeButton = [...buttons].find((button) => button.classList.contains('active')) || null;
-      if (activeButton !== target) target.click();
+      if (shouldActivateProviderSort(target, activeButton, preference)) target.click();
       this.applied = true;
       this.observer?.disconnect();
       this.observer = null;
@@ -2995,25 +3032,29 @@
       return true;
     }
 
-    syncRefreshTimer() {
-      if (this.refreshTimer) window.clearInterval(this.refreshTimer);
+    syncRefreshTimer(refreshIfDue = true) {
+      if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
-      if (!this.active) return;
+      if (!this.active || !isPageVisible()) return;
       const config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
       if (!config.providerAutoRefresh) return;
       const intervalMs = config.providerRefreshIntervalSeconds * 1000;
-      this.refreshTimer = window.setInterval(() => {
-        if (isRefreshDue(Date.now(), this.lastRefreshAt, intervalMs)) this.refresh();
-      }, intervalMs);
+      if (refreshIfDue && isRefreshDue(Date.now(), this.lastRefreshAt, intervalMs)) this.refresh();
+      const delayMs = Math.max(PROVIDER_REFRESH_RETRY_MS, getProviderRefreshDelay(Date.now(), this.lastRefreshAt, intervalMs));
+      this.refreshTimer = window.setTimeout(() => {
+        this.refreshTimer = null;
+        this.syncRefreshTimer(true);
+      }, delayMs);
     }
 
     handleVisibilityChange() {
-      if (!this.active || !isPageVisible()) return;
-      const config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
-      if (config.providerAutoRefresh
-        && Date.now() - this.lastRefreshAt >= config.providerRefreshIntervalSeconds * 1000) {
-        this.refresh();
+      if (!this.active) return;
+      if (!isPageVisible()) {
+        if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
+        this.refreshTimer = null;
+        return;
       }
+      this.syncRefreshTimer(true);
     }
 
     refresh() {
@@ -3023,8 +3064,13 @@
         || !isRefreshDue(Date.now(), this.lastRefreshAt, config.providerRefreshIntervalSeconds * 1000)) return false;
       const button = findProviderRefreshButton(document.querySelectorAll('main button'));
       if (!button || button.disabled) return false;
-      button.click();
-      this.lastRefreshAt = Date.now();
+      this.refreshing = true;
+      try {
+        button.click();
+      } finally {
+        this.refreshing = false;
+        this.lastRefreshAt = Date.now();
+      }
       return true;
     }
   }
@@ -3039,11 +3085,12 @@
       this.timer = null;
       this.onRouteChange = () => this.sync();
       this.onVisibilityChange = () => {
-        if (!isPageVisible()) return;
-        this.sync();
-        this.panel?.handleVisibilityChange();
-        this.usage?.handleVisibilityChange();
-        this.keyGroups?.handleVisibilityChange();
+        if (isPageVisible()) {
+          this.sync();
+          this.panel?.handleVisibilityChange();
+          this.usage?.handleVisibilityChange();
+          this.keyGroups?.handleVisibilityChange();
+        }
         this.providerSort?.handleVisibilityChange();
       };
     }
@@ -3116,6 +3163,9 @@
     normalizeModelPriceModel,
     normalizeProviderSortPreference,
     getProviderSortButtonText,
+    getProviderSortDirection,
+    getProviderSortButtonDirection,
+    shouldActivateProviderSort,
     findProviderSortButton,
     findProviderRefreshButton,
     normalizeCacheHitRate,
@@ -3187,6 +3237,7 @@
     mergeKeyPages,
     shouldRefreshKeys,
     isRefreshDue,
+    getProviderRefreshDelay,
     shouldRunControllerRefresh,
     isPageVisible,
     fetchMonitorSummary,

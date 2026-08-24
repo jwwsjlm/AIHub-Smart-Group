@@ -162,6 +162,25 @@ test('finds the requested provider hall sort button without matching table heade
   assert.equal(core.findProviderSortButton(buttons, 'custom'), buttons[6]);
 });
 
+test('uses the native low-to-high or high-to-low direction for every provider sort mode', () => {
+  for (const preference of ['rate', 'realPrice', 'user']) {
+    assert.equal(core.getProviderSortDirection(preference), '↑');
+  }
+  for (const preference of ['default', 'cacheHit', 'successRate', 'custom']) {
+    assert.equal(core.getProviderSortDirection(preference), '↓');
+  }
+  assert.equal(core.getProviderSortButtonDirection({ textContent: '倍率 ↑' }), '↑');
+  assert.equal(core.getProviderSortButtonDirection({ textContent: '成功率 ↓ ' }), '↓');
+  assert.equal(core.getProviderSortButtonDirection({ textContent: '用户速度' }), '');
+
+  const correctRate = { textContent: '倍率 ↑' };
+  const reversedRate = { textContent: '倍率 ↓' };
+  assert.equal(core.shouldActivateProviderSort(correctRate, correctRate, 'rate'), false);
+  assert.equal(core.shouldActivateProviderSort(reversedRate, reversedRate, 'rate'), true);
+  assert.equal(core.shouldActivateProviderSort(correctRate, null, 'rate'), true);
+  assert.equal(core.shouldActivateProviderSort(null, null, 'rate'), false);
+});
+
 test('finds only the native provider hall refresh button', () => {
   const buttons = [
     { textContent: '检测' },
@@ -853,6 +872,21 @@ test('uses the last completed refresh time to suppress adjacent foreground refre
   assert.equal(core.isRefreshDue(completedAt + intervalMs, completedAt, intervalMs), true);
   assert.equal(core.isRefreshDue(completedAt + intervalMs + 1, completedAt, intervalMs), true);
   assert.equal(core.isRefreshDue(completedAt, 0, intervalMs), true);
+});
+
+test('keeps provider auto refresh anchored to the last refresh time', () => {
+  const providerEnhancerSource = userscriptSource.slice(
+    userscriptSource.indexOf('class ProviderSortEnhancer'),
+    userscriptSource.indexOf('class AppRouter'),
+  );
+  assert.equal(core.getProviderRefreshDelay(59_000, 0, 60_000), 1_000);
+  assert.equal(core.getProviderRefreshDelay(60_000, 0, 60_000), 0);
+  assert.equal(core.getProviderRefreshDelay(90_000, 0, 60_000), 0);
+  assert.equal(core.getProviderRefreshDelay(10_000, 20_000, 60_000), 60_000);
+  assert.equal(core.getProviderRefreshDelay(Number.NaN, 0, 60_000), 0);
+  assert.match(providerEnhancerSource, /this\.refreshTimer = window\.setTimeout\(\(\) => \{/);
+  assert.match(providerEnhancerSource, /if \(!isPageVisible\(\)\) \{\s*if \(this\.refreshTimer\) window\.clearTimeout\(this\.refreshTimer\);/);
+  assert.doesNotMatch(providerEnhancerSource, /this\.refreshTimer = window\.setInterval/);
 });
 
 test('runs controller polling when expanded and due', () => {
