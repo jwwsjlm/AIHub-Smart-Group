@@ -1307,11 +1307,16 @@ test('formats selected model prices in full and compact forms', () => {
 
 test('normalizes the new provider series response for availability and user freshness', () => {
   const at = Date.parse('2026-08-05T19:59:00Z');
+  const userAt = Date.parse('2026-08-05T19:58:00Z');
   const series = core.normalizeMonitorSeriesPayload({ data: {
     generated_at: '2026-08-05T20:00:00Z',
     range: '6h',
     schema_version: 2,
-    items: [{ group_id: 34, probe: [[at, 1]], user_ttft: [{ at: '2026-08-05T19:58:00Z', avg_ttft_ms: 6000, sample_count: 3, has_data: true }] }],
+    items: [{
+      group_id: 34,
+      probe: [[at, 1, 4300, 4400, 80, null, 'timeout', null, null, null]],
+      user_ttft: [{ at: '2026-08-05T19:58:00Z', avg_ttft_ms: 6000, sample_count: 3, has_data: true }],
+    }],
   } });
 
   assert.equal(series.range, '6h');
@@ -1319,7 +1324,7 @@ test('normalizes the new provider series response for availability and user fres
   assert.equal(Object.hasOwn(series, 'items'), false);
   assert.equal(Object.hasOwn(series, 'generated_at'), false);
   assert.deepEqual(series.seriesByApiId['34'], [[at, 1]]);
-  assert.equal(series.userTtftByGroupId['34'][0].sample_count, 3);
+  assert.deepEqual(series.userTtftByGroupId['34'], [[userAt, 6000, 3, true]]);
   assert.equal(core.getLatestMonitorSampleAt(series), at);
 });
 
@@ -1336,12 +1341,25 @@ test('normalizes provider series aliases and fills empty direct maps from items'
 
   assert.deepEqual(series.seriesByApiId['3'], [[20, 0]]);
   assert.deepEqual(series.seriesByApiId['4'], [[10, 1]]);
-  assert.equal(series.userTtftByGroupId['3'][0].probedAt, '2026-08-24T02:18:00Z');
-  assert.equal(series.userTtftByGroupId['4'][0].at, '2026-08-24T02:19:00Z');
+  assert.deepEqual(series.userTtftByGroupId['3'], [[Date.parse('2026-08-24T02:18:00Z'), null, null, null]]);
+  assert.deepEqual(series.userTtftByGroupId['4'], [[Date.parse('2026-08-24T02:19:00Z'), 500, null, null]]);
   assert.equal(core.getLatestMonitorSampleAt(series), Date.parse('2026-08-24T02:19:00Z'));
   assert.equal(Object.hasOwn(series, 'items'), false);
   assert.equal(Object.hasOwn(series, 'series_by_api_id'), false);
   assert.equal(Object.hasOwn(series, 'userTTFTByApiId'), false);
+});
+
+test('reuses already compact monitor series arrays without another allocation', () => {
+  const probe = [[10, 1], [20, 0]];
+  const user = [[15, 500, 3, true]];
+  const series = core.normalizeMonitorSeriesPayload({
+    range: '6h',
+    seriesByApiId: { 1: probe },
+    userTtftByGroupId: { 1: user },
+  });
+
+  assert.strictEqual(series.seriesByApiId['1'], probe);
+  assert.strictEqual(series.userTtftByGroupId['1'], user);
 });
 
 test('builds a weighted conservative provider series fallback from summary history', () => {
@@ -1449,12 +1467,12 @@ test('merges, sorts, and deduplicates primary and fallback provider samples by t
     [50, 0, 2],
     [100, 1],
     [200, 1, 3],
-    primaryTenFieldSample,
+    [300, 0],
   ]);
   assert.deepEqual(merged.seriesByApiId['2'], [[60, 1, 2]]);
   assert.deepEqual(merged.seriesByApiId['3'], [[70, 0, 1]]);
-  assert.equal(merged.userTtftByGroupId['1'][0].at, '2026-08-24T02:19:00Z');
-  assert.equal(merged.userTtftByGroupId['2'][0].at, '2026-08-24T02:17:00Z');
+  assert.deepEqual(merged.userTtftByGroupId['1'], [[Date.parse('2026-08-24T02:19:00Z'), null, null, null]]);
+  assert.deepEqual(merged.userTtftByGroupId['2'], [[Date.parse('2026-08-24T02:17:00Z'), null, null, null]]);
   assert.equal(merged.range, '6h');
   assert.equal(merged.generatedAt, '2026-08-24T02:21:00Z');
 });

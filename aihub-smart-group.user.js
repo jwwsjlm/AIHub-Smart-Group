@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.17
+// @version      0.14.18
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.17';
+  const SCRIPT_VERSION = '0.14.18';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -1227,6 +1227,90 @@
     };
   }
 
+  function parseMonitorSampleTimestamp(value) {
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    const text = String(value ?? '').trim();
+    if (!text) return null;
+    const numeric = Number(text);
+    if (Number.isFinite(numeric)) return numeric;
+    const parsed = Date.parse(text);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function normalizeMonitorSeriesSamples(value, normalizeSample) {
+    const source = Array.isArray(value) ? value : [];
+    const byTimestamp = new Map();
+    let reusable = true;
+    let previousTimestamp = Number.NEGATIVE_INFINITY;
+    for (const item of source) {
+      const normalized = normalizeSample(item);
+      if (!normalized) {
+        reusable = false;
+        continue;
+      }
+      if (normalized !== item || normalized[0] < previousTimestamp || byTimestamp.has(normalized[0])) reusable = false;
+      previousTimestamp = normalized[0];
+      byTimestamp.set(normalized[0], normalized);
+    }
+    return reusable && byTimestamp.size === source.length
+      ? source
+      : [...byTimestamp.values()].sort((left, right) => left[0] - right[0]);
+  }
+
+  function normalizeMonitorProbeSamples(value, weighted = false) {
+    return normalizeMonitorSeriesSamples(value, (sample) => {
+      const source = Array.isArray(sample) ? sample : null;
+      const timestamp = parseMonitorSampleTimestamp(source?.[0]
+        ?? sample?.at
+        ?? sample?.probedAt
+        ?? sample?.probed_at
+        ?? sample?.timestamp);
+      const rawStatus = source?.[1] ?? sample?.status ?? sample?.available;
+      const status = rawStatus === 1 || rawStatus === true
+        ? 1
+        : rawStatus === 0 || rawStatus === false
+          ? 0
+          : monitorHistoryStatusToAvailability(rawStatus);
+      if (timestamp === null || status === null) return null;
+      if (!weighted) {
+        return source?.length === 2 && source[0] === timestamp && source[1] === status
+          ? source
+          : [timestamp, status];
+      }
+      const rawWeight = nonNegativeNumberOrNull(source?.[2] ?? sample?.sampleCount ?? sample?.sample_count);
+      if (rawWeight === 0) return null;
+      const weight = Math.floor(clamp(rawWeight ?? 1, 1, MONITOR_HISTORY_SAMPLE_COUNT_CAP));
+      return source?.length === 3 && source[0] === timestamp && source[1] === status && source[2] === weight
+        ? source
+        : [timestamp, status, weight];
+    });
+  }
+
+  function normalizeMonitorUserTtftSamples(value) {
+    return normalizeMonitorSeriesSamples(value, (sample) => {
+      const source = Array.isArray(sample) ? sample : null;
+      const timestamp = parseMonitorSampleTimestamp(source?.[0]
+        ?? sample?.at
+        ?? sample?.probedAt
+        ?? sample?.probed_at
+        ?? sample?.timestamp);
+      if (timestamp === null) return null;
+      const average = nonNegativeNumberOrNull(source?.[1] ?? sample?.avgTtftMs ?? sample?.avg_ttft_ms);
+      const rawSampleCount = nonNegativeNumberOrNull(source?.[2] ?? sample?.sampleCount ?? sample?.sample_count);
+      const sampleCount = rawSampleCount === null
+        ? null
+        : Math.floor(clamp(rawSampleCount, 0, USER_TTFT_SAMPLE_COUNT_MAX));
+      const hasData = booleanOrNull(source?.[3] ?? sample?.hasData ?? sample?.has_data);
+      return source?.length === 4
+        && source[0] === timestamp
+        && source[1] === average
+        && source[2] === sampleCount
+        && source[3] === hasData
+        ? source
+        : [timestamp, average, sampleCount, hasData];
+    });
+  }
+
   function normalizeMonitorSeriesPayload(payload) {
     const data = payload?.data && typeof payload.data === 'object' ? payload.data : payload;
     const directSeries = data?.seriesByApiId ?? data?.series_by_api_id;
@@ -1238,14 +1322,15 @@
       ?? data?.user_ttft_by_api_id;
     const seriesByApiId = {};
     const userTtftByGroupId = {};
+    const weightedProbeSamples = data?.range === 'summary-history';
     if (directSeries && typeof directSeries === 'object' && !Array.isArray(directSeries)) {
       for (const [groupId, samples] of Object.entries(directSeries)) {
-        if (Array.isArray(samples)) seriesByApiId[String(groupId)] = samples;
+        if (Array.isArray(samples)) seriesByApiId[String(groupId)] = normalizeMonitorProbeSamples(samples, weightedProbeSamples);
       }
     }
     if (directUserTtft && typeof directUserTtft === 'object' && !Array.isArray(directUserTtft)) {
       for (const [groupId, samples] of Object.entries(directUserTtft)) {
-        if (Array.isArray(samples)) userTtftByGroupId[String(groupId)] = samples;
+        if (Array.isArray(samples)) userTtftByGroupId[String(groupId)] = normalizeMonitorUserTtftSamples(samples);
       }
     }
     for (const item of Array.isArray(data?.items) ? data.items : []) {
@@ -1254,10 +1339,10 @@
       const probe = item?.probe ?? item?.probeSeries ?? item?.probe_series;
       const userTtft = item?.userTtft ?? item?.userTTFT ?? item?.user_ttft;
       if ((!Array.isArray(seriesByApiId[groupId]) || !seriesByApiId[groupId].length) && Array.isArray(probe)) {
-        seriesByApiId[groupId] = probe;
+        seriesByApiId[groupId] = normalizeMonitorProbeSamples(probe, weightedProbeSamples);
       }
       if ((!Array.isArray(userTtftByGroupId[groupId]) || !userTtftByGroupId[groupId].length) && Array.isArray(userTtft)) {
-        userTtftByGroupId[groupId] = userTtft;
+        userTtftByGroupId[groupId] = normalizeMonitorUserTtftSamples(userTtft);
       }
     }
     const metadata = data && typeof data === 'object' && !Array.isArray(data) ? { ...data } : {};
@@ -1592,8 +1677,10 @@
     }
     for (const samples of Object.values(seriesPayload?.userTtftByGroupId || {})) {
       for (const sample of Array.isArray(samples) ? samples : []) {
-        const value = sample?.at ?? sample?.probedAt ?? sample?.probed_at ?? sample?.timestamp;
-        const timestamp = typeof value === 'number' ? value : Date.parse(value);
+        const value = Array.isArray(sample)
+          ? sample[0]
+          : (sample?.at ?? sample?.probedAt ?? sample?.probed_at ?? sample?.timestamp);
+        const timestamp = parseMonitorSampleTimestamp(value);
         if (Number.isFinite(timestamp)
           && timestamp <= upperBound
           && (latest === null || timestamp > latest)) latest = timestamp;
@@ -5191,6 +5278,8 @@
     normalizeMonitorRow,
     normalizeMonitorSummaryPayload,
     normalizeMonitorSeriesPayload,
+    normalizeMonitorProbeSamples,
+    normalizeMonitorUserTtftSamples,
     normalizeMonitorHistory,
     monitorHistoryStatusToAvailability,
     buildMonitorSeriesFromSummary,
