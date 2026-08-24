@@ -90,7 +90,7 @@ test('re-arms provider sorting only when the provider sort root is replaced', ()
   assert.match(providerSource, /this\.sortRoot = null;/);
   assert.match(providerSource, /getSortRoot\(\) \{[\s\S]*monitor-sort-controls/);
   assert.match(providerSource, /syncSortRoot\(\) \{[\s\S]*nextRoot !== currentRoot/);
-  assert.match(providerSource, /this\.sortRoot = nextRoot;[\s\S]*this\.applied = false;/);
+  assert.match(providerSource, /this\.sortRoot = nextRoot;[\s\S]*this\.resetPreferenceApplication\(\);/);
   assert.match(routerSource, /else if \(features\.providerSort && this\.providerSort\) \{\s*this\.providerSort\.syncSortRoot\(\);/);
 });
 
@@ -241,6 +241,7 @@ test('normalizes model price and usage cost audit settings', () => {
 
 test('defaults provider hall auto sorting to multiplier priority', () => {
   assert.equal(core.DEFAULT_CONFIG.providerSortPreference, 'rate');
+  assert.equal(core.DEFAULT_CONFIG.providerRangePreference, 'default');
   assert.equal(core.DEFAULT_CONFIG.providerAutoRefresh, true);
   assert.equal(core.DEFAULT_CONFIG.providerRefreshIntervalSeconds, 60);
   assert.equal(core.normalizeConfig({}).providerSortPreference, 'rate');
@@ -251,9 +252,36 @@ test('defaults provider hall auto sorting to multiplier priority', () => {
   assert.equal(core.normalizeProviderSortPreference('successRate'), 'successRate');
   assert.equal(core.normalizeProviderSortPreference('custom'), 'custom');
   assert.equal(core.normalizeProviderSortPreference('unexpected'), 'rate');
+  assert.equal(core.normalizeProviderRangePreference('6h'), '6h');
+  assert.equal(core.normalizeProviderRangePreference('24h'), '24h');
+  assert.equal(core.normalizeProviderRangePreference('7d'), '7d');
+  assert.equal(core.normalizeProviderRangePreference('30d'), '30d');
+  assert.equal(core.normalizeProviderRangePreference('unexpected'), 'default');
+  assert.equal(core.PROVIDER_RANGE_LABELS.default, '跟随网站默认');
   assert.equal(core.normalizeConfig({ providerAutoRefresh: false }).providerAutoRefresh, false);
   assert.equal(core.normalizeConfig({ providerRefreshIntervalSeconds: 2 }).providerRefreshIntervalSeconds, 15);
   assert.equal(core.normalizeConfig({ providerRefreshIntervalSeconds: 9999 }).providerRefreshIntervalSeconds, 3600);
+});
+
+test('finds and identifies the current provider time range controls', () => {
+  const makeButton = (range, active = false) => ({
+    textContent: range,
+    className: active ? 'active' : '',
+    getAttribute: (name) => (name === 'data-testid' ? `monitor-range-${range}` : null),
+  });
+  const buttons = [makeButton('6h', true), makeButton('24h'), makeButton('7d'), makeButton('30d')];
+
+  assert.equal(core.findProviderRangeButton(buttons, '24h'), buttons[1]);
+  assert.equal(core.findProviderRangeButton(buttons, '30d'), buttons[3]);
+  assert.equal(core.findProviderRangeButton(buttons, 'default'), null);
+  assert.equal(core.findActiveProviderRangeButton(buttons), buttons[0]);
+  assert.equal(core.shouldActivateProviderRange(buttons[1], buttons[0]), true);
+  assert.equal(core.shouldActivateProviderRange(buttons[0], buttons[0]), false);
+});
+
+test('exposes the provider time range preference in settings', () => {
+  assert.match(userscriptSource, /data-setting="providerRangePreference"/);
+  assert.match(userscriptSource, /<option value="default">跟随网站默认<\/option><option value="6h">6 小时<\/option><option value="24h">24 小时<\/option><option value="7d">7 天<\/option><option value="30d">30 天<\/option>/);
 });
 
 test('updates only settings previews affected by the edited field', () => {
@@ -2516,6 +2544,7 @@ test('invalidates provider sorting and refresh scheduling only for their own set
   const originalLocalStorage = globalThis.localStorage;
   let storedConfig = {
     providerSortPreference: 'rate',
+    providerRangePreference: 'default',
     providerAutoRefresh: true,
     providerRefreshIntervalSeconds: 60,
   };
@@ -2555,24 +2584,103 @@ test('invalidates provider sorting and refresh scheduling only for their own set
     assert.equal(refreshSchedules, 0);
 
     enhancer.applied = true;
+    storedConfig = { ...storedConfig, providerRangePreference: '24h' };
+    enhancer.onConfigChanged();
+    assert.equal(enhancer.providerRangePreference, '24h');
+    assert.equal(enhancer.applied, false);
+    assert.equal(observerStarts, 2);
+    assert.equal(applyQueues, 2);
+    assert.equal(refreshSchedules, 0);
+
+    enhancer.applied = true;
     storedConfig = { ...storedConfig, providerAutoRefresh: false };
     enhancer.onConfigChanged();
     assert.equal(enhancer.providerAutoRefresh, false);
     assert.equal(enhancer.applied, true);
-    assert.equal(observerStarts, 1);
-    assert.equal(applyQueues, 1);
+    assert.equal(observerStarts, 2);
+    assert.equal(applyQueues, 2);
     assert.equal(refreshSchedules, 1);
 
     storedConfig = { ...storedConfig, providerRefreshIntervalSeconds: 90 };
     enhancer.onConfigChanged();
     assert.equal(enhancer.providerRefreshIntervalSeconds, 90);
-    assert.equal(observerStarts, 1);
-    assert.equal(applyQueues, 1);
+    assert.equal(observerStarts, 2);
+    assert.equal(applyQueues, 2);
     assert.equal(refreshSchedules, 2);
-    assert.equal(storageReads, 5);
+    assert.equal(storageReads, 6);
   } finally {
     if (originalLocalStorage === undefined) delete globalThis.localStorage;
     else globalThis.localStorage = originalLocalStorage;
+  }
+});
+
+test('applies the provider time range before completing the saved sort preference', () => {
+  const originalDocument = globalThis.document;
+  let activeRange = '6h';
+  let rangeClicks = 0;
+  let queuedVerifications = 0;
+  const rangeButtons = () => ['6h', '24h', '7d', '30d'].map((range) => ({
+    textContent: range,
+    className: range === activeRange ? 'active' : '',
+    getAttribute: (name) => (name === 'data-testid' ? `monitor-range-${range}` : null),
+    click: () => { rangeClicks += 1; },
+  }));
+  const controls = {};
+  const sortButtons = () => [{
+    textContent: '倍率 ↑',
+    className: 'monitor-sort-head active',
+    closest: (selector) => (selector === '.monitor-sort-controls' ? controls : null),
+  }];
+  globalThis.document = {
+    querySelectorAll: (selector) => (selector.includes('monitor-range') ? rangeButtons() : sortButtons()),
+  };
+
+  try {
+    const enhancer = new core.ProviderSortEnhancer();
+    enhancer.active = true;
+    enhancer.providerConfigLoaded = true;
+    enhancer.providerSortPreference = 'rate';
+    enhancer.providerRangePreference = '24h';
+    enhancer.queueSortVerification = () => { queuedVerifications += 1; };
+
+    assert.equal(enhancer.apply(), false);
+    assert.equal(rangeClicks, 1);
+    assert.equal(enhancer.applied, false);
+
+    activeRange = '24h';
+    assert.equal(enhancer.apply(), true);
+    assert.equal(rangeClicks, 1);
+    assert.equal(queuedVerifications, 1);
+    assert.equal(enhancer.applied, true);
+  } finally {
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+});
+
+test('skips a missing provider time range control without blocking sorting', () => {
+  const originalDocument = globalThis.document;
+  const controls = {};
+  globalThis.document = {
+    querySelectorAll: (selector) => (selector.includes('monitor-range') ? [] : [{
+      textContent: '倍率 ↑',
+      className: 'monitor-sort-head active',
+      closest: (value) => (value === '.monitor-sort-controls' ? controls : null),
+    }]),
+  };
+
+  try {
+    const enhancer = new core.ProviderSortEnhancer();
+    enhancer.active = true;
+    enhancer.providerConfigLoaded = true;
+    enhancer.providerSortPreference = 'rate';
+    enhancer.providerRangePreference = '30d';
+
+    assert.equal(enhancer.apply(), true);
+    assert.equal(enhancer.applied, true);
+  } finally {
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
   }
 });
 

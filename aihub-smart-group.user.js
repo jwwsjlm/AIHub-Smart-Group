@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.5
+// @version      0.14.6
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.5';
+  const SCRIPT_VERSION = '0.14.6';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -47,6 +47,7 @@
   const USAGE_AUDIT_RETRY_MS = 15_000;
   const USAGE_AUDIT_CACHE_LIMIT = 8;
   const PROVIDER_SORT_MAX_CLICKS = 2;
+  const PROVIDER_RANGE_MAX_CLICKS = 1;
   const PROVIDER_SORT_VERIFY_DELAY_MS = 250;
   const PROVIDER_REFRESH_RETRY_MS = 1_000;
   const PROVIDER_REFRESH_UNAVAILABLE_RETRY_MS = 5_000;
@@ -152,6 +153,13 @@
     successRate: '↓',
     custom: '↓',
   });
+  const PROVIDER_RANGE_LABELS = Object.freeze({
+    default: '跟随网站默认',
+    '6h': '6 小时',
+    '24h': '24 小时',
+    '7d': '7 天',
+    '30d': '30 天',
+  });
   const RECOMMENDATION_PRICE_BASIS_LABELS = Object.freeze({
     nominal: '标称倍率',
     effectiveInput1h: '1 小时真实输入价',
@@ -192,6 +200,7 @@
     usageCostAuditTolerancePercent: 1,
     recommendationPriceBasis: 'nominal',
     providerSortPreference: 'rate',
+    providerRangePreference: 'default',
     providerAutoRefresh: true,
     providerRefreshIntervalSeconds: 60,
   });
@@ -289,6 +298,7 @@
       usageCostAuditTolerancePercent: clamp(numberOr(source.usageCostAuditTolerancePercent, DEFAULT_CONFIG.usageCostAuditTolerancePercent), 0.1, 100),
       recommendationPriceBasis: normalizeRecommendationPriceBasis(source.recommendationPriceBasis),
       providerSortPreference: normalizeProviderSortPreference(source.providerSortPreference),
+      providerRangePreference: normalizeProviderRangePreference(source.providerRangePreference),
       providerAutoRefresh: source.providerAutoRefresh !== false,
       providerRefreshIntervalSeconds: Math.round(clamp(numberOr(source.providerRefreshIntervalSeconds, DEFAULT_CONFIG.providerRefreshIntervalSeconds), 15, 3600)),
     };
@@ -345,6 +355,10 @@
 
   function normalizeProviderSortPreference(value) {
     return Object.prototype.hasOwnProperty.call(PROVIDER_SORT_LABELS, value) ? value : 'rate';
+  }
+
+  function normalizeProviderRangePreference(value) {
+    return Object.prototype.hasOwnProperty.call(PROVIDER_RANGE_LABELS, value) ? value : 'default';
   }
 
   function normalizeRecommendationPriceBasis(value) {
@@ -417,6 +431,25 @@
       const text = String(button?.textContent || '').trim().replace(/\s*[↑↓]$/, '').toLocaleLowerCase();
       return targetTexts.includes(text);
     }) || null;
+  }
+
+  function findProviderRangeButton(buttons, preference) {
+    const normalized = normalizeProviderRangePreference(preference);
+    if (normalized === 'default') return null;
+    const candidates = [...(buttons || [])];
+    return candidates.find((button) => String(button?.getAttribute?.('data-testid') || '').trim() === `monitor-range-${normalized}`)
+      || candidates.find((button) => String(button?.textContent || '').trim().toLocaleLowerCase() === normalized)
+      || null;
+  }
+
+  function findActiveProviderRangeButton(buttons) {
+    return [...(buttons || [])].find((button) => button?.classList?.contains?.('active') === true
+      || String(button?.className || '').split(/\s+/).includes('active'))
+      || null;
+  }
+
+  function shouldActivateProviderRange(target, activeButton) {
+    return Boolean(target && target !== activeButton);
   }
 
   function findProviderRefreshButton(buttons) {
@@ -2663,12 +2696,13 @@
                 </div>
               </section>
               <section class="asg-settings-section">
-                <div class="asg-settings-head"><div class="asg-settings-title">供应商大厅</div><label class="asg-settings-inline-label" for="asg-provider-sort-setting">打开页面后自动选择排序</label></div>
+                <div class="asg-settings-head"><div class="asg-settings-title">供应商大厅</div><label class="asg-settings-inline-label" for="asg-provider-sort-setting">打开页面后自动应用大厅偏好</label></div>
                 <div class="asg-settings-grid">
                   <label class="asg-setting-wide">自动排序<select id="asg-provider-sort-setting" data-setting="providerSortPreference"><option value="rate">倍率优先（从低到高）</option><option value="realPrice">真实价格优先</option><option value="user">用户速度排序</option><option value="cacheHit">缓存命中优先</option><option value="successRate">成功率优先</option><option value="custom">自定义排序</option><option value="default">默认排序</option></select></label>
+                  <label class="asg-setting-wide">大厅时间维度<select data-setting="providerRangePreference"><option value="default">跟随网站默认</option><option value="6h">6 小时</option><option value="24h">24 小时</option><option value="7d">7 天</option><option value="30d">30 天</option></select></label>
                   <label class="asg-setting-compact asg-auto"><input type="checkbox" data-setting="providerAutoRefresh"> 定时自动刷新</label>
                   <label>刷新间隔（秒）<input type="number" min="15" max="3600" step="1" data-setting="providerRefreshIntervalSeconds"></label>
-                  <span class="asg-setting-preview asg-setting-wide">排序保存后立即应用；自动刷新会点击页面原生“刷新”按钮，不会整页重载。</span>
+                  <span class="asg-setting-preview asg-setting-wide">排序和大厅时间维度保存后立即应用；自动刷新会点击页面原生“刷新”按钮，不会整页重载。</span>
                 </div>
               </section>
               <section class="asg-settings-section">
@@ -4240,9 +4274,12 @@
       this.sortConvergenceExhausted = false;
       this.sortClickPending = false;
       this.sortPendingStateSignature = '';
+      this.rangeClickCount = 0;
+      this.rangeConvergenceExhausted = false;
       this.sortRoot = null;
       this.providerConfigLoaded = false;
       this.providerSortPreference = DEFAULT_CONFIG.providerSortPreference;
+      this.providerRangePreference = DEFAULT_CONFIG.providerRangePreference;
       this.providerAutoRefresh = DEFAULT_CONFIG.providerAutoRefresh;
       this.providerRefreshIntervalSeconds = DEFAULT_CONFIG.providerRefreshIntervalSeconds;
       this.onPageClick = (event) => {
@@ -4262,14 +4299,11 @@
         const previous = this.getProviderConfig();
         const next = this.loadProviderConfig();
         const sortChanged = next.providerSortPreference !== previous.providerSortPreference;
+        const rangeChanged = next.providerRangePreference !== previous.providerRangePreference;
         const refreshChanged = next.providerAutoRefresh !== previous.providerAutoRefresh
           || next.providerRefreshIntervalSeconds !== previous.providerRefreshIntervalSeconds;
-        if (sortChanged) {
-          this.applied = false;
-          this.sortClickCount = 0;
-          this.sortConvergenceExhausted = false;
-          this.sortClickPending = false;
-          this.sortPendingStateSignature = '';
+        if (sortChanged || rangeChanged) {
+          this.resetPreferenceApplication();
           this.observeUntilApplied();
           this.queueApply();
         }
@@ -4283,11 +4317,7 @@
     start() {
       this.loadProviderConfig();
       this.active = true;
-      this.applied = false;
-      this.sortClickCount = 0;
-      this.sortConvergenceExhausted = false;
-      this.sortClickPending = false;
-      this.sortPendingStateSignature = '';
+      this.resetPreferenceApplication();
       this.lastRefreshAt = Date.now();
       document.addEventListener('click', this.onPageClick, true);
       window.addEventListener(CONFIG_CHANGE_EVENT, this.onConfigChanged);
@@ -4300,6 +4330,7 @@
     loadProviderConfig() {
       const config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
       this.providerSortPreference = config.providerSortPreference;
+      this.providerRangePreference = config.providerRangePreference;
       this.providerAutoRefresh = config.providerAutoRefresh;
       this.providerRefreshIntervalSeconds = config.providerRefreshIntervalSeconds;
       this.providerConfigLoaded = true;
@@ -4310,6 +4341,7 @@
       if (!this.providerConfigLoaded) return this.loadProviderConfig();
       return {
         providerSortPreference: this.providerSortPreference,
+        providerRangePreference: this.providerRangePreference,
         providerAutoRefresh: this.providerAutoRefresh,
         providerRefreshIntervalSeconds: this.providerRefreshIntervalSeconds,
       };
@@ -4320,6 +4352,16 @@
       return panel?.querySelector?.('.monitor-sort-controls') || document.querySelector('.monitor-sort-controls') || null;
     }
 
+    resetPreferenceApplication() {
+      this.applied = false;
+      this.sortClickCount = 0;
+      this.sortConvergenceExhausted = false;
+      this.sortClickPending = false;
+      this.sortPendingStateSignature = '';
+      this.rangeClickCount = 0;
+      this.rangeConvergenceExhausted = false;
+    }
+
     syncSortRoot() {
       const nextRoot = this.getSortRoot();
       const currentRoot = this.sortRoot;
@@ -4327,11 +4369,7 @@
       if (!rootChanged) return false;
       this.stopSortRetries();
       this.sortRoot = nextRoot;
-      this.applied = false;
-      this.sortClickCount = 0;
-      this.sortConvergenceExhausted = false;
-      this.sortClickPending = false;
-      this.sortPendingStateSignature = '';
+      this.resetPreferenceApplication();
       if (this.active) {
         this.observeUntilApplied();
         this.queueApply();
@@ -4364,9 +4402,10 @@
     mutationsNeedSortScan(records) {
       return [...(records || [])].some((record) => {
         const target = record.target?.nodeType === 1 ? record.target : record.target?.parentElement;
-        if (target?.closest?.('button.monitor-sort-head')) return true;
+        if (target?.closest?.('button.monitor-sort-head,.monitor-range-tabs button,[data-testid^="monitor-range-"]')) return true;
         return [...record.addedNodes, ...record.removedNodes].some((node) => node.nodeType === 1
-          && (node.matches?.('button.monitor-sort-head') || node.querySelector?.('button.monitor-sort-head')));
+          && (node.matches?.('button.monitor-sort-head,.monitor-range-tabs button,[data-testid^="monitor-range-"]')
+            || node.querySelector?.('button.monitor-sort-head,.monitor-range-tabs button,[data-testid^="monitor-range-"]')));
       });
     }
 
@@ -4414,7 +4453,9 @@
 
     apply() {
       if (!this.active || this.applied || this.sortConvergenceExhausted) return false;
-      const preference = this.getProviderConfig().providerSortPreference;
+      const config = this.getProviderConfig();
+      if (!this.applyRangePreference(config.providerRangePreference)) return false;
+      const preference = config.providerSortPreference;
       const scopedButtons = document.querySelectorAll('[data-testid="llm-monitor-panel"] .monitor-sort-controls button.monitor-sort-head');
       const buttons = scopedButtons.length ? scopedButtons : document.querySelectorAll('button.monitor-sort-head');
       const target = findProviderSortButton(buttons, preference);
@@ -4445,6 +4486,30 @@
       this.sortPendingStateSignature = '';
       this.stopSortRetries();
       return true;
+    }
+
+    applyRangePreference(preference) {
+      const normalized = normalizeProviderRangePreference(preference);
+      if (normalized === 'default' || this.rangeConvergenceExhausted) return true;
+      const scopedButtons = document.querySelectorAll('[data-testid="llm-monitor-panel"] .monitor-range-tabs button,[data-testid="llm-monitor-panel"] [data-testid^="monitor-range-"]');
+      const buttons = scopedButtons.length
+        ? scopedButtons
+        : document.querySelectorAll('.monitor-range-tabs button,[data-testid^="monitor-range-"]');
+      const target = findProviderRangeButton(buttons, normalized);
+      if (!target) return true;
+      const activeButton = findActiveProviderRangeButton(buttons);
+      if (!shouldActivateProviderRange(target, activeButton)) {
+        this.rangeClickCount = 0;
+        return true;
+      }
+      if (this.rangeClickCount >= PROVIDER_RANGE_MAX_CLICKS) {
+        this.rangeConvergenceExhausted = true;
+        return true;
+      }
+      this.rangeClickCount += 1;
+      target.click();
+      this.queueSortVerification();
+      return false;
     }
 
     stopSortRetries() {
@@ -4683,6 +4748,7 @@
     LATENCY_SOURCE_LABELS,
     MODEL_PRICE_MODEL_LABELS,
     MODEL_DETECTION_REASON_LABELS,
+    PROVIDER_RANGE_LABELS,
     PROVIDER_SORT_LABELS,
     RECOMMENDATION_PRICE_BASIS_LABELS,
     normalizeConfig,
@@ -4695,6 +4761,7 @@
     normalizeModelPriceModel,
     normalizeRecommendationPriceBasis,
     normalizeProviderSortPreference,
+    normalizeProviderRangePreference,
     getProviderSortButtonText,
     getProviderSortButtonTexts,
     getProviderSortDirection,
@@ -4702,6 +4769,9 @@
     findActiveProviderSortButton,
     shouldActivateProviderSort,
     findProviderSortButton,
+    findProviderRangeButton,
+    findActiveProviderRangeButton,
+    shouldActivateProviderRange,
     findProviderRefreshButton,
     findProviderRefreshButtonInRoot,
     isProviderRefreshButtonDisabled,
