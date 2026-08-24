@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.12.3
+// @version      0.13.0
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.12.3';
+  const SCRIPT_VERSION = '0.13.0';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -102,13 +102,13 @@
     custom: '自定义排序',
   });
   const PROVIDER_SORT_BUTTON_TEXTS = Object.freeze({
-    rate: '倍率',
-    default: '默认',
-    realPrice: '真实价格',
-    user: '用户速度',
-    cacheHit: '缓存命中',
-    successRate: Object.freeze(['成功率', '可用率']),
-    custom: '自定义',
+    rate: Object.freeze(['倍率', 'Multiplier']),
+    default: Object.freeze(['默认', 'Default']),
+    realPrice: Object.freeze(['真实价格', 'Effective price']),
+    user: Object.freeze(['用户速度', 'User speed']),
+    cacheHit: Object.freeze(['缓存命中', 'Cache hit']),
+    successRate: Object.freeze(['成功率', '可用率', 'Success rate']),
+    custom: Object.freeze(['自定义', 'Custom']),
   });
   const PROVIDER_SORT_DIRECTIONS = Object.freeze({
     rate: '↑',
@@ -118,6 +118,16 @@
     cacheHit: '↓',
     successRate: '↓',
     custom: '↓',
+  });
+  const RECOMMENDATION_PRICE_BASIS_LABELS = Object.freeze({
+    nominal: '标称倍率',
+    effectiveInput1h: '1 小时真实输入价',
+    effectiveMultiplier1h: '1 小时预测倍率',
+  });
+  const RECOMMENDATION_PRICE_UNAVAILABLE_REASON_LABELS = Object.freeze({
+    notReady: '未就绪',
+    stale: '已过期',
+    missing: '缺失',
   });
   const DEFAULT_CONFIG = Object.freeze({
     minSuccess10m: 0.10,
@@ -138,6 +148,7 @@
     usageCostAuditEnabled: true,
     usageCostAuditDisplay: 'anomalies',
     usageCostAuditTolerancePercent: 1,
+    recommendationPriceBasis: 'nominal',
     providerSortPreference: 'rate',
     providerAutoRefresh: true,
     providerRefreshIntervalSeconds: 60,
@@ -233,6 +244,7 @@
       usageCostAuditEnabled: source.usageCostAuditEnabled !== false,
       usageCostAuditDisplay: source.usageCostAuditDisplay === 'all' ? 'all' : 'anomalies',
       usageCostAuditTolerancePercent: clamp(numberOr(source.usageCostAuditTolerancePercent, DEFAULT_CONFIG.usageCostAuditTolerancePercent), 0.1, 100),
+      recommendationPriceBasis: normalizeRecommendationPriceBasis(source.recommendationPriceBasis),
       providerSortPreference: normalizeProviderSortPreference(source.providerSortPreference),
       providerAutoRefresh: source.providerAutoRefresh !== false,
       providerRefreshIntervalSeconds: Math.round(clamp(numberOr(source.providerRefreshIntervalSeconds, DEFAULT_CONFIG.providerRefreshIntervalSeconds), 15, 3600)),
@@ -263,6 +275,10 @@
     return Object.prototype.hasOwnProperty.call(PROVIDER_SORT_LABELS, value) ? value : 'rate';
   }
 
+  function normalizeRecommendationPriceBasis(value) {
+    return Object.prototype.hasOwnProperty.call(RECOMMENDATION_PRICE_BASIS_LABELS, value) ? value : 'nominal';
+  }
+
   function getProviderSortButtonText(preference) {
     const value = PROVIDER_SORT_BUTTON_TEXTS[normalizeProviderSortPreference(preference)];
     return Array.isArray(value) ? value[0] : value;
@@ -278,7 +294,12 @@
   }
 
   function getProviderSortButtonDirection(button) {
-    return String(button?.textContent || '').trim().match(/([↑↓])$/)?.[1] || '';
+    const textDirection = String(button?.textContent || '').trim().match(/([↑↓])$/)?.[1];
+    if (textDirection) return textDirection;
+    const ariaSort = String(button?.getAttribute?.('aria-sort') || '').trim().toLocaleLowerCase();
+    if (ariaSort === 'ascending') return '↑';
+    if (ariaSort === 'descending') return '↓';
+    return '';
   }
 
   function shouldActivateProviderSort(target, activeButton, preference) {
@@ -288,9 +309,32 @@
     return Boolean(currentDirection && currentDirection !== getProviderSortDirection(preference));
   }
 
+  function findActiveProviderSortButton(buttons) {
+    const candidates = [...(buttons || [])];
+    return candidates.find((button) => button?.classList?.contains?.('active') === true
+      || String(button?.className || '').split(/\s+/).includes('active'))
+      || candidates.find((button) => Boolean(getProviderSortButtonDirection(button)))
+      || null;
+  }
+
   function findProviderSortButton(buttons, preference) {
-    const targetTexts = getProviderSortButtonTexts(preference);
-    return [...(buttons || [])].find((button) => targetTexts.includes(String(button?.textContent || '').trim().replace(/\s*[↑↓]$/, ''))) || null;
+    const candidates = [...(buttons || [])];
+    const scopedCandidates = candidates.filter((button) => {
+      const className = String(button?.className || '').split(/\s+/);
+      const isSortHead = button?.classList?.contains?.('monitor-sort-head') === true || className.includes('monitor-sort-head');
+      if (!isSortHead) return false;
+      const closest = button?.closest?.('.monitor-sort-controls');
+      return typeof button?.closest !== 'function' || Boolean(closest);
+    });
+    const searchPool = scopedCandidates.length > 0 ? scopedCandidates : candidates.filter((button) => {
+      const className = String(button?.className || '').split(/\s+/);
+      return !button?.classList?.contains?.('header-sort') && !className.includes('header-sort');
+    });
+    const targetTexts = getProviderSortButtonTexts(preference).map((text) => text.toLocaleLowerCase());
+    return searchPool.find((button) => {
+      const text = String(button?.textContent || '').trim().replace(/\s*[↑↓]$/, '').toLocaleLowerCase();
+      return targetTexts.includes(text);
+    }) || null;
   }
 
   function findProviderRefreshButton(buttons) {
@@ -406,6 +450,61 @@
     return compact
       ? `真实 ${price}/1M · 预测 ${multiplier}`
       : `真实输入 ${price} / 1M · 预测倍率 ${multiplier}`;
+  }
+
+  function getRecommendationPriceMetric(row, basis = 'nominal') {
+    const normalizedBasis = normalizeRecommendationPriceBasis(basis);
+    const nominalValue = nonNegativeNumberOrNull(row?.priceMultiplier ?? row?.rate_multiplier ?? row?.rateMultiplier ?? row?.price);
+    if (normalizedBasis === 'nominal') {
+      return {
+        basis: normalizedBasis,
+        value: nominalValue,
+        available: nominalValue !== null,
+        reason: nominalValue === null ? 'missing' : '',
+      };
+    }
+
+    const pricing = getEffectivePricing(row);
+    if (pricing.runtimeCache1h?.stale === true || pricing.reason === 'runtime_metrics_stale') {
+      return { basis: normalizedBasis, value: null, available: false, reason: 'stale' };
+    }
+    if (normalizedBasis === 'effectiveInput1h') {
+      if (pricing.inputPricePerMillion === null) return { basis: normalizedBasis, value: null, available: false, reason: 'missing' };
+      if (pricing.runtimeCache1h?.ready !== true) return { basis: normalizedBasis, value: null, available: false, reason: 'notReady' };
+      return { basis: normalizedBasis, value: pricing.inputPricePerMillion, available: true, reason: '' };
+    }
+    if (pricing.multiplier === null) return { basis: normalizedBasis, value: null, available: false, reason: 'missing' };
+    if (pricing.reason === 'openrouter_reference_stale') {
+      return { basis: normalizedBasis, value: null, available: false, reason: 'stale' };
+    }
+    const readyFlag = booleanOrNull(
+      row?.effectivePricing?.ready
+      ?? row?.effectiveMultiplierReady
+      ?? row?.effective_multiplier_ready,
+    );
+    if (readyFlag !== true) return { basis: normalizedBasis, value: null, available: false, reason: 'notReady' };
+    return { basis: normalizedBasis, value: pricing.multiplier, available: true, reason: '' };
+  }
+
+  function formatRecommendationPriceCriterion(candidate) {
+    const basis = normalizeRecommendationPriceBasis(candidate?.rankingPriceBasis);
+    const value = nonNegativeNumberOrNull(candidate?.rankingPriceValue);
+    const nominal = nonNegativeNumberOrNull(candidate?.price ?? candidate?.priceMultiplier);
+    if (basis === 'effectiveInput1h' && value !== null) {
+      return `1h 真实输入价 ${formatModelPriceAmount(value)} / 1M${nominal === null ? '' : ` · 标称 ${formatMultiplier(nominal)}`}`;
+    }
+    if (basis === 'effectiveMultiplier1h' && value !== null) {
+      return `1h 预测倍率 ${formatMultiplier(value)}${nominal === null ? '' : ` · 标称 ${formatMultiplier(nominal)}`}`;
+    }
+    return nominal === null ? '标称倍率暂无数据' : `标称倍率 ${formatMultiplier(nominal)}`;
+  }
+
+  function formatRecommendationPriceUnavailableReasons(reasons) {
+    return Object.entries(RECOMMENDATION_PRICE_UNAVAILABLE_REASON_LABELS)
+      .map(([key, label]) => [label, Number(reasons?.[key]) || 0])
+      .filter(([, count]) => count > 0)
+      .map(([label, count]) => `${label} ${count}`)
+      .join('、');
   }
 
   function formatOutputThroughput(row, compact = false) {
@@ -828,12 +927,23 @@
     const normalizedConfig = normalizeConfig(config);
     const excludedKeywords = normalizedConfig.excludedGroupKeywords.split('|').filter(Boolean);
     const sourceRows = Array.isArray(rows) ? rows : [];
-    const counts = { total: sourceRows.length, invalid: 0, unavailable: 0, lowSuccess: 0, warnings: 0, keywords: 0, eligible: 0 };
+    const rankingPriceBasis = normalizedConfig.mode === 'price' ? normalizedConfig.recommendationPriceBasis : 'nominal';
+    const counts = {
+      total: sourceRows.length,
+      invalid: 0,
+      unavailable: 0,
+      lowSuccess: 0,
+      warnings: 0,
+      keywords: 0,
+      priceMetricUnavailable: 0,
+      priceMetricUnavailableReasons: { notReady: 0, stale: 0, missing: 0 },
+      eligible: 0,
+    };
     const candidates = [];
     for (const row of sourceRows) {
       const groupId = Number(row?.group_id);
-      const price = Number(row?.priceMultiplier);
-      if (!row || !Number.isInteger(groupId) || groupId <= 0 || !Number.isFinite(price) || price < 0) {
+      const price = nonNegativeNumberOrNull(row?.priceMultiplier);
+      if (!row || !Number.isInteger(groupId) || groupId <= 0 || price === null) {
         counts.invalid += 1;
         continue;
       }
@@ -863,11 +973,19 @@
         counts.keywords += 1;
         continue;
       }
+      const rankingPrice = getRecommendationPriceMetric(row, rankingPriceBasis);
+      if (!rankingPrice.available) {
+        counts.priceMetricUnavailable += 1;
+        counts.priceMetricUnavailableReasons[rankingPrice.reason] += 1;
+        continue;
+      }
       const latencyMetric = getLatencyMetric(row, normalizedConfig.latencySource);
       candidates.push({
         ...row,
         groupId,
         price,
+        rankingPriceValue: rankingPrice.value,
+        rankingPriceBasis: rankingPrice.basis,
         success10m,
         latency: latencyMetric.value ?? Number.POSITIVE_INFINITY,
         latencyMetricSource: latencyMetric.source,
@@ -884,10 +1002,12 @@
   }
 
   function comparePrice(left, right) {
-    return left.price - right.price
+    return left.rankingPriceValue - right.rankingPriceValue
       || right.success10m - left.success10m
       || left.latency - right.latency
-      || left.name.localeCompare(right.name);
+      || left.price - right.price
+      || left.name.localeCompare(right.name)
+      || left.groupId - right.groupId;
   }
 
   function compareSpeed(left, right) {
@@ -897,9 +1017,9 @@
       || left.name.localeCompare(right.name);
   }
 
-  function rankCandidates(rows, config = DEFAULT_CONFIG) {
+  function rankCandidates(rows, config = DEFAULT_CONFIG, analysis = null) {
     const normalizedConfig = normalizeConfig(config);
-    const candidates = getEligibleCandidates(rows, normalizedConfig);
+    const candidates = (analysis?.candidates || getEligibleCandidates(rows, normalizedConfig)).slice();
     if (normalizedConfig.mode === 'speed') return candidates.sort(compareSpeed);
     if (normalizedConfig.mode === 'balance') return candidates.filter((candidate) => candidate.price <= normalizedConfig.balanceMaxPrice).sort(compareSpeed);
     return candidates.sort(comparePrice);
@@ -1333,16 +1453,49 @@
   }
 
   function createStabilityState() {
-    return { groupId: null, count: 0, stable: false };
+    return { groupId: null, count: 0, stable: false, strategySignature: '' };
   }
 
-  function advanceStability(state, groupId, requiredChecks) {
+  function getRecommendationStrategySignature(config = DEFAULT_CONFIG) {
+    const normalized = normalizeConfig(config);
+    return JSON.stringify({
+      mode: normalized.mode,
+      recommendationPriceBasis: normalized.mode === 'price' ? normalized.recommendationPriceBasis : 'nominal',
+      balanceMaxPrice: normalized.mode === 'balance' ? normalized.balanceMaxPrice : null,
+      latencySource: normalized.latencySource,
+      availabilityMode: normalized.availabilityMode,
+      minSuccess10m: normalized.minSuccess10m,
+      minSuccessPoints10m: normalized.minSuccessPoints10m,
+      minConsecutiveSuccesses10m: normalized.minConsecutiveSuccesses10m,
+      requireNoWarnings: normalized.requireNoWarnings,
+      excludedGroupKeywords: normalized.excludedGroupKeywords,
+    });
+  }
+
+  function getRecommendationSnapshotBlockReason(winner, config = DEFAULT_CONFIG, stability = createStabilityState()) {
+    if (!winner) return '';
+    const normalizedConfig = normalizeConfig(config);
+    const currentSignature = getRecommendationStrategySignature(normalizedConfig);
+    if (String(stability?.strategySignature || '') !== currentSignature) return '推荐策略已变化，请重新检测';
+    const expectedBasis = normalizedConfig.mode === 'price' ? normalizedConfig.recommendationPriceBasis : 'nominal';
+    if (winner.rankingPriceBasis !== expectedBasis) return '推荐价格口径已变化，请重新检测';
+    const currentMetric = getRecommendationPriceMetric(winner, expectedBasis);
+    if (!currentMetric.available) {
+      return `${RECOMMENDATION_PRICE_BASIS_LABELS[expectedBasis]}当前不可用，请重新检测`;
+    }
+    const rankedValue = nonNegativeNumberOrNull(winner.rankingPriceValue);
+    if (rankedValue === null || currentMetric.value !== rankedValue) return '推荐价格数据已变化，请重新检测';
+    return '';
+  }
+
+  function advanceStability(state, groupId, requiredChecks, strategySignature = '') {
     const required = Math.max(1, Math.round(Number(requiredChecks) || 1));
     const numericGroupId = Number.isInteger(Number(groupId)) ? Number(groupId) : null;
     if (numericGroupId === null) return createStabilityState();
-    const sameGroup = state && state.groupId === numericGroupId;
+    const normalizedSignature = String(strategySignature || '');
+    const sameGroup = state && state.groupId === numericGroupId && String(state.strategySignature || '') === normalizedSignature;
     const count = sameGroup ? Number(state.count || 0) + 1 : 1;
-    return { groupId: numericGroupId, count, stable: count >= required };
+    return { groupId: numericGroupId, count, stable: count >= required, strategySignature: normalizedSignature };
   }
 
   function canAutoSwitch(options) {
@@ -1363,7 +1516,7 @@
     return forced || previous !== current;
   }
 
-  function getSwitchBlockReason({ loading, allowWhileLoading, error, authError, monitorStale, monitorFreshnessText, winner, key, stability, requiredChecks }) {
+  function getSwitchBlockReason({ loading, allowWhileLoading, error, authError, monitorStale, monitorFreshnessText, winner, key, stability, requiredChecks, config }) {
     if (loading && !allowWhileLoading) return '正在检测';
     if (error) return String(error);
     if (authError) return String(authError);
@@ -1371,6 +1524,10 @@
     if (!winner) return '暂无符合条件的推荐分组';
     if (!key) return '请先读取并选择目标密钥';
     if (!stability?.stable) return `推荐尚未稳定（${Number(stability?.count) || 0}/${requiredChecks} 次）`;
+    if (config) {
+      const snapshotReason = getRecommendationSnapshotBlockReason(winner, config, stability);
+      if (snapshotReason) return snapshotReason;
+    }
     if (key.groupId === winner.groupId) return '当前密钥已经在推荐分组';
     return '';
   }
@@ -2097,6 +2254,13 @@
                 </div>
               </section>
               <section class="asg-settings-section">
+                <div class="asg-settings-head"><div class="asg-settings-title">价格模式</div><label class="asg-settings-inline-label" for="asg-recommendation-price-basis-setting">仅改变价格模式的推荐依据</label></div>
+                <div class="asg-settings-grid">
+                  <label class="asg-setting-wide">价格依据<select id="asg-recommendation-price-basis-setting" data-setting="recommendationPriceBasis"><option value="nominal">标称倍率（默认）</option><option value="effectiveInput1h">1 小时真实输入价</option><option value="effectiveMultiplier1h">1 小时预测倍率</option></select></label>
+                  <span class="asg-setting-preview asg-setting-wide" data-field="recommendation-price-preview" aria-live="polite"></span>
+                </div>
+              </section>
+              <section class="asg-settings-section">
                 <div class="asg-settings-head"><div class="asg-settings-title">模型价格</div><label class="asg-settings-inline-label" for="asg-model-price-setting">显示 AIHub 后端分组价格</label></div>
                 <div class="asg-settings-grid">
                   <label class="asg-setting-wide">价格模型<select id="asg-model-price-setting" data-setting="modelPriceModel"><option value="sol">Sol</option><option value="terra">Terra</option><option value="luna">Luna</option><option value="none">不显示</option></select></label>
@@ -2188,7 +2352,9 @@
         this.renderActionState();
       });
       this.panel.querySelector('[data-field="mode"]').addEventListener('change', (event) => {
+        const previousStrategy = getRecommendationStrategySignature(this.config);
         this.config.mode = normalizeGroupMode(event.target.value);
+        if (getRecommendationStrategySignature(this.config) !== previousStrategy) this.stability = createStabilityState();
         storageSet('config', this.config);
         this.log('info', `模式改为${GROUP_MODE_LABELS[this.config.mode]}`);
         this.refresh();
@@ -2272,12 +2438,34 @@
     }
 
     renderSettingsPreviews() {
-      this.renderBalancePreview();
+      const normalizedDraft = this.readDraftConfig();
+      this.renderRecommendationPricePreview(normalizedDraft);
+      this.renderBalancePreview(normalizedDraft);
       this.renderExcludedPreview();
       this.renderCooldownPreview();
     }
 
-    renderBalancePreview() {
+    renderRecommendationPricePreview(normalizedDraft = this.readDraftConfig()) {
+      const preview = this.panel?.querySelector('[data-field="recommendation-price-preview"]');
+      if (!preview) return;
+      const basis = normalizedDraft.recommendationPriceBasis;
+      const label = RECOMMENDATION_PRICE_BASIS_LABELS[basis];
+      const unsaved = basis !== this.config.recommendationPriceBasis;
+      const suffix = unsaved ? ' · 未保存' : '';
+      if (basis === 'nominal') {
+        preview.textContent = `价格模式按${label}排序；平衡上限和费用核验也继续使用标称倍率${suffix}`;
+      } else if (!this.lastUpdated) {
+        preview.textContent = `价格模式将按${label}排序；无有效数据的分组不会回退标称倍率${suffix}`;
+      } else {
+        const analysis = analyzeCandidates(this.rows, { ...normalizedDraft, mode: 'price' });
+        const unavailable = analysis.counts.priceMetricUnavailable;
+        const reasonText = formatRecommendationPriceUnavailableReasons(analysis.counts.priceMetricUnavailableReasons);
+        preview.textContent = `${label}可用 ${analysis.candidates.length} 个 · 数据不可用排除 ${unavailable} 个${reasonText ? `（${reasonText}）` : ''} · 不回退标称倍率${suffix}`;
+      }
+      preview.classList.toggle('asg-preview-pending', unsaved);
+    }
+
+    renderBalancePreview(normalizedDraft = this.readDraftConfig()) {
       const preview = this.panel?.querySelector('[data-field="balance-preview"]');
       const maxPriceInput = this.panel?.querySelector('[data-setting="balanceMaxPrice"]');
       if (!preview || !maxPriceInput) return;
@@ -2287,8 +2475,7 @@
         preview.classList.add('asg-preview-pending');
         return;
       }
-      const normalizedDraft = this.readDraftConfig();
-      const candidateCount = getEligibleCandidates(this.rows, normalizedDraft)
+      const candidateCount = getEligibleCandidates(this.rows, { ...normalizedDraft, mode: 'balance' })
         .filter((candidate) => candidate.price <= normalizedDraft.balanceMaxPrice).length;
       const hasUnsavedFilter = normalizedDraft.balanceMaxPrice !== this.config.balanceMaxPrice
         || normalizedDraft.minSuccess10m !== this.config.minSuccess10m
@@ -2349,6 +2536,7 @@
     }
 
     saveSettings() {
+      const previousStrategy = getRecommendationStrategySignature(this.config);
       const next = {};
       for (const input of this.panel.querySelectorAll('[data-setting]')) {
         next[input.dataset.setting] = input.type === 'checkbox' ? input.checked : input.value;
@@ -2356,6 +2544,10 @@
       next.autoSwitch = this.config.autoSwitch;
       next.mode = this.config.mode;
       this.config = normalizeConfig(next);
+      if (getRecommendationStrategySignature(this.config) !== previousStrategy) {
+        this.stability = createStabilityState();
+        this.lastAutoSkipLogSignature = '';
+      }
       storageSet('config', this.config);
       window.dispatchEvent(new window.CustomEvent(CONFIG_CHANGE_EVENT));
       this.syncSettingsInputs();
@@ -2460,11 +2652,12 @@
         this.updateMonitorFreshness();
         this.recordMonitorFreshnessState();
         this.candidateDiagnostics = analyzeCandidates(this.rows, this.config);
-        this.ranked = rankCandidates(this.rows, this.config);
+        this.ranked = rankCandidates(this.rows, this.config, this.candidateDiagnostics);
         const winner = this.ranked[0] || null;
+        const strategySignature = getRecommendationStrategySignature(this.config);
         this.stability = this.monitorFreshness.stale
           ? createStabilityState()
-          : advanceStability(this.stability, winner?.groupId ?? null, this.config.consecutiveChecks);
+          : advanceStability(this.stability, winner?.groupId ?? null, this.config.consecutiveChecks, strategySignature);
         if (keys) {
           this.keys = keys;
           this.keyCount = keys.length;
@@ -2476,7 +2669,7 @@
         this.lastUpdated = new Date();
         this.error = '';
         this.renderData();
-        const detectionSignature = `${this.config.mode}:${winner?.groupId ?? 'none'}`;
+        const detectionSignature = `${strategySignature}:${winner?.groupId ?? 'none'}`;
         if (shouldLogTransition(this.lastDetectionLogSignature, detectionSignature, forceLog)) {
           this.log('info', `检测完成，推荐${winner?.name || '暂无分组'}`);
         }
@@ -2552,6 +2745,7 @@
         key,
         stability: this.stability,
         requiredChecks: this.config.consecutiveChecks,
+        config: this.config,
       });
       if (blockReason) {
         if (fromAuto) {
@@ -2587,7 +2781,7 @@
         this.lastAutoSkipLogSignature = reason;
         return false;
       }
-      if (!fromAuto && !window.confirm(`将密钥“${key.name}”切换到 ${winner.name}（${winner.price}x），是否继续？`)) return false;
+      if (!fromAuto && !window.confirm(`将密钥“${key.name}”切换到 ${winner.name}（${formatRecommendationPriceCriterion(winner)}），是否继续？`)) return false;
       try {
         await updateKeyGroup(key.id, winner.groupId);
         if (!this.active) return false;
@@ -2625,13 +2819,19 @@
       if (!winner) {
         const empty = document.createElement('div');
         empty.className = 'asg-muted';
-        empty.textContent = this.config.mode === 'balance'
-          ? '没有符合当前可靠性和倍率上限的分组'
-          : '没有符合当前可靠性条件的分组';
+        if (this.config.mode === 'balance') {
+          empty.textContent = '没有符合当前可靠性和倍率上限的分组';
+        } else if (this.config.mode === 'price'
+          && this.config.recommendationPriceBasis !== 'nominal'
+          && this.candidateDiagnostics?.counts?.priceMetricUnavailable > 0) {
+          empty.textContent = `没有具备可用${RECOMMENDATION_PRICE_BASIS_LABELS[this.config.recommendationPriceBasis]}且满足可靠性条件的分组`;
+        } else {
+          empty.textContent = '没有符合当前可靠性条件的分组';
+        }
         recommend.appendChild(empty);
       } else {
         const title = document.createElement('strong');
-        title.textContent = `${GROUP_MODE_LABELS[this.config.mode]}模式 · ${winner.name} · ${winner.price}x`;
+        title.textContent = `${GROUP_MODE_LABELS[this.config.mode]}模式 · ${winner.name} · ${formatRecommendationPriceCriterion(winner)}`;
         const metrics = document.createElement('div');
         metrics.className = 'asg-metrics';
         const availabilityText = this.config.availabilityMode === 'successes'
@@ -2661,7 +2861,9 @@
       diagnostic.className = 'asg-recommend-meta';
       const overLimit = this.config.mode === 'balance' ? Math.max(0, Number(diagnostics.eligible || 0) - this.ranked.length) : 0;
       const detectionWarnings = this.rows.filter(hasModelDetectionWarning).length;
-      diagnostic.textContent = `参与比较 ${this.ranked.length} · 排除关键词 ${diagnostics.keywords || 0} · 不可用 ${diagnostics.unavailable || 0} · 可用率不足 ${diagnostics.lowSuccess || 0} · 监控警告 ${diagnostics.warnings || 0}${detectionWarnings ? `（模型检测异常 ${detectionWarnings}）` : ''}${overLimit ? ` · 超过倍率上限 ${overLimit}` : ''}`;
+      const priceUnavailable = Number(diagnostics.priceMetricUnavailable) || 0;
+      const priceUnavailableReasons = formatRecommendationPriceUnavailableReasons(diagnostics.priceMetricUnavailableReasons);
+      diagnostic.textContent = `参与比较 ${this.ranked.length} · 排除关键词 ${diagnostics.keywords || 0} · 不可用 ${diagnostics.unavailable || 0} · 可用率不足 ${diagnostics.lowSuccess || 0} · 监控警告 ${diagnostics.warnings || 0}${detectionWarnings ? `（模型检测异常 ${detectionWarnings}）` : ''}${priceUnavailable ? ` · 价格数据不可用 ${priceUnavailable}${priceUnavailableReasons ? `（${priceUnavailableReasons}）` : ''}` : ''}${overLimit ? ` · 超过倍率上限 ${overLimit}` : ''}`;
       recommend.appendChild(diagnostic);
       const freshness = document.createElement('div');
       freshness.className = `asg-monitor-age${this.monitorFreshness.stale ? ' asg-stale' : ''}`;
@@ -2764,7 +2966,7 @@
         const modelPriceText = formatModelPriceSummary(candidate, this.config.modelPriceModel, true);
         const effectivePriceText = formatEffectivePricingSummary(candidate, true);
         const outputTpsText = formatOutputThroughput(candidate, true);
-        metrics.textContent = `${candidate.price}x · 10m ${formatPercent(candidate.success10m)}${detectionText ? ` · ${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${modelPriceText ? ` · ${modelPriceText}` : ''}${effectivePriceText ? ` · ${effectivePriceText}` : ''}${outputTpsText ? ` · ${outputTpsText}` : ''}${cacheHitRate === null ? '' : ` · 缓存 ${(cacheHitRate * 100).toFixed(1)}%`}`;
+        metrics.textContent = `${formatRecommendationPriceCriterion(candidate)} · 10m ${formatPercent(candidate.success10m)}${detectionText ? ` · ${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${modelPriceText ? ` · ${modelPriceText}` : ''}${effectivePriceText ? ` · ${effectivePriceText}` : ''}${outputTpsText ? ` · ${outputTpsText}` : ''}${cacheHitRate === null ? '' : ` · 缓存 ${(cacheHitRate * 100).toFixed(1)}%`}`;
         item.append(name, metrics);
         list.appendChild(item);
       }
@@ -2784,6 +2986,7 @@
         key,
         stability: this.stability,
         requiredChecks: this.config.consecutiveChecks,
+        config: this.config,
       });
       button.disabled = Boolean(reason);
       button.title = reason || `切换到 ${winner.name}`;
@@ -3615,10 +3818,11 @@
     apply() {
       if (!this.active || this.applied) return false;
       const preference = normalizeConfig(storageGet('config', DEFAULT_CONFIG)).providerSortPreference;
-      const buttons = document.querySelectorAll('button.monitor-sort-head');
+      const scopedButtons = document.querySelectorAll('[data-testid="llm-monitor-panel"] .monitor-sort-controls button.monitor-sort-head');
+      const buttons = scopedButtons.length ? scopedButtons : document.querySelectorAll('button.monitor-sort-head');
       const target = findProviderSortButton(buttons, preference);
       if (!target) return false;
-      const activeButton = [...buttons].find((button) => button.classList.contains('active')) || null;
+      const activeButton = findActiveProviderSortButton(buttons);
       if (shouldActivateProviderSort(target, activeButton, preference)) target.click();
       this.applied = true;
       this.observer?.disconnect();
@@ -3794,16 +3998,19 @@
     LATENCY_SOURCE_LABELS,
     MODEL_PRICE_MODEL_LABELS,
     PROVIDER_SORT_LABELS,
+    RECOMMENDATION_PRICE_BASIS_LABELS,
     normalizeConfig,
     normalizeGroupMode,
     normalizeAvailabilityMode,
     normalizeLatencySource,
     normalizeModelPriceModel,
+    normalizeRecommendationPriceBasis,
     normalizeProviderSortPreference,
     getProviderSortButtonText,
     getProviderSortButtonTexts,
     getProviderSortDirection,
     getProviderSortButtonDirection,
+    findActiveProviderSortButton,
     shouldActivateProviderSort,
     findProviderSortButton,
     findProviderRefreshButton,
@@ -3815,6 +4022,8 @@
     getEffectivePricing,
     getEffectiveMultiplierReasonLabel,
     formatEffectivePricingSummary,
+    getRecommendationPriceMetric,
+    formatRecommendationPriceCriterion,
     formatOutputThroughput,
     normalizeModelPrices,
     getModelPrices,
@@ -3878,6 +4087,8 @@
     hasUsageDetailColumns,
     getPageFeatures,
     createStabilityState,
+    getRecommendationStrategySignature,
+    getRecommendationSnapshotBlockReason,
     advanceStability,
     canAutoSwitch,
     getAutoSwitchBlockReason,

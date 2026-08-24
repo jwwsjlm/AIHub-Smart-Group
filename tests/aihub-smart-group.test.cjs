@@ -139,6 +139,14 @@ test('normalizes the selectable TTFT source and preserves the legacy default', (
   assert.equal(core.normalizeConfig({ latencySource: 'unexpected' }).latencySource, 'probe');
 });
 
+test('normalizes recommendation price bases while preserving the nominal default', () => {
+  assert.equal(core.DEFAULT_CONFIG.recommendationPriceBasis, 'nominal');
+  assert.equal(core.normalizeConfig({}).recommendationPriceBasis, 'nominal');
+  assert.equal(core.normalizeConfig({ recommendationPriceBasis: 'effectiveInput1h' }).recommendationPriceBasis, 'effectiveInput1h');
+  assert.equal(core.normalizeConfig({ recommendationPriceBasis: 'effectiveMultiplier1h' }).recommendationPriceBasis, 'effectiveMultiplier1h');
+  assert.equal(core.normalizeConfig({ recommendationPriceBasis: 'unexpected' }).recommendationPriceBasis, 'nominal');
+});
+
 test('normalizes model price and usage cost audit settings', () => {
   assert.equal(core.DEFAULT_CONFIG.modelPriceModel, 'sol');
   assert.equal(core.DEFAULT_CONFIG.usageCostAuditEnabled, true);
@@ -195,7 +203,48 @@ test('finds the requested provider hall sort button without matching table heade
   assert.equal(core.findProviderSortButton(buttons, 'successRate'), buttons[5]);
   assert.equal(core.findProviderSortButton(buttons, 'custom'), buttons[6]);
   assert.equal(core.findProviderSortButton([{ textContent: '可用率 ↓' }], 'successRate')?.textContent, '可用率 ↓');
-  assert.deepEqual(core.getProviderSortButtonTexts('successRate'), ['成功率', '可用率']);
+  assert.deepEqual(core.getProviderSortButtonTexts('successRate'), ['成功率', '可用率', 'Success rate']);
+});
+
+test('matches the English provider sort controls while rejecting duplicate table headers', () => {
+  const sortButton = (textContent) => ({
+    textContent,
+    className: 'monitor-sort-head',
+    closest: (selector) => (selector === '.monitor-sort-controls' ? {} : null),
+  });
+  const headerButton = (textContent) => ({ textContent, className: 'header-sort' });
+  const controls = {
+    default: sortButton('Default ↓'),
+    rate: sortButton('Multiplier'),
+    realPrice: sortButton('Effective price'),
+    user: sortButton('User speed ↑'),
+    cacheHit: sortButton('Cache hit'),
+    successRate: sortButton('Success rate'),
+    custom: sortButton('Custom'),
+  };
+  const buttons = [
+    headerButton('Multiplier'),
+    headerButton('Effective price / predicted multiplier'),
+    headerButton('User speed'),
+    headerButton('Cache hit'),
+    headerButton('Success rate'),
+    ...Object.values(controls),
+  ];
+
+  for (const [preference, button] of Object.entries(controls)) {
+    assert.equal(core.findProviderSortButton(buttons, preference), button);
+  }
+  assert.equal(core.findProviderSortButton([headerButton('真实价格/预测倍率')], 'realPrice'), null);
+  assert.equal(core.findProviderSortButton([headerButton('Effective price / predicted multiplier')], 'realPrice'), null);
+});
+
+test('keeps the legacy provider sort control fallback outside the new sort container', () => {
+  const legacyButton = {
+    textContent: '可用率 ↓',
+    className: 'monitor-sort-head',
+    closest: () => null,
+  };
+  assert.equal(core.findProviderSortButton([legacyButton], 'successRate'), legacyButton);
 });
 
 test('uses the native low-to-high or high-to-low direction for every provider sort mode', () => {
@@ -208,6 +257,7 @@ test('uses the native low-to-high or high-to-low direction for every provider so
   assert.equal(core.getProviderSortButtonDirection({ textContent: '倍率 ↑' }), '↑');
   assert.equal(core.getProviderSortButtonDirection({ textContent: '成功率 ↓ ' }), '↓');
   assert.equal(core.getProviderSortButtonDirection({ textContent: '用户速度' }), '');
+  assert.equal(core.getProviderSortButtonDirection({ textContent: 'Multiplier', getAttribute: () => 'ascending' }), '↑');
 
   const correctRate = { textContent: '倍率 ↑' };
   const reversedRate = { textContent: '倍率 ↓' };
@@ -215,6 +265,10 @@ test('uses the native low-to-high or high-to-low direction for every provider so
   assert.equal(core.shouldActivateProviderSort(reversedRate, reversedRate, 'rate'), true);
   assert.equal(core.shouldActivateProviderSort(correctRate, null, 'rate'), true);
   assert.equal(core.shouldActivateProviderSort(null, null, 'rate'), false);
+
+  const ariaOnly = { textContent: 'Multiplier', getAttribute: (name) => (name === 'aria-sort' ? 'ascending' : null) };
+  assert.equal(core.findActiveProviderSortButton([{ textContent: 'Default' }, ariaOnly]), ariaOnly);
+  assert.equal(core.shouldActivateProviderSort(ariaOnly, core.findActiveProviderSortButton([ariaOnly]), 'rate'), false);
 });
 
 test('finds only the native provider hall refresh button', () => {
@@ -460,6 +514,233 @@ test('keeps nominal multiplier separate and rejects stale or incomplete effectiv
     },
   ], { mode: 'price', requireNoWarnings: false });
   assert.equal(ranked[0].groupId, 1);
+});
+
+test('selects different price-mode winners for nominal, real-input, and predicted-multiplier bases', () => {
+  const runtimeReady = { ready: true, stale: false };
+  const rows = [
+    {
+      group_id: 1,
+      planType: 'nominal-winner',
+      priceMultiplier: 0.01,
+      effectiveInputPricePerMillion1h: 0.9,
+      effectiveMultiplier: 0.5,
+      effectiveMultiplierReady: true,
+      runtimeCache1h: runtimeReady,
+      available: true,
+      successRates: { '10m': 1 },
+    },
+    {
+      group_id: 2,
+      planType: 'real-input-winner',
+      priceMultiplier: 0.02,
+      effectiveInputPricePerMillion1h: 0.1,
+      effectiveMultiplier: 0.4,
+      effectiveMultiplierReady: true,
+      runtimeCache1h: runtimeReady,
+      available: true,
+      successRates: { '10m': 1 },
+    },
+    {
+      group_id: 3,
+      planType: 'predicted-winner',
+      priceMultiplier: 0.03,
+      effectiveInputPricePerMillion1h: 0.2,
+      effectiveMultiplier: 0.005,
+      effectiveMultiplierReady: true,
+      runtimeCache1h: runtimeReady,
+      available: true,
+      successRates: { '10m': 1 },
+    },
+  ];
+
+  const winnerFor = (recommendationPriceBasis) => core.rankCandidates(rows, {
+    ...core.DEFAULT_CONFIG,
+    mode: 'price',
+    recommendationPriceBasis,
+  })[0];
+
+  assert.deepEqual([
+    winnerFor('nominal')?.planType,
+    winnerFor('nominal')?.rankingPriceBasis,
+    winnerFor('nominal')?.rankingPriceValue,
+  ], ['nominal-winner', 'nominal', 0.01]);
+  assert.deepEqual([
+    winnerFor('effectiveInput1h')?.planType,
+    winnerFor('effectiveInput1h')?.rankingPriceBasis,
+    winnerFor('effectiveInput1h')?.rankingPriceValue,
+  ], ['real-input-winner', 'effectiveInput1h', 0.1]);
+  assert.deepEqual([
+    winnerFor('effectiveMultiplier1h')?.planType,
+    winnerFor('effectiveMultiplier1h')?.rankingPriceBasis,
+    winnerFor('effectiveMultiplier1h')?.rankingPriceValue,
+  ], ['predicted-winner', 'effectiveMultiplier1h', 0.005]);
+});
+
+test('excludes unavailable effective price metrics without falling back to nominal multipliers', () => {
+  const common = { available: true, successRates: { '10m': 1 } };
+  const missing = { ...common, group_id: 1, planType: 'missing', priceMultiplier: 0.001 };
+  const stale = {
+    ...common,
+    group_id: 2,
+    planType: 'stale',
+    priceMultiplier: 0.002,
+    effectiveInputPricePerMillion1h: 0.01,
+    effectiveMultiplier: 0.01,
+    effectiveMultiplierReady: true,
+    runtimeCache1h: { ready: true, stale: true },
+  };
+  const realInputReadyWithoutReference = {
+    ...common,
+    group_id: 3,
+    planType: 'real-input-ready',
+    priceMultiplier: 0.03,
+    effectiveInputPricePerMillion1h: 0.2,
+    effectiveMultiplierReady: false,
+    effectiveMultiplierReason: 'openrouter_reference_unavailable',
+    runtimeCache1h: { ready: true, stale: false },
+  };
+  const realInputNotReady = {
+    ...common,
+    group_id: 6,
+    planType: 'real-input-not-ready',
+    priceMultiplier: 0.006,
+    effectiveInputPricePerMillion1h: 0.05,
+    runtimeCache1h: { ready: false, stale: false },
+  };
+  const predictedNotReady = {
+    ...common,
+    group_id: 4,
+    planType: 'predicted-not-ready',
+    priceMultiplier: 0.004,
+    effectiveInputPricePerMillion1h: 0.1,
+    effectiveMultiplier: 0.001,
+    effectiveMultiplierReady: false,
+    runtimeCache1h: { ready: true, stale: false },
+  };
+  const predictedReady = {
+    ...common,
+    group_id: 5,
+    planType: 'predicted-ready',
+    priceMultiplier: 0.05,
+    effectiveInputPricePerMillion1h: 0.5,
+    effectiveMultiplier: 0.04,
+    effectiveMultiplierReady: true,
+    runtimeCache1h: { ready: true, stale: false },
+  };
+  const predictedReferenceStale = {
+    ...predictedReady,
+    group_id: 7,
+    planType: 'predicted-reference-stale',
+    effectiveMultiplier: 0.0001,
+    effectiveMultiplierReason: 'openrouter_reference_stale',
+  };
+
+  const realInputAnalysis = core.analyzeCandidates([missing, stale, realInputNotReady, realInputReadyWithoutReference], {
+    ...core.DEFAULT_CONFIG,
+    mode: 'price',
+    recommendationPriceBasis: 'effectiveInput1h',
+  });
+  assert.deepEqual(realInputAnalysis.candidates.map((row) => row.planType), ['real-input-ready']);
+  assert.equal(realInputAnalysis.counts.priceMetricUnavailable, 3);
+  assert.deepEqual(realInputAnalysis.counts.priceMetricUnavailableReasons, { notReady: 1, stale: 1, missing: 1 });
+
+  const predictedAnalysis = core.analyzeCandidates([missing, stale, predictedNotReady, predictedReferenceStale, predictedReady], {
+    ...core.DEFAULT_CONFIG,
+    mode: 'price',
+    recommendationPriceBasis: 'effectiveMultiplier1h',
+  });
+  assert.deepEqual(predictedAnalysis.candidates.map((row) => row.planType), ['predicted-ready']);
+  assert.equal(predictedAnalysis.counts.priceMetricUnavailable, 4);
+  assert.deepEqual(predictedAnalysis.counts.priceMetricUnavailableReasons, { notReady: 1, stale: 2, missing: 1 });
+  assert.deepEqual(core.rankCandidates([missing, stale, predictedNotReady], {
+    ...core.DEFAULT_CONFIG,
+    mode: 'price',
+    recommendationPriceBasis: 'effectiveMultiplier1h',
+  }), []);
+  assert.equal(core.getRecommendationPriceMetric({ price: 9, priceMultiplier: 0.05 }, 'nominal').value, 0.05);
+});
+
+test('rejects missing nominal multipliers even when an effective price metric is ready', () => {
+  const common = {
+    available: true,
+    successRates: { '10m': 1 },
+    effectiveInputPricePerMillion1h: 0.1,
+    effectiveMultiplier: 0.02,
+    effectiveMultiplierReady: true,
+    runtimeCache1h: { ready: true, stale: false },
+  };
+  const rows = [
+    { ...common, group_id: 1, planType: 'null-nominal', priceMultiplier: null },
+    { ...common, group_id: 2, planType: 'empty-nominal', priceMultiplier: '' },
+    { ...common, group_id: 3, planType: 'valid', priceMultiplier: 0.05 },
+  ];
+
+  for (const recommendationPriceBasis of ['effectiveInput1h', 'effectiveMultiplier1h']) {
+    const analysis = core.analyzeCandidates(rows, {
+      ...core.DEFAULT_CONFIG,
+      mode: 'price',
+      recommendationPriceBasis,
+    });
+    assert.equal(analysis.counts.invalid, 2);
+    assert.deepEqual(analysis.candidates.map((row) => row.planType), ['valid']);
+  }
+});
+
+test('keeps balance and speed ranking independent from the price-mode recommendation basis', () => {
+  const runtimeReady = { ready: true, stale: false };
+  const rows = [
+    {
+      group_id: 1,
+      planType: 'cheap-slow',
+      priceMultiplier: 0.03,
+      firstTokenLatencyMs: 500,
+      effectiveInputPricePerMillion1h: 0.01,
+      effectiveMultiplier: 0.01,
+      effectiveMultiplierReady: true,
+      runtimeCache1h: runtimeReady,
+      available: true,
+      successRates: { '10m': 1 },
+    },
+    {
+      group_id: 2,
+      planType: 'balanced-fast',
+      priceMultiplier: 0.04,
+      firstTokenLatencyMs: 100,
+      effectiveInputPricePerMillion1h: 0.9,
+      effectiveMultiplier: 0.9,
+      effectiveMultiplierReady: true,
+      runtimeCache1h: runtimeReady,
+      available: true,
+      successRates: { '10m': 1 },
+    },
+    {
+      group_id: 3,
+      planType: 'fast-over-limit',
+      priceMultiplier: 0.08,
+      firstTokenLatencyMs: 10,
+      effectiveInputPricePerMillion1h: 0.001,
+      effectiveMultiplier: 0.001,
+      effectiveMultiplierReady: true,
+      runtimeCache1h: runtimeReady,
+      available: true,
+      successRates: { '10m': 1 },
+    },
+  ];
+
+  for (const recommendationPriceBasis of ['nominal', 'effectiveInput1h', 'effectiveMultiplier1h']) {
+    assert.equal(core.rankCandidates(rows, {
+      ...core.DEFAULT_CONFIG,
+      mode: 'balance',
+      balanceMaxPrice: 0.05,
+      recommendationPriceBasis,
+    })[0]?.planType, 'balanced-fast');
+    assert.equal(core.rankCandidates(rows, {
+      ...core.DEFAULT_CONFIG,
+      mode: 'speed',
+      recommendationPriceBasis,
+    })[0]?.planType, 'fast-over-limit');
+  }
 });
 
 test('keeps insufficient model health distinct from healthy and failed states', () => {
@@ -937,7 +1218,17 @@ test('reports mutually exclusive candidate diagnostics', () => {
     { planType: 'eligible', group_id: 6, priceMultiplier: 0.02, available: true, successRates: { '10m': 1 }, warningReasons: [] },
   ];
   const result = core.analyzeCandidates(rows, { ...core.DEFAULT_CONFIG, excludedGroupKeywords: 'free' });
-  assert.deepEqual(result.counts, { total: 7, invalid: 1, unavailable: 2, lowSuccess: 1, warnings: 1, keywords: 1, eligible: 1 });
+  assert.deepEqual(result.counts, {
+    total: 7,
+    invalid: 1,
+    unavailable: 2,
+    lowSuccess: 1,
+    warnings: 1,
+    keywords: 1,
+    priceMetricUnavailable: 0,
+    priceMetricUnavailableReasons: { notReady: 0, stale: 0, missing: 0 },
+    eligible: 1,
+  });
   assert.deepEqual(result.candidates.map((row) => row.name), ['eligible']);
 });
 
@@ -1166,6 +1457,79 @@ test('requires the same winner for the configured number of checks', () => {
   assert.equal(state.groupId, 20);
   assert.equal(state.count, 1);
   assert.equal(state.stable, false);
+});
+
+test('resets winner stability when the recommendation strategy changes', () => {
+  const nominalSignature = core.getRecommendationStrategySignature({
+    ...core.DEFAULT_CONFIG,
+    mode: 'price',
+    recommendationPriceBasis: 'nominal',
+  });
+  const effectiveSignature = core.getRecommendationStrategySignature({
+    ...core.DEFAULT_CONFIG,
+    mode: 'price',
+    recommendationPriceBasis: 'effectiveInput1h',
+  });
+  let state = core.advanceStability(core.createStabilityState(), 14, 2, nominalSignature);
+  state = core.advanceStability(state, 14, 2, nominalSignature);
+  assert.equal(state.stable, true);
+
+  state = core.advanceStability(state, 14, 2, effectiveSignature);
+  assert.equal(state.count, 1);
+  assert.equal(state.stable, false);
+  assert.equal(state.strategySignature, effectiveSignature);
+});
+
+test('blocks switching when the cached recommendation price snapshot is no longer current', () => {
+  const config = {
+    ...core.DEFAULT_CONFIG,
+    mode: 'price',
+    recommendationPriceBasis: 'effectiveInput1h',
+  };
+  const strategySignature = core.getRecommendationStrategySignature(config);
+  const stability = { groupId: 14, count: 2, stable: true, strategySignature };
+  const winner = {
+    groupId: 14,
+    price: 0.02,
+    priceMultiplier: 0.02,
+    rankingPriceBasis: 'effectiveInput1h',
+    rankingPriceValue: 0.1,
+    effectiveInputPricePerMillion1h: 0.1,
+    runtimeCache1h: { ready: true, stale: false },
+  };
+
+  assert.equal(core.getRecommendationSnapshotBlockReason(winner, config, stability), '');
+  assert.equal(core.getRecommendationSnapshotBlockReason(winner, {
+    ...config,
+    recommendationPriceBasis: 'effectiveMultiplier1h',
+  }, stability), '推荐策略已变化，请重新检测');
+  assert.equal(core.getRecommendationSnapshotBlockReason({
+    ...winner,
+    rankingPriceBasis: 'nominal',
+  }, config, stability), '推荐价格口径已变化，请重新检测');
+  assert.equal(core.getRecommendationSnapshotBlockReason({
+    ...winner,
+    runtimeCache1h: { ready: true, stale: true },
+  }, config, stability), '1 小时真实输入价当前不可用，请重新检测');
+  assert.equal(core.getRecommendationSnapshotBlockReason({
+    ...winner,
+    rankingPriceValue: 0.2,
+  }, config, stability), '推荐价格数据已变化，请重新检测');
+
+  const switchState = {
+    loading: false,
+    authError: '',
+    winner,
+    key: { groupId: 20 },
+    stability,
+    requiredChecks: 2,
+    config,
+  };
+  assert.equal(core.getSwitchBlockReason(switchState), '');
+  assert.equal(core.getSwitchBlockReason({
+    ...switchState,
+    winner: { ...winner, runtimeCache1h: { ready: true, stale: true } },
+  }), '1 小时真实输入价当前不可用，请重新检测');
 });
 
 test('blocks auto switching during cooldown and when already on target', () => {
