@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.4
+// @version      0.14.5
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,13 +29,15 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.4';
+  const SCRIPT_VERSION = '0.14.5';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
   const API_REQUEST_TIMEOUT_MS = 15_000;
   const MONITOR_SUMMARY_CACHE_TTL_MS = 2_000;
+  const PASSIVE_MONITOR_SUMMARY_CACHE_TTL_MS = 60_000;
   const MONITOR_SERIES_CACHE_TTL_MS = 60_000;
+  const ACCOUNT_BALANCE_CACHE_TTL_MS = 60_000;
   const MONITOR_SAMPLE_CLOCK_SKEW_MS = 60_000;
   const MONITOR_HISTORY_SAMPLE_COUNT_CAP = 60;
   const USER_TTFT_SAMPLE_COUNT_MAX = 1_000_000;
@@ -2065,6 +2067,11 @@
     fetchedAt: 0,
     pending: null,
   };
+  const currentBalanceCache = {
+    value: null,
+    fetchedAt: 0,
+    pending: null,
+  };
 
   function clearMonitorSummaryCache() {
     monitorSummaryCache.value = null;
@@ -2091,11 +2098,14 @@
 
   function fetchMonitorSummary(options = {}) {
     const force = options?.force === true;
+    const maxAgeMs = Number.isFinite(Number(options?.maxAgeMs))
+      ? Math.max(0, Number(options.maxAgeMs))
+      : MONITOR_SUMMARY_CACHE_TTL_MS;
     const now = Date.now();
     if (monitorSummaryCache.pending) return monitorSummaryCache.pending;
     if (!force
       && monitorSummaryCache.value
-      && now - monitorSummaryCache.fetchedAt < MONITOR_SUMMARY_CACHE_TTL_MS) {
+      && now - monitorSummaryCache.fetchedAt < maxAgeMs) {
       return Promise.resolve(monitorSummaryCache.value);
     }
     const pending = requestMonitorSummary({ timeoutMs: options?.timeoutMs })
@@ -2147,8 +2157,31 @@
     return pending;
   }
 
-  async function fetchCurrentBalance() {
-    return apiRequest('/auth/me?timezone=Asia%2FShanghai');
+  function clearCurrentBalanceCache() {
+    currentBalanceCache.value = null;
+    currentBalanceCache.fetchedAt = 0;
+  }
+
+  function fetchCurrentBalance(options = {}) {
+    const force = options?.force === true;
+    const now = Date.now();
+    if (currentBalanceCache.pending) return currentBalanceCache.pending;
+    if (!force
+      && currentBalanceCache.value
+      && now - currentBalanceCache.fetchedAt < ACCOUNT_BALANCE_CACHE_TTL_MS) {
+      return Promise.resolve(currentBalanceCache.value);
+    }
+    const pending = apiRequest('/auth/me?timezone=Asia%2FShanghai', { timeoutMs: options?.timeoutMs })
+      .then((payload) => {
+        currentBalanceCache.value = payload;
+        currentBalanceCache.fetchedAt = Date.now();
+        return payload;
+      })
+      .finally(() => {
+        if (currentBalanceCache.pending === pending) currentBalanceCache.pending = null;
+      });
+    currentBalanceCache.pending = pending;
+    return pending;
   }
 
   function getCurrentUsageRequestPath(entries, pageWindow = getPageWindow()) {
@@ -2972,7 +3005,7 @@
           fetchMonitorSeries({ force: forceLog })
             .then((value) => ({ value }))
             .catch((error) => ({ error })),
-          fetchCurrentBalance().then((payload) => ({ payload })).catch((error) => ({ error })),
+          fetchCurrentBalance({ force: forceLog }).then((payload) => ({ payload })).catch((error) => ({ error })),
         ]);
         if (!this.active) return;
         const fallbackSeries = buildMonitorSeriesFromSummary(summary);
@@ -3312,7 +3345,7 @@
       if (!node) return;
       node.classList.toggle('asg-balance-error', Boolean(this.balanceError));
       node.textContent = this.balanceError ? '余额暂不可用' : `余额 ${formatBalance(this.balance)}`;
-      node.title = this.balanceError ? this.balanceError : '每次检测刷新当前余额';
+      node.title = this.balanceError ? this.balanceError : '余额最多每 60 秒自动更新；手动检测强制刷新';
     }
 
     renderKeys() {
@@ -3581,7 +3614,7 @@
       this.lastAttemptAt = Date.now();
       this.render();
       try {
-        const summary = await fetchMonitorSummary();
+        const summary = await fetchMonitorSummary({ maxAgeMs: PASSIVE_MONITOR_SUMMARY_CACHE_TTL_MS });
         if (!this.active) return;
         this.latencySource = normalizeConfig(storageGet('config', DEFAULT_CONFIG)).latencySource;
         this.monitorIndex = buildGroupDropdownMonitorIndex(summary?.apis);
@@ -3807,7 +3840,9 @@
       if (!force && !isRefreshDue(Date.now(), this.lastRefreshCompletedAt, USAGE_REFRESH_INTERVAL_MS)) return;
       this.loading = true;
       try {
-        const [monitorResult] = await Promise.allSettled([fetchMonitorSummary()]);
+        const [monitorResult] = await Promise.allSettled([
+          fetchMonitorSummary({ maxAgeMs: PASSIVE_MONITOR_SUMMARY_CACHE_TTL_MS }),
+        ]);
         if (!this.active) return;
         if (monitorResult.status === 'fulfilled') {
           this.multiplierByGroup = buildGroupMultiplierMap(monitorResult.value?.apis);
@@ -4778,6 +4813,8 @@
     clearMonitorSummaryCache,
     fetchMonitorSeries,
     clearMonitorSeriesCache,
+    fetchCurrentBalance,
+    clearCurrentBalanceCache,
     getCurrentUsageRequestPath,
     buildUsageAuditViewKey,
     shouldLoadUsageAuditView,

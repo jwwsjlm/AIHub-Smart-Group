@@ -134,9 +134,25 @@ test('refreshes usage prices without repeatedly reloading exact usage rows', () 
   const usageSource = userscriptSource.slice(userscriptSource.indexOf('class UsageMultiplierEnhancer'), userscriptSource.indexOf('class ProviderSortEnhancer'));
   const refreshSource = usageSource.slice(usageSource.indexOf('async refresh(force = false)'), usageSource.indexOf('handleVisibilityChange()'));
 
-  assert.match(refreshSource, /fetchMonitorSummary\(\)/);
+  assert.match(refreshSource, /fetchMonitorSummary\(\{ maxAgeMs: PASSIVE_MONITOR_SUMMARY_CACHE_TTL_MS \}\)/);
   assert.doesNotMatch(refreshSource, /fetchCurrentUsageAuditItems\(/);
   assert.match(usageSource, /this\.syncUsageAuditView\(detailTables\);/);
+});
+
+test('lets passive provider displays share the longer monitor summary cache', () => {
+  const dropdownSource = userscriptSource.slice(userscriptSource.indexOf('class KeyGroupDropdownEnhancer'), userscriptSource.indexOf('class UsageMultiplierEnhancer'));
+  const usageSource = userscriptSource.slice(userscriptSource.indexOf('class UsageMultiplierEnhancer'), userscriptSource.indexOf('class ProviderSortEnhancer'));
+
+  assert.match(userscriptSource, /const PASSIVE_MONITOR_SUMMARY_CACHE_TTL_MS = 60_000;/);
+  assert.match(dropdownSource, /fetchMonitorSummary\(\{ maxAgeMs: PASSIVE_MONITOR_SUMMARY_CACHE_TTL_MS \}\)/);
+  assert.match(usageSource, /fetchMonitorSummary\(\{ maxAgeMs: PASSIVE_MONITOR_SUMMARY_CACHE_TTL_MS \}\)/);
+});
+
+test('forces a fresh balance only for manual controller checks', () => {
+  const controllerSource = userscriptSource.slice(userscriptSource.indexOf('class Controller'), userscriptSource.indexOf('class KeyGroupDropdownEnhancer'));
+
+  assert.match(controllerSource, /fetchCurrentBalance\(\{ force: forceLog \}\)/);
+  assert.match(controllerSource, /余额最多每 60 秒自动更新；手动检测强制刷新/);
 });
 
 test('maps dropdown monitor tones to native group badge classes', () => {
@@ -1191,6 +1207,103 @@ test('deduplicates concurrent and short-lived provider summary requests', async 
     assert.equal(requestCount, 2);
   } finally {
     core.clearMonitorSummaryCache();
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = originalLocalStorage;
+  }
+});
+
+test('lets passive consumers extend summary cache age without weakening the default TTL', async () => {
+  const originalWindow = globalThis.window;
+  const originalLocalStorage = globalThis.localStorage;
+  const originalDateNow = Date.now;
+  let requestCount = 0;
+  let now = 10_000;
+  const storage = { getItem: () => '' };
+  globalThis.localStorage = storage;
+  globalThis.window = {
+    localStorage: storage,
+    fetch: async () => {
+      requestCount += 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { items: [{ group_id: 1, code: `summary-${requestCount}` }] } }),
+      };
+    },
+  };
+  Date.now = () => now;
+  core.clearMonitorSummaryCache();
+
+  try {
+    const first = await core.fetchMonitorSummary();
+    now += 2_001;
+    const passive = await core.fetchMonitorSummary({ maxAgeMs: 60_000 });
+    assert.equal(requestCount, 1);
+    assert.equal(passive, first);
+
+    const defaultFresh = await core.fetchMonitorSummary();
+    assert.equal(requestCount, 2);
+    assert.notEqual(defaultFresh, first);
+
+    const forced = await core.fetchMonitorSummary({ force: true, maxAgeMs: 60_000 });
+    assert.equal(requestCount, 3);
+    assert.notEqual(forced, defaultFresh);
+  } finally {
+    Date.now = originalDateNow;
+    core.clearMonitorSummaryCache();
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = originalLocalStorage;
+  }
+});
+
+test('deduplicates, expires, and force-refreshes current balance requests', async () => {
+  const originalWindow = globalThis.window;
+  const originalLocalStorage = globalThis.localStorage;
+  const originalDateNow = Date.now;
+  let requestCount = 0;
+  let now = 10_000;
+  const storage = { getItem: () => '' };
+  globalThis.localStorage = storage;
+  globalThis.window = {
+    localStorage: storage,
+    fetch: async () => {
+      requestCount += 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { balance: requestCount } }),
+      };
+    },
+  };
+  Date.now = () => now;
+  core.clearCurrentBalanceCache();
+
+  try {
+    const pending = core.fetchCurrentBalance();
+    const joined = core.fetchCurrentBalance({ force: true });
+    const [first, shared] = await Promise.all([pending, joined]);
+    assert.equal(requestCount, 1);
+    assert.equal(shared, first);
+
+    const cached = await core.fetchCurrentBalance();
+    assert.equal(requestCount, 1);
+    assert.equal(cached, first);
+
+    now += 60_001;
+    const expired = await core.fetchCurrentBalance();
+    assert.equal(requestCount, 2);
+    assert.notEqual(expired, first);
+
+    const forced = await core.fetchCurrentBalance({ force: true });
+    assert.equal(requestCount, 3);
+    assert.notEqual(forced, expired);
+  } finally {
+    Date.now = originalDateNow;
+    core.clearCurrentBalanceCache();
     if (originalWindow === undefined) delete globalThis.window;
     else globalThis.window = originalWindow;
     if (originalLocalStorage === undefined) delete globalThis.localStorage;
