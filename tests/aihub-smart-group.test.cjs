@@ -463,6 +463,13 @@ test('treats native and ARIA-disabled provider refresh buttons as unavailable', 
   }), false);
 });
 
+test('recognizes native provider refresh loading signals', () => {
+  assert.equal(core.isProviderRefreshButtonBusy({ disabled: true }), true);
+  assert.equal(core.isProviderRefreshButtonBusy({ getAttribute: (name) => (name === 'aria-busy' ? 'true' : null) }), true);
+  assert.equal(core.isProviderRefreshButtonBusy({ className: 'monitor-icon-button animate-spin' }), true);
+  assert.equal(core.isProviderRefreshButtonBusy({ className: 'monitor-icon-button', getAttribute: () => null }), false);
+});
+
 test('normalizes the new provider summary response and keeps both TTFT metrics', () => {
   const summary = core.normalizeMonitorSummaryPayload({
     data: {
@@ -2093,9 +2100,14 @@ test('keeps provider auto refresh anchored to the last refresh time', () => {
   assert.equal(core.getProviderRefreshTimerDelay(Number.NaN, 0, 60_000), 1_000);
   assert.equal(core.getProviderRefreshTimerDelay(Number.NaN, 0, 60_000, true), 5_000);
   assert.match(providerEnhancerSource, /this\.refreshTimer = window\.setTimeout\(\(\) => \{/);
-  assert.match(providerEnhancerSource, /const refreshUnavailable = refreshDue && !this\.refresh\(config, now\);/);
+  assert.match(providerEnhancerSource, /const refreshStarted = refreshDue && this\.refresh\(config, now\);/);
+  assert.match(providerEnhancerSource, /if \(refreshStarted && this\.refreshing\) return;/);
+  assert.match(providerEnhancerSource, /if \(this\.refreshing\) return;\s*if \(!this\.beginRefreshTracking\(button, root\)\)/);
+  assert.match(providerEnhancerSource, /const refreshUnavailable = forceBackoff \|\| \(refreshDue && !refreshStarted\);/);
   assert.match(providerEnhancerSource, /getProviderRefreshTimerDelay\(Date\.now\(\), this\.lastRefreshAt, intervalMs, refreshUnavailable\)/);
-  assert.match(providerEnhancerSource, /if \(!this\.refreshing\) this\.syncRefreshTimer\(false\);/);
+  assert.match(providerEnhancerSource, /this\.refreshCompletionTimer = window\.setTimeout\(\(\) => this\.completeRefreshTracking\(false\), PROVIDER_REFRESH_COMPLETION_TIMEOUT_MS\);/);
+  assert.match(providerEnhancerSource, /if \(this\.refreshSawBusy\) return this\.completeRefreshTracking\(true\);/);
+  assert.match(providerEnhancerSource, /this\.syncRefreshTimer\(false, !succeeded\);/);
   assert.match(providerEnhancerSource, /if \(!isPageVisible\(\)\) \{\s*if \(this\.refreshTimer\) window\.clearTimeout\(this\.refreshTimer\);/);
   assert.doesNotMatch(providerEnhancerSource, /this\.refreshTimer = window\.setInterval/);
 });
@@ -2241,6 +2253,83 @@ test('backs off provider DOM scans only while the native refresh button is unava
     else globalThis.document = originalDocument;
     if (originalLocalStorage === undefined) delete globalThis.localStorage;
     else globalThis.localStorage = originalLocalStorage;
+  }
+});
+
+test('confirms provider auto refresh only after native loading completes, then backs off on timeout', () => {
+  const originalWindow = globalThis.window;
+  const originalDocument = globalThis.document;
+  const originalMutationObserver = globalThis.MutationObserver;
+  const originalDateNow = Date.now;
+  let now = 60_000;
+  let observer = null;
+  const timers = [];
+  const root = {
+    contains: () => true,
+    querySelector: () => button,
+  };
+  const button = {
+    disabled: false,
+    className: 'monitor-icon-button',
+    click: () => { button.disabled = true; },
+  };
+  globalThis.document = { hidden: false, querySelector: () => root };
+  globalThis.window = {
+    setTimeout: (callback, delay) => {
+      timers.push({ callback, delay });
+      return timers.length;
+    },
+    clearTimeout: () => {},
+  };
+  globalThis.MutationObserver = class {
+    constructor(callback) { this.callback = callback; observer = this; }
+    observe() {}
+    disconnect() {}
+  };
+  Date.now = () => now;
+
+  try {
+    const enhancer = new core.ProviderSortEnhancer();
+    enhancer.active = true;
+    enhancer.providerConfigLoaded = true;
+    enhancer.providerAutoRefresh = true;
+    enhancer.providerRefreshIntervalSeconds = 60;
+    const schedules = [];
+    enhancer.syncRefreshTimer = (...args) => { schedules.push(args); };
+
+    assert.equal(enhancer.refresh(undefined, now), true);
+    assert.equal(button.disabled, true);
+    assert.equal(enhancer.lastRefreshAt, 0);
+    assert.equal(enhancer.refreshing, true);
+    assert.equal(timers[0].delay, 15_000);
+
+    observer.callback([{ target: button }]);
+    assert.equal(enhancer.refreshing, true);
+    button.disabled = false;
+    now = 61_000;
+    observer.callback([{ target: button }]);
+    assert.equal(enhancer.refreshing, false);
+    assert.equal(enhancer.lastRefreshAt, 61_000);
+    assert.deepEqual(schedules, [[false, false]]);
+
+    now = 121_000;
+    schedules.length = 0;
+    timers.length = 0;
+    button.disabled = false;
+    assert.equal(enhancer.refresh(undefined, now), true);
+    const timeout = timers.find((timer) => timer.delay === 15_000);
+    timeout.callback();
+    assert.equal(enhancer.lastRefreshAt, 61_000);
+    assert.equal(enhancer.refreshing, false);
+    assert.deepEqual(schedules, [[false, true]]);
+  } finally {
+    Date.now = originalDateNow;
+    if (originalMutationObserver === undefined) delete globalThis.MutationObserver;
+    else globalThis.MutationObserver = originalMutationObserver;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
   }
 });
 

@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.1
+// @version      0.14.2
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.1';
+  const SCRIPT_VERSION = '0.14.2';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -48,6 +48,8 @@
   const PROVIDER_SORT_VERIFY_DELAY_MS = 250;
   const PROVIDER_REFRESH_RETRY_MS = 1_000;
   const PROVIDER_REFRESH_UNAVAILABLE_RETRY_MS = 5_000;
+  const PROVIDER_REFRESH_COMPLETION_TIMEOUT_MS = 15_000;
+  const PROVIDER_REFRESH_DATA_SETTLE_MS = 500;
   const PROVIDER_REFRESH_BUTTON_SELECTOR = [
     'button.monitor-icon-button[title="刷新监测数据"]',
     'button.monitor-icon-button[title="Refresh monitoring data"]',
@@ -442,6 +444,12 @@
   function isProviderRefreshButtonDisabled(button) {
     return button?.disabled === true
       || String(button?.getAttribute?.('aria-disabled') || '').trim().toLocaleLowerCase() === 'true';
+  }
+
+  function isProviderRefreshButtonBusy(button) {
+    if (isProviderRefreshButtonDisabled(button)) return true;
+    if (String(button?.getAttribute?.('aria-busy') || '').trim().toLocaleLowerCase() === 'true') return true;
+    return /(?:^|[\s_-])(?:loading|is-loading|animate-spin|spinning)(?:$|[\s_-])/.test(String(button?.className || ''));
   }
 
   function normalizeCacheHitRate(value) {
@@ -4107,8 +4115,15 @@
       this.retryTimer = null;
       this.sortVerifyTimer = null;
       this.refreshTimer = null;
+      this.refreshCompletionTimer = null;
+      this.refreshSettleTimer = null;
+      this.refreshObserver = null;
+      this.refreshButton = null;
+      this.refreshRoot = null;
       this.lastRefreshAt = 0;
       this.refreshing = false;
+      this.refreshSawBusy = false;
+      this.refreshSawDataChange = false;
       this.sortClickCount = 0;
       this.sortConvergenceExhausted = false;
       this.sortClickPending = false;
@@ -4124,8 +4139,11 @@
         if (root
           && findProviderRefreshButtonInRoot(root) === button
           && !isProviderRefreshButtonDisabled(button)) {
-          this.lastRefreshAt = Date.now();
-          if (!this.refreshing) this.syncRefreshTimer(false);
+          if (this.refreshing) return;
+          if (!this.beginRefreshTracking(button, root)) {
+            this.lastRefreshAt = Date.now();
+            if (!this.refreshing) this.syncRefreshTimer(false);
+          }
         }
       };
       this.onConfigChanged = () => {
@@ -4143,7 +4161,10 @@
           this.observeUntilApplied();
           this.queueApply();
         }
-        if (refreshChanged) this.syncRefreshTimer();
+        if (refreshChanged) {
+          if (!next.providerAutoRefresh) this.stopRefreshTracking();
+          this.syncRefreshTimer();
+        }
       };
     }
 
@@ -4256,6 +4277,7 @@
       this.retryTimer = null;
       this.sortVerifyTimer = null;
       this.refreshTimer = null;
+      this.stopRefreshTracking();
       this.sortRoot = null;
       document.removeEventListener('click', this.onPageClick, true);
       window.removeEventListener(CONFIG_CHANGE_EVENT, this.onConfigChanged);
@@ -4324,16 +4346,19 @@
       this.sortVerifyTimer = null;
     }
 
-    syncRefreshTimer(refreshIfDue = true) {
+    syncRefreshTimer(refreshIfDue = true, forceBackoff = false) {
       if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
       if (!this.active || !isPageVisible()) return;
       const config = this.getProviderConfig();
       if (!config.providerAutoRefresh) return;
+      if (this.refreshing) return;
       const intervalMs = config.providerRefreshIntervalSeconds * 1000;
       const now = Date.now();
       const refreshDue = refreshIfDue && isRefreshDue(now, this.lastRefreshAt, intervalMs);
-      const refreshUnavailable = refreshDue && !this.refresh(config, now);
+      const refreshStarted = refreshDue && this.refresh(config, now);
+      if (refreshStarted && this.refreshing) return;
+      const refreshUnavailable = forceBackoff || (refreshDue && !refreshStarted);
       const delayMs = getProviderRefreshTimerDelay(Date.now(), this.lastRefreshAt, intervalMs, refreshUnavailable);
       this.refreshTimer = window.setTimeout(() => {
         this.refreshTimer = null;
@@ -4356,16 +4381,82 @@
       const currentConfig = config || this.getProviderConfig();
       if (!currentConfig.providerAutoRefresh
         || !isRefreshDue(now, this.lastRefreshAt, currentConfig.providerRefreshIntervalSeconds * 1000)) return false;
-      const button = findProviderRefreshButtonInRoot(document.querySelector('main'));
+      const root = document.querySelector('main');
+      const button = findProviderRefreshButtonInRoot(root);
       if (!button || isProviderRefreshButtonDisabled(button)) return false;
-      this.refreshing = true;
+      const tracking = this.beginRefreshTracking(button, root);
       try {
         button.click();
-      } finally {
-        this.refreshing = false;
+      } catch {
+        this.stopRefreshTracking();
+        return false;
+      }
+      if (!tracking) {
         this.lastRefreshAt = Date.now();
       }
       return true;
+    }
+
+    beginRefreshTracking(button, root) {
+      if (!this.active || this.refreshing || typeof MutationObserver !== 'function') return false;
+      const observedRoot = root || document.querySelector('main') || button?.parentElement;
+      if (!observedRoot) return false;
+      this.refreshing = true;
+      this.refreshButton = button;
+      this.refreshRoot = observedRoot;
+      this.refreshSawBusy = isProviderRefreshButtonBusy(button);
+      this.refreshSawDataChange = false;
+      this.refreshObserver = new MutationObserver((records) => this.handleRefreshMutations(records));
+      this.refreshObserver.observe(observedRoot, {
+        attributes: true,
+        attributeFilter: ['disabled', 'aria-disabled', 'aria-busy', 'class'],
+        characterData: true,
+        childList: true,
+        subtree: true,
+      });
+      this.refreshCompletionTimer = window.setTimeout(() => this.completeRefreshTracking(false), PROVIDER_REFRESH_COMPLETION_TIMEOUT_MS);
+      return true;
+    }
+
+    handleRefreshMutations(records) {
+      if (!this.refreshing) return;
+      const button = this.refreshButton;
+      if (!button) return this.completeRefreshTracking(false);
+      const busy = isProviderRefreshButtonBusy(button);
+      if (busy) {
+        this.refreshSawBusy = true;
+        return;
+      }
+      if (this.refreshSawBusy) return this.completeRefreshTracking(true);
+      const root = this.refreshRoot;
+      if ([...(records || [])].some((record) => record.target !== button && (record.target === root || root?.contains?.(record.target)))) {
+        this.refreshSawDataChange = true;
+        if (this.refreshSettleTimer) window.clearTimeout(this.refreshSettleTimer);
+        this.refreshSettleTimer = window.setTimeout(() => {
+          if (this.refreshing && this.refreshSawDataChange && !isProviderRefreshButtonBusy(this.refreshButton)) this.completeRefreshTracking(true);
+        }, PROVIDER_REFRESH_DATA_SETTLE_MS);
+      }
+    }
+
+    completeRefreshTracking(succeeded) {
+      if (!this.refreshing) return;
+      this.stopRefreshTracking();
+      if (succeeded) this.lastRefreshAt = Date.now();
+      if (this.active) this.syncRefreshTimer(false, !succeeded);
+    }
+
+    stopRefreshTracking() {
+      this.refreshObserver?.disconnect();
+      if (this.refreshCompletionTimer) window.clearTimeout(this.refreshCompletionTimer);
+      if (this.refreshSettleTimer) window.clearTimeout(this.refreshSettleTimer);
+      this.refreshObserver = null;
+      this.refreshCompletionTimer = null;
+      this.refreshSettleTimer = null;
+      this.refreshButton = null;
+      this.refreshRoot = null;
+      this.refreshing = false;
+      this.refreshSawBusy = false;
+      this.refreshSawDataChange = false;
     }
   }
 
@@ -4512,6 +4603,7 @@
     findProviderRefreshButton,
     findProviderRefreshButtonInRoot,
     isProviderRefreshButtonDisabled,
+    isProviderRefreshButtonBusy,
     normalizeCacheHitRate,
     formatCacheHitRate,
     normalizeRuntimeCache1h,
