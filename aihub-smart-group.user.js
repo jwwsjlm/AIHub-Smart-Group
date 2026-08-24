@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.38
+// @version      0.14.39
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.38';
+  const SCRIPT_VERSION = '0.14.39';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -1535,11 +1535,19 @@
     delete metadata.items;
     delete metadata.generatedAt;
     delete metadata.generated_at;
-    return {
+    const summary = {
       ...metadata,
       generatedAt: data?.generatedAt ?? data?.generated_at ?? null,
       apis: sourceRows.map(normalizeMonitorRow),
     };
+    const compactedHistory = compactMonitorProbeSeries(buildMonitorSeriesFromSummary(summary));
+    for (const row of summary.apis) {
+      const groupId = String(row?.id ?? row?.group_id ?? '');
+      row.history = Array.isArray(compactedHistory.seriesByApiId?.[groupId])
+        ? compactedHistory.seriesByApiId[groupId]
+        : [];
+    }
+    return summary;
   }
 
   function parseMonitorSampleTimestamp(value) {

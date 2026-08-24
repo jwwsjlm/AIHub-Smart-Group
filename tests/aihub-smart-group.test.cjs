@@ -1109,7 +1109,7 @@ test('normalizes the new provider summary response and keeps both TTFT metrics',
   })), [{ id: 34, planType: 'A001-Plus', priceMultiplier: 0.06, probe: 4373, e2e: 4500, user: 6085.5, samples: 16 }]);
 });
 
-test('does not retain the raw provider rows beside normalized history', () => {
+test('does not retain raw provider rows or expired summary history', () => {
   const items = [{
     code: 'A001',
     group_id: 1,
@@ -1127,14 +1127,44 @@ test('does not retain the raw provider rows beside normalized history', () => {
   const legacyShape = { ...data, generatedAt: data.generated_at, apis: items.map(core.normalizeMonitorRow) };
 
   assert.equal(Object.hasOwn(normalized, 'items'), false);
-  assert.equal(normalized.apis[0].history.length, 40);
-  assert.deepEqual(normalized.apis[0].history[0], [1_700_000_000_000, 0, 2]);
+  assert.equal(normalized.apis[0].history.length, 1);
+  assert.deepEqual(normalized.apis[0].history[0], [1_700_002_340_000, 1, 2]);
   assert.equal(normalized.apis[0].planType, 'A001');
   assert.equal(normalized.apis[0].priceMultiplier, 0.08);
   for (const rawKey of ['code', 'rate_multiplier', 'avg_ping_ms', 'debug_payload']) {
     assert.equal(Object.hasOwn(normalized.apis[0], rawKey), false);
   }
   assert.ok(JSON.stringify(normalized).length < JSON.stringify(legacyShape).length);
+});
+
+test('compacts cached summary histories to the active availability window', () => {
+  const generatedAt = Date.parse('2026-08-24T12:00:00Z');
+  const normalized = core.normalizeMonitorSummaryPayload({ data: {
+    generated_at: new Date(generatedAt).toISOString(),
+    items: [
+      {
+        group_id: 1,
+        history: [
+          { probed_at: new Date(generatedAt - 60 * 60_000).toISOString(), status: 'failed' },
+          { probed_at: new Date(generatedAt - 9 * 60_000).toISOString(), status: 'operational' },
+        ],
+      },
+      {
+        group_id: 2,
+        history: [
+          { probed_at: new Date(generatedAt - 30 * 60_000).toISOString(), status: 'operational' },
+          { probed_at: new Date(generatedAt - 5 * 60_000).toISOString(), status: 'failed' },
+          { probed_at: new Date(generatedAt + 30_000).toISOString(), status: 'operational' },
+          { probed_at: new Date(generatedAt + 2 * 60_000).toISOString(), status: 'operational' },
+        ],
+      },
+    ],
+  } });
+
+  assert.deepEqual(normalized.apis.map((row) => row.history), [
+    [[generatedAt - 9 * 60_000, 1, 1]],
+    [[generatedAt - 5 * 60_000, 0, 1], [generatedAt + 30_000, 1, 1]],
+  ]);
 });
 
 test('normalizes the new cache, model health, and model detection fields', () => {
