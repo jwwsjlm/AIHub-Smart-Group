@@ -1670,21 +1670,28 @@ test('keeps slightly newer summary history samples inside the availability windo
   assert.equal(core.getMonitorSeriesWindowAnchor({ seriesByApiId: {}, userTtftByGroupId: {} }), null);
 });
 
-test('merges, sorts, and deduplicates primary and fallback provider samples by timestamp', () => {
-  const primaryTenFieldSample = [300, 0, 9_999, 4, 5, 6, 7, 8, 9, 10];
+test('merges provider samples while collapsing nearby summary fallback buckets', () => {
+  const base = Date.parse('2026-08-24T02:10:00Z');
+  const primaryTenFieldSample = [base + 5 * 60_000, 0, 9_999, 4, 5, 6, 7, 8, 9, 10];
   const primary = core.normalizeMonitorSeriesPayload({ data: {
-    generated_at: '2026-08-24T02:20:00Z',
+    generated_at: '2026-08-24T02:19:00Z',
     range: '6h',
     items: [
-      { group_id: 1, probe: [primaryTenFieldSample, [100, 1]], user_ttft: [{ at: '2026-08-24T02:19:00Z' }] },
+      { group_id: 1, probe: [primaryTenFieldSample, [base, 1]], user_ttft: [{ at: '2026-08-24T02:19:00Z' }] },
       { group_id: 2, probe: [] },
     ],
   } });
   const fallback = {
-    generatedAt: '2026-08-24T02:21:00Z',
+    generatedAt: '2026-08-24T02:19:00Z',
     range: 'summary-history',
     seriesByApiId: {
-      1: [[200, 1, 3], [50, 0, 2], [100, 0, 4], [300, 1, 5]],
+      1: [
+        [base - 4 * 60_000, 0, 2],
+        [base + 60_000, 0, 4],
+        [base + 3 * 60_000, 1, 3],
+        [base + 5 * 60_000, 1, 5],
+        [base + 9 * 60_000, 1, 3],
+      ],
       2: [[60, 1, 2]],
       3: [[70, 0, 1]],
     },
@@ -1693,17 +1700,40 @@ test('merges, sorts, and deduplicates primary and fallback provider samples by t
   const merged = core.mergeMonitorSeries(primary, fallback);
 
   assert.deepEqual(merged.seriesByApiId['1'], [
-    [50, 0, 2],
-    [100, 1],
-    [200, 1, 3],
-    [300, 0],
+    [base - 4 * 60_000, 0, 2],
+    [base, 1],
+    [base + 5 * 60_000, 0],
+    [base + 9 * 60_000, 1, 3],
   ]);
   assert.deepEqual(merged.seriesByApiId['2'], [[60, 1, 2]]);
   assert.deepEqual(merged.seriesByApiId['3'], [[70, 0, 1]]);
   assert.deepEqual(merged.userTtftByGroupId['1'], [[Date.parse('2026-08-24T02:19:00Z'), null, null, null]]);
   assert.deepEqual(merged.userTtftByGroupId['2'], [[Date.parse('2026-08-24T02:17:00Z'), null, null, null]]);
   assert.equal(merged.range, '6h');
-  assert.equal(merged.generatedAt, '2026-08-24T02:21:00Z');
+  assert.equal(merged.generatedAt, '2026-08-24T02:19:00Z');
+  const [row] = core.attachRecentAvailability([{ id: 1, successRates: {} }], merged);
+  assert.equal(row.recentSampleCount, 5);
+  assert.equal(row.recentSuccessCount, 4);
+  assert.equal(row.recentConsecutiveSuccessCount, 3);
+  assert.equal(row.successRates['10m'], 0.8);
+});
+
+test('keeps nearby samples from independent non-summary series', () => {
+  const primaryAt = Date.parse('2026-08-24T02:10:00Z');
+  const fallbackAt = primaryAt + 60_000;
+  const merged = core.mergeMonitorSeries({
+    generatedAt: '2026-08-24T02:12:00Z',
+    range: '6h',
+    seriesByApiId: { 1: [[primaryAt, 1]] },
+    userTtftByGroupId: {},
+  }, {
+    generatedAt: '2026-08-24T02:12:00Z',
+    range: 'independent-series',
+    seriesByApiId: { 1: [[fallbackAt, 0]] },
+    userTtftByGroupId: {},
+  });
+
+  assert.deepEqual(merged.seriesByApiId['1'], [[primaryAt, 1], [fallbackAt, 0]]);
 });
 
 test('deduplicates concurrent and short-lived provider summary requests', async () => {

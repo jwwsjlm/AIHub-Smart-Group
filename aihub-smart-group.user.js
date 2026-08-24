@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.25
+// @version      0.14.26
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.25';
+  const SCRIPT_VERSION = '0.14.26';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -41,6 +41,8 @@
   const ACCOUNT_BALANCE_CACHE_TTL_MS = 60_000;
   const MONITOR_SAMPLE_CLOCK_SKEW_MS = 60_000;
   const MONITOR_HISTORY_SAMPLE_COUNT_CAP = 60;
+  // Overview history buckets represent the same probe cycles with slightly shifted timestamps.
+  const MONITOR_SERIES_FALLBACK_OVERLAP_MS = 3 * 60 * 1000;
   const USER_TTFT_SAMPLE_COUNT_MAX = 1_000_000;
   const ENHANCER_RENDER_DEBOUNCE_MS = 50;
   const ROUTER_SYNC_INTERVAL_MS = 10_000;
@@ -1685,17 +1687,35 @@
     return valid[0]?.value ?? left ?? right ?? null;
   }
 
-  function mergeMonitorSampleLists(primarySamples, fallbackSamples) {
+  function hasNearbyMonitorSample(samples, timestamp, toleranceMs) {
+    const source = Array.isArray(samples) ? samples : [];
+    const target = Number(timestamp);
+    const tolerance = Math.max(0, Number(toleranceMs) || 0);
+    if (!Number.isFinite(target) || !source.length) return false;
+    let low = 0;
+    let high = source.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (Number(source[middle]?.[0]) < target) low = middle + 1;
+      else high = middle;
+    }
+    return (low < source.length && Math.abs(Number(source[low]?.[0]) - target) <= tolerance)
+      || (low > 0 && Math.abs(Number(source[low - 1]?.[0]) - target) <= tolerance);
+  }
+
+  function mergeMonitorSampleLists(primarySamples, fallbackSamples, fallbackOverlapMs = 0) {
+    const primary = Array.isArray(primarySamples) ? primarySamples : [];
     const byTimestamp = new Map();
-    const addSamples = (samples, overwrite) => {
+    const addSamples = (samples, overwrite, skipNearPrimary = false) => {
       for (const sample of Array.isArray(samples) ? samples : []) {
         const timestamp = Number(sample?.[0]);
         if (!Number.isFinite(timestamp)) continue;
+        if (skipNearPrimary && hasNearbyMonitorSample(primary, timestamp, fallbackOverlapMs)) continue;
         if (overwrite || !byTimestamp.has(timestamp)) byTimestamp.set(timestamp, sample);
       }
     };
-    addSamples(fallbackSamples, false);
-    addSamples(primarySamples, true);
+    addSamples(fallbackSamples, false, true);
+    addSamples(primary, true);
     return [...byTimestamp.values()].sort((left, right) => Number(left[0]) - Number(right[0]));
   }
 
@@ -1704,6 +1724,9 @@
     const normalizedFallback = normalizeMonitorSeriesPayload(fallback || {});
     const seriesByApiId = {};
     const userTtftByGroupId = { ...normalizedPrimary.userTtftByGroupId };
+    const fallbackOverlapMs = normalizedFallback.range === 'summary-history'
+      ? MONITOR_SERIES_FALLBACK_OVERLAP_MS
+      : 0;
     const groupIds = new Set([
       ...Object.keys(normalizedFallback.seriesByApiId),
       ...Object.keys(normalizedPrimary.seriesByApiId),
@@ -1712,6 +1735,7 @@
       seriesByApiId[groupId] = mergeMonitorSampleLists(
         normalizedPrimary.seriesByApiId[groupId],
         normalizedFallback.seriesByApiId[groupId],
+        fallbackOverlapMs,
       );
     }
     for (const [groupId, samples] of Object.entries(normalizedFallback.userTtftByGroupId)) {
