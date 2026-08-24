@@ -123,6 +123,7 @@ test('defaults provider hall auto sorting to multiplier priority', () => {
   assert.equal(core.DEFAULT_CONFIG.providerRefreshIntervalSeconds, 60);
   assert.equal(core.normalizeConfig({}).providerSortPreference, 'rate');
   assert.equal(core.normalizeProviderSortPreference('default'), 'default');
+  assert.equal(core.normalizeProviderSortPreference('realPrice'), 'realPrice');
   assert.equal(core.normalizeProviderSortPreference('user'), 'user');
   assert.equal(core.normalizeProviderSortPreference('unexpected'), 'rate');
   assert.equal(core.normalizeConfig({ providerAutoRefresh: false }).providerAutoRefresh, false);
@@ -134,11 +135,13 @@ test('finds the requested provider hall sort button without matching table heade
   const buttons = [
     { textContent: '默认 ↓' },
     { textContent: '倍率' },
+    { textContent: '真实价格' },
     { textContent: '用户速度 ↑' },
   ];
   assert.equal(core.findProviderSortButton(buttons, 'rate'), buttons[1]);
   assert.equal(core.findProviderSortButton(buttons, 'default'), buttons[0]);
-  assert.equal(core.findProviderSortButton(buttons, 'user'), buttons[2]);
+  assert.equal(core.findProviderSortButton(buttons, 'realPrice'), buttons[2]);
+  assert.equal(core.findProviderSortButton(buttons, 'user'), buttons[3]);
 });
 
 test('finds only the native provider hall refresh button', () => {
