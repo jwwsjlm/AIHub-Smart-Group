@@ -1300,6 +1300,14 @@ test('builds a weighted conservative provider series fallback from summary histo
   const degradedAt = Date.parse('2026-08-24T02:11:00Z');
   const failedAt = Date.parse('2026-08-24T02:13:00Z');
 
+  assert.deepEqual(summary.apis[0].history[0], {
+    timestamp: operationalAt,
+    status: 'operational',
+    sampleCount: 3,
+  });
+  assert.equal(Object.hasOwn(summary.apis[0].history[0], 'probed_at'), false);
+  assert.equal(Object.hasOwn(summary.apis[0].history[0], 'avg_ttft_ms'), false);
+
   assert.deepEqual(fallback.seriesByApiId['7'], [
     [operationalAt, 1, 3],
     [degradedAt, 0, 2],
