@@ -2898,16 +2898,110 @@ test('applies the provider time range before completing the saved sort preferenc
   }
 });
 
-test('skips a missing provider time range control without blocking sorting', () => {
+test('waits for a delayed provider time range without blocking sorting', () => {
   const originalDocument = globalThis.document;
+  const originalWindow = globalThis.window;
+  const originalDateNow = Date.now;
+  let now = 1_000;
+  let rangeAvailable = false;
+  let activeRange = '6h';
+  let activeSort = 'default';
+  let sortClicks = 0;
+  let rangeClicks = 0;
+  let queuedApplies = 0;
+  const timers = [];
+  const controls = {};
+  const rangeButtons = () => ['6h', '24h', '7d', '30d'].map((range) => ({
+    textContent: range,
+    className: range === activeRange ? 'active' : '',
+    getAttribute: (name) => (name === 'data-testid' ? `monitor-range-${range}` : null),
+    click: () => { rangeClicks += 1; },
+  }));
+  const sortButtons = () => ['default', 'rate'].map((sort) => ({
+    textContent: sort === 'default'
+      ? `默认${activeSort === sort ? ' ↓' : ''}`
+      : `倍率${activeSort === sort ? ' ↑' : ''}`,
+    className: `monitor-sort-head${activeSort === sort ? ' active' : ''}`,
+    closest: (value) => (value.includes('monitor-sort-controls') ? controls : null),
+    click: () => { sortClicks += 1; },
+  }));
+  globalThis.document = {
+    querySelectorAll: (selector) => (selector.includes('monitor-range')
+      ? rangeAvailable ? rangeButtons() : []
+      : sortButtons()),
+  };
+  globalThis.window = {
+    setTimeout: (callback, delay) => {
+      timers.push({ callback, delay });
+      return timers.length;
+    },
+    clearTimeout: () => {},
+  };
+  Date.now = () => now;
+
+  try {
+    const enhancer = new core.ProviderSortEnhancer();
+    enhancer.active = true;
+    enhancer.providerConfigLoaded = true;
+    enhancer.providerSortPreference = 'rate';
+    enhancer.providerRangePreference = '24h';
+    enhancer.queueSortVerification = () => {};
+    enhancer.queueApply = () => { queuedApplies += 1; };
+
+    assert.equal(enhancer.apply(), false);
+    assert.equal(sortClicks, 1);
+    assert.equal(enhancer.rangeWaitingForControl, true);
+    assert.equal(enhancer.applied, false);
+    assert.equal(timers.length, 1);
+    assert.equal(timers[0].delay, 250);
+
+    activeSort = 'rate';
+    rangeAvailable = true;
+    now += 250;
+    timers[0].callback();
+    assert.equal(queuedApplies, 1);
+
+    assert.equal(enhancer.apply(), false);
+    assert.equal(rangeClicks, 1);
+    assert.equal(enhancer.rangeWaitingForControl, false);
+
+    activeRange = '24h';
+    assert.equal(enhancer.apply(), true);
+    assert.equal(enhancer.applied, true);
+    assert.equal(sortClicks, 1);
+  } finally {
+    Date.now = originalDateNow;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+});
+
+test('stops waiting when the provider time range control stays unavailable', () => {
+  const originalDocument = globalThis.document;
+  const originalWindow = globalThis.window;
+  const originalDateNow = Date.now;
+  let now = 10_000;
+  let queuedApplies = 0;
+  const timers = [];
   const controls = {};
   globalThis.document = {
     querySelectorAll: (selector) => (selector.includes('monitor-range') ? [] : [{
       textContent: '倍率 ↑',
       className: 'monitor-sort-head active',
-      closest: (value) => (value === '.monitor-sort-controls' ? controls : null),
+      closest: (value) => (value.includes('monitor-sort-controls') ? controls : null),
     }]),
   };
+  globalThis.window = {
+    setTimeout: (callback, delay) => {
+      timers.push({ callback, delay });
+      return timers.length;
+    },
+    clearTimeout: () => {},
+    clearInterval: () => {},
+  };
+  Date.now = () => now;
 
   try {
     const enhancer = new core.ProviderSortEnhancer();
@@ -2915,12 +3009,53 @@ test('skips a missing provider time range control without blocking sorting', () 
     enhancer.providerConfigLoaded = true;
     enhancer.providerSortPreference = 'rate';
     enhancer.providerRangePreference = '30d';
+    enhancer.queueApply = () => { queuedApplies += 1; };
+
+    assert.equal(enhancer.apply(), false);
+    assert.equal(enhancer.rangeWaitingForControl, true);
+    assert.equal(timers.length, 1);
+
+    now += 5_000;
+    timers[0].callback();
+    assert.equal(queuedApplies, 1);
+    assert.equal(enhancer.rangeWaitingForControl, false);
+    assert.equal(enhancer.rangeControlUnavailable, true);
 
     assert.equal(enhancer.apply(), true);
     assert.equal(enhancer.applied, true);
+    assert.equal(enhancer.rangeRetryTimer, null);
+    assert.equal(timers.length, 1);
   } finally {
+    Date.now = originalDateNow;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
     if (originalDocument === undefined) delete globalThis.document;
     else globalThis.document = originalDocument;
+  }
+});
+
+test('clears a pending provider range retry when preferences reset', () => {
+  const originalWindow = globalThis.window;
+  const clearedTimers = [];
+  globalThis.window = {
+    setTimeout: () => 17,
+    clearTimeout: (timer) => { clearedTimers.push(timer); },
+  };
+
+  try {
+    const enhancer = new core.ProviderSortEnhancer();
+    enhancer.active = true;
+    assert.equal(enhancer.scheduleRangeControlRetry(), true);
+    assert.equal(enhancer.rangeRetryTimer, 17);
+
+    enhancer.resetPreferenceApplication();
+    assert.deepEqual(clearedTimers, [17]);
+    assert.equal(enhancer.rangeRetryTimer, null);
+    assert.equal(enhancer.rangeWaitStartedAt, null);
+    assert.equal(enhancer.rangeWaitingForControl, false);
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
   }
 });
 

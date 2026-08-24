@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.9
+// @version      0.14.10
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.9';
+  const SCRIPT_VERSION = '0.14.10';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -49,6 +49,8 @@
   const PROVIDER_SORT_MAX_CLICKS = 2;
   const PROVIDER_RANGE_MAX_CLICKS = 1;
   const PROVIDER_SORT_VERIFY_DELAY_MS = 250;
+  const PROVIDER_RANGE_CONTROL_RETRY_MS = 250;
+  const PROVIDER_RANGE_CONTROL_WAIT_TIMEOUT_MS = 5_000;
   const PROVIDER_REFRESH_RETRY_MS = 1_000;
   const PROVIDER_REFRESH_UNAVAILABLE_RETRY_MS = 5_000;
   const PROVIDER_REFRESH_COMPLETION_CHECK_DEBOUNCE_MS = 50;
@@ -4387,6 +4389,10 @@
       this.sortPendingStateSignature = '';
       this.rangeClickCount = 0;
       this.rangeConvergenceExhausted = false;
+      this.rangeRetryTimer = null;
+      this.rangeWaitStartedAt = null;
+      this.rangeWaitingForControl = false;
+      this.rangeControlUnavailable = false;
       this.sortRoot = null;
       this.providerConfigLoaded = false;
       this.providerSortPreference = DEFAULT_CONFIG.providerSortPreference;
@@ -4473,6 +4479,7 @@
     }
 
     resetPreferenceApplication() {
+      this.clearRangeControlWait();
       this.applied = false;
       this.sortClickCount = 0;
       this.sortConvergenceExhausted = false;
@@ -4480,6 +4487,42 @@
       this.sortPendingStateSignature = '';
       this.rangeClickCount = 0;
       this.rangeConvergenceExhausted = false;
+    }
+
+    clearRangeControlWait(resetUnavailable = true) {
+      if (this.rangeRetryTimer) window.clearTimeout(this.rangeRetryTimer);
+      this.rangeRetryTimer = null;
+      this.rangeWaitStartedAt = null;
+      this.rangeWaitingForControl = false;
+      if (resetUnavailable) this.rangeControlUnavailable = false;
+    }
+
+    scheduleRangeControlRetry() {
+      if (!this.active || this.rangeControlUnavailable) return false;
+      const now = Date.now();
+      if (this.rangeWaitStartedAt === null) this.rangeWaitStartedAt = now;
+      const elapsed = Math.max(0, now - this.rangeWaitStartedAt);
+      const remaining = PROVIDER_RANGE_CONTROL_WAIT_TIMEOUT_MS - elapsed;
+      if (remaining <= 0) {
+        this.rangeWaitStartedAt = null;
+        this.rangeWaitingForControl = false;
+        this.rangeControlUnavailable = true;
+        return false;
+      }
+      this.rangeWaitingForControl = true;
+      if (this.rangeRetryTimer) return true;
+      this.rangeRetryTimer = window.setTimeout(() => {
+        this.rangeRetryTimer = null;
+        if (!this.active) return;
+        const waitStartedAt = this.rangeWaitStartedAt;
+        if (waitStartedAt !== null && Date.now() - waitStartedAt >= PROVIDER_RANGE_CONTROL_WAIT_TIMEOUT_MS) {
+          this.rangeWaitStartedAt = null;
+          this.rangeWaitingForControl = false;
+          this.rangeControlUnavailable = true;
+        }
+        this.queueApply();
+      }, Math.min(PROVIDER_RANGE_CONTROL_RETRY_MS, remaining));
+      return true;
     }
 
     syncSortRoot() {
@@ -4542,18 +4585,11 @@
 
     stop() {
       this.active = false;
-      this.observer?.disconnect();
-      this.observer = null;
       if (this.applyTimer) window.clearTimeout(this.applyTimer);
-      if (this.observerDeadlineTimer) window.clearTimeout(this.observerDeadlineTimer);
-      if (this.retryTimer) window.clearInterval(this.retryTimer);
-      if (this.sortVerifyTimer) window.clearTimeout(this.sortVerifyTimer);
       if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
       this.applyTimer = null;
-      this.observerDeadlineTimer = null;
-      this.retryTimer = null;
-      this.sortVerifyTimer = null;
       this.refreshTimer = null;
+      this.stopSortRetries();
       this.stopRefreshTracking();
       this.sortRoot = null;
       document.removeEventListener('click', this.onPageClick, true);
@@ -4606,6 +4642,7 @@
         this.queueSortVerification();
         return false;
       }
+      if (this.rangeWaitingForControl) return false;
       this.applied = true;
       this.sortClickCount = 0;
       this.sortClickPending = false;
@@ -4616,13 +4653,20 @@
 
     applyRangePreference(preference) {
       const normalized = normalizeProviderRangePreference(preference);
-      if (normalized === 'default' || this.rangeConvergenceExhausted) return true;
+      if (normalized === 'default' || this.rangeConvergenceExhausted) {
+        this.clearRangeControlWait();
+        return true;
+      }
       const scopedButtons = document.querySelectorAll('[data-testid="llm-monitor-panel"] .monitor-range-tabs button,[data-testid="llm-monitor-panel"] [data-testid^="monitor-range-"]');
       const buttons = scopedButtons.length
         ? scopedButtons
         : document.querySelectorAll('.monitor-range-tabs button,[data-testid^="monitor-range-"]');
       const target = findProviderRangeButton(buttons, normalized);
-      if (!target) return true;
+      if (!target) {
+        if (!this.rangeControlUnavailable) this.scheduleRangeControlRetry();
+        return true;
+      }
+      this.clearRangeControlWait();
       const activeButton = findActiveProviderRangeButton(buttons);
       if (!shouldActivateProviderRange(target, activeButton)) {
         this.rangeClickCount = 0;
@@ -4647,6 +4691,7 @@
       this.observerDeadlineTimer = null;
       this.retryTimer = null;
       this.sortVerifyTimer = null;
+      this.clearRangeControlWait();
     }
 
     syncRefreshTimer(refreshIfDue = true, forceBackoff = false) {
