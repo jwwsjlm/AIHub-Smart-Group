@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.19
+// @version      0.14.20
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.19';
+  const SCRIPT_VERSION = '0.14.20';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -1845,6 +1845,18 @@
     });
   }
 
+  function shouldUseUserTtftSeries(config = DEFAULT_CONFIG) {
+    return normalizeLatencySource(config?.latencySource) === 'user'
+      && normalizeUserTtftWindow(config?.userTtftWindow) !== 'summary';
+  }
+
+  function attachConfiguredUserTtftWindow(rows, seriesPayload, config = DEFAULT_CONFIG) {
+    const sourceRows = Array.isArray(rows) ? rows : [];
+    return shouldUseUserTtftSeries(config)
+      ? attachUserTtftWindow(sourceRows, seriesPayload, config?.userTtftWindow)
+      : sourceRows;
+  }
+
   function normalizeGroupName(value) {
     return String(value ?? '').trim().toLocaleLowerCase();
   }
@@ -3380,11 +3392,12 @@
         return;
       }
       const previewRows = normalizedDraft.latencySource === 'user'
-        && normalizedDraft.userTtftWindow !== this.config.userTtftWindow
-        ? attachUserTtftWindow(
+        && (this.config.latencySource !== 'user'
+          || normalizedDraft.userTtftWindow !== this.config.userTtftWindow)
+        ? attachConfiguredUserTtftWindow(
           attachRecentAvailability(this.summaryRows, this.monitorSeries),
           this.monitorSeries,
-          normalizedDraft.userTtftWindow,
+          normalizedDraft,
         )
         : this.rows;
       const candidateCount = getEligibleCandidates(previewRows, { ...normalizedDraft, mode: 'balance' })
@@ -3568,10 +3581,10 @@
         this.lastAuthLogSignature = this.authError;
         this.summaryRows = Array.isArray(summary?.apis) ? summary.apis : [];
         this.monitorSeries = series;
-        this.rows = attachUserTtftWindow(
+        this.rows = attachConfiguredUserTtftWindow(
           attachRecentAvailability(this.summaryRows, this.monitorSeries),
           this.monitorSeries,
-          this.config.userTtftWindow,
+          this.config,
         );
         this.monitorGeneratedAt = getMonitorSeriesWindowAnchor(series) ?? summary?.generatedAt ?? null;
         this.updateMonitorFreshness();
@@ -4005,6 +4018,8 @@
   class KeyGroupDropdownEnhancer {
     constructor() {
       this.monitorIndex = buildGroupDropdownMonitorIndex([]);
+      this.summaryRows = [];
+      this.monitorSeries = null;
       this.observer = null;
       this.menuObservers = new Map();
       this.renderTimer = null;
@@ -4016,14 +4031,31 @@
       this.loadFailed = false;
       this.lastAttemptAt = 0;
       this.lastErrorSignature = '';
-      const config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
-      this.latencySource = config.latencySource;
-      this.minUserTtftSamples = config.minUserTtftSamples;
+      this.lastSeriesErrorSignature = '';
+      this.config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
+      this.latencySource = this.config.latencySource;
+      this.userTtftWindow = this.config.userTtftWindow;
+      this.minUserTtftSamples = this.config.minUserTtftSamples;
+      this.onConfigChanged = () => {
+        const previousDataSignature = this.getDataConfigSignature();
+        this.loadConfig();
+        const dataConfigChanged = this.getDataConfigSignature() !== previousDataSignature;
+        if (dataConfigChanged) {
+          if (!shouldUseUserTtftSeries(this.config)) this.monitorSeries = null;
+          this.rebuildMonitorIndex();
+          if (shouldUseUserTtftSeries(this.config) && !this.monitorSeries) this.lastAttemptAt = 0;
+        }
+        this.queueRender();
+        if (dataConfigChanged && this.findMenus().length && shouldUseUserTtftSeries(this.config) && !this.monitorSeries) {
+          this.refresh(true);
+        }
+      };
     }
 
     start() {
       this.active = true;
       addStyle(KEY_GROUP_STYLE, 'aihub-smart-group-key-style');
+      window.addEventListener(CONFIG_CHANGE_EVENT, this.onConfigChanged);
       this.observer = new MutationObserver((records) => {
         if (this.mutationsNeedMenuScan(records)) this.queueRender();
       });
@@ -4047,6 +4079,9 @@
       if (this.refreshTimer) window.clearInterval(this.refreshTimer);
       this.renderTimer = null;
       this.refreshTimer = null;
+      this.summaryRows = [];
+      this.monitorSeries = null;
+      window.removeEventListener(CONFIG_CHANGE_EVENT, this.onConfigChanged);
       document.querySelectorAll('.asg-key-group-status,.asg-key-group-latency').forEach((node) => node.remove());
       document.querySelectorAll('.asg-key-group-option').forEach((button) => {
         button.classList.remove('asg-key-group-option');
@@ -4060,6 +4095,23 @@
         button.querySelector('.asg-key-group-rate-shell')?.classList.remove('asg-key-group-rate-shell');
         button.querySelector('.asg-key-group-rate')?.classList.remove('asg-key-group-rate');
       });
+    }
+
+    loadConfig() {
+      this.config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
+      this.latencySource = this.config.latencySource;
+      this.userTtftWindow = this.config.userTtftWindow;
+      this.minUserTtftSamples = this.config.minUserTtftSamples;
+      return this.config;
+    }
+
+    getDataConfigSignature() {
+      return `${this.latencySource}:${this.userTtftWindow}`;
+    }
+
+    rebuildMonitorIndex() {
+      const rows = attachConfiguredUserTtftWindow(this.summaryRows, this.monitorSeries, this.config);
+      this.monitorIndex = buildGroupDropdownMonitorIndex(rows);
     }
 
     mutationsNeedMenuScan(records) {
@@ -4131,20 +4183,42 @@
       }, ENHANCER_RENDER_DEBOUNCE_MS);
     }
 
-    async refresh() {
-      if (!this.active || !isPageVisible() || this.loading || Date.now() - this.lastAttemptAt < 60_000) return;
+    async refresh(bypassThrottle = false) {
+      if (!this.active || !isPageVisible() || this.loading
+        || (!bypassThrottle && Date.now() - this.lastAttemptAt < 60_000)) return;
       this.loading = true;
       this.loadFailed = false;
       this.lastAttemptAt = Date.now();
       this.render();
       try {
-        const summary = await fetchMonitorSummary({ maxAgeMs: PASSIVE_MONITOR_SUMMARY_CACHE_TTL_MS });
+        this.loadConfig();
+        const needsSeries = shouldUseUserTtftSeries(this.config);
+        const [summary, seriesResult] = await Promise.all([
+          fetchMonitorSummary({ maxAgeMs: PASSIVE_MONITOR_SUMMARY_CACHE_TTL_MS }),
+          needsSeries
+            ? fetchMonitorSeries().then((value) => ({ value })).catch((error) => ({ error }))
+            : Promise.resolve({ value: null }),
+        ]);
         if (!this.active) return;
-        this.latencySource = normalizeConfig(storageGet('config', DEFAULT_CONFIG)).latencySource;
-        this.monitorIndex = buildGroupDropdownMonitorIndex(summary?.apis);
+        this.loadConfig();
+        const currentNeedsSeries = shouldUseUserTtftSeries(this.config);
+        this.summaryRows = Array.isArray(summary?.apis) ? summary.apis : [];
+        this.monitorSeries = currentNeedsSeries ? seriesResult.value || null : null;
+        this.rebuildMonitorIndex();
         this.hasMonitorData = true;
         if (this.lastErrorSignature) writeRuntimeLog('aihub', 'info', '密钥分组监控读取已恢复');
         this.lastErrorSignature = '';
+        if (needsSeries && currentNeedsSeries) {
+          const seriesErrorMessage = seriesResult.error instanceof Error ? seriesResult.error.message : '';
+          if (seriesErrorMessage && seriesErrorMessage !== this.lastSeriesErrorSignature) {
+            writeRuntimeLog('aihub', 'warn', `密钥分组真实用户序列读取失败，已回退主动探测：${seriesErrorMessage}`);
+          } else if (!seriesErrorMessage && this.lastSeriesErrorSignature) {
+            writeRuntimeLog('aihub', 'info', '密钥分组真实用户序列读取已恢复');
+          }
+          this.lastSeriesErrorSignature = seriesErrorMessage;
+        } else {
+          this.lastSeriesErrorSignature = '';
+        }
       } catch (error) {
         if (!this.active) return;
         this.loadFailed = !this.hasMonitorData;
@@ -4159,13 +4233,20 @@
 
     render() {
       if (!this.active) return;
-      const config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
-      this.latencySource = config.latencySource;
-      this.minUserTtftSamples = config.minUserTtftSamples;
+      const previousDataSignature = this.getDataConfigSignature();
+      this.loadConfig();
+      if (this.getDataConfigSignature() !== previousDataSignature) {
+        if (!shouldUseUserTtftSeries(this.config)) this.monitorSeries = null;
+        this.rebuildMonitorIndex();
+        if (shouldUseUserTtftSeries(this.config) && !this.monitorSeries) this.lastAttemptAt = 0;
+      }
       const menus = this.findMenus();
       this.syncMenuObservers(menus);
       if (!menus.length) return;
-      if (!this.hasMonitorData && !this.loading && Date.now() - this.lastAttemptAt >= 60_000) this.refresh();
+      const missingWindowSeries = shouldUseUserTtftSeries(this.config) && !this.monitorSeries;
+      if ((!this.hasMonitorData || missingWindowSeries)
+        && !this.loading
+        && Date.now() - this.lastAttemptAt >= 60_000) this.refresh();
       for (const { optionList } of menus) {
         for (const option of optionList.querySelectorAll('button,[role="option"]')) this.renderOption(option);
       }
@@ -5414,6 +5495,8 @@
     getCooldownInfo,
     attachRecentAvailability,
     attachUserTtftWindow,
+    shouldUseUserTtftSeries,
+    attachConfiguredUserTtftWindow,
     normalizeGroupName,
     buildGroupMultiplierMap,
     buildGroupMetricMap,

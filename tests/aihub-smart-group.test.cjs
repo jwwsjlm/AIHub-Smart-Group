@@ -206,6 +206,20 @@ test('lets passive provider displays share the longer monitor summary cache', ()
   assert.match(usageSource, /fetchMonitorSummary\(\{ maxAgeMs: PASSIVE_MONITOR_SUMMARY_CACHE_TTL_MS \}\)/);
 });
 
+test('loads provider series for the native key group picker only when a real-user window requires it', () => {
+  const dropdownSource = userscriptSource.slice(userscriptSource.indexOf('class KeyGroupDropdownEnhancer'), userscriptSource.indexOf('class UsageMultiplierEnhancer'));
+
+  assert.match(dropdownSource, /window\.addEventListener\(CONFIG_CHANGE_EVENT, this\.onConfigChanged\)/);
+  assert.match(dropdownSource, /window\.removeEventListener\(CONFIG_CHANGE_EVENT, this\.onConfigChanged\)/);
+  assert.match(dropdownSource, /const needsSeries = shouldUseUserTtftSeries\(this\.config\);/);
+  assert.match(dropdownSource, /needsSeries\s*\? fetchMonitorSeries\(\)\.then/);
+  assert.match(dropdownSource, /: Promise\.resolve\(\{ value: null \}\)/);
+  assert.match(dropdownSource, /if \(!this\.active\) return;\s*this\.loadConfig\(\);\s*const currentNeedsSeries = shouldUseUserTtftSeries\(this\.config\);/);
+  assert.match(dropdownSource, /this\.monitorSeries = currentNeedsSeries \? seriesResult\.value \|\| null : null;/);
+  assert.match(dropdownSource, /attachConfiguredUserTtftWindow\(this\.summaryRows, this\.monitorSeries, this\.config\)/);
+  assert.match(dropdownSource, /密钥分组真实用户序列读取失败，已回退主动探测/);
+});
+
 test('forces a fresh balance only for manual controller checks', () => {
   const controllerSource = userscriptSource.slice(userscriptSource.indexOf('class Controller'), userscriptSource.indexOf('class KeyGroupDropdownEnhancer'));
 
@@ -219,7 +233,7 @@ test('retains normalized monitor inputs so real-user window previews can be reco
   assert.match(controllerSource, /this\.summaryRows = \[\];/);
   assert.match(controllerSource, /this\.monitorSeries = null;/);
   assert.match(controllerSource, /this\.summaryRows = Array\.isArray\(summary\?\.apis\) \? summary\.apis : \[\];/);
-  assert.match(controllerSource, /this\.rows = attachUserTtftWindow\(\s*attachRecentAvailability\(this\.summaryRows, this\.monitorSeries\),\s*this\.monitorSeries,\s*this\.config\.userTtftWindow/);
+  assert.match(controllerSource, /this\.rows = attachConfiguredUserTtftWindow\(\s*attachRecentAvailability\(this\.summaryRows, this\.monitorSeries\),\s*this\.monitorSeries,\s*this\.config/);
 });
 
 test('maps dropdown monitor tones to native group badge classes', () => {
@@ -419,7 +433,7 @@ test('updates only settings previews affected by the edited field', () => {
   );
   assert.match(controllerSource, /renderSettingsPreviews\(event\.target\.dataset\.setting\)/);
   assert.match(controllerSource, /targets\.recommendation \|\| targets\.balance \? this\.readDraftConfig\(\) : null/);
-  assert.match(controllerSource, /attachUserTtftWindow\([\s\S]*normalizedDraft\.userTtftWindow/);
+  assert.match(controllerSource, /attachConfiguredUserTtftWindow\([\s\S]*normalizedDraft/);
 });
 
 test('marks the price preview pending for unsaved candidate filters only', () => {
@@ -2009,6 +2023,31 @@ test('aggregates real-user TTFT windows with sample-count weighting', () => {
   assert.equal(sixHours.userAvgTtftMs, (100 * 2 + 400 * 6 + 800 * 10) / 18);
   assert.equal(sixHours.userSampleCount, 18);
   assert.equal(sixHours.userTtftWindow, '6h');
+});
+
+test('avoids real-user series work unless the selected latency source needs a time window', () => {
+  const now = Date.parse('2026-08-24T06:00:00Z');
+  const rows = [{ id: 1, userAvgTtftMs: 999, userSampleCount: 99, userHasData: true }];
+  const series = {
+    generatedAt: new Date(now).toISOString(),
+    seriesByApiId: {},
+    userTtftByGroupId: { 1: [[now - 60_000, 200, 4, true]] },
+  };
+
+  const probeWindowConfig = { ...core.DEFAULT_CONFIG, latencySource: 'probe', userTtftWindow: '10m' };
+  const userSummaryConfig = { ...core.DEFAULT_CONFIG, latencySource: 'user', userTtftWindow: 'summary' };
+  const userWindowConfig = { ...core.DEFAULT_CONFIG, latencySource: 'user', userTtftWindow: '10m' };
+
+  assert.equal(core.shouldUseUserTtftSeries(probeWindowConfig), false);
+  assert.equal(core.shouldUseUserTtftSeries(userSummaryConfig), false);
+  assert.equal(core.shouldUseUserTtftSeries(userWindowConfig), true);
+  assert.strictEqual(core.attachConfiguredUserTtftWindow(rows, series, probeWindowConfig), rows);
+  assert.strictEqual(core.attachConfiguredUserTtftWindow(rows, series, userSummaryConfig), rows);
+  const windowed = core.attachConfiguredUserTtftWindow(rows, series, userWindowConfig);
+  assert.notStrictEqual(windowed, rows);
+  assert.equal(windowed[0].userAvgTtftMs, 200);
+  assert.equal(windowed[0].userSampleCount, 4);
+  assert.equal(windowed[0].userTtftWindow, '10m');
 });
 
 test('marks an empty selected real-user TTFT window for probe fallback', () => {
