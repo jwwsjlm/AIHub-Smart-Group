@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.6
+// @version      0.14.7
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.6';
+  const SCRIPT_VERSION = '0.14.7';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -51,6 +51,7 @@
   const PROVIDER_SORT_VERIFY_DELAY_MS = 250;
   const PROVIDER_REFRESH_RETRY_MS = 1_000;
   const PROVIDER_REFRESH_UNAVAILABLE_RETRY_MS = 5_000;
+  const PROVIDER_REFRESH_COMPLETION_CHECK_DEBOUNCE_MS = 50;
   const PROVIDER_REFRESH_COMPLETION_TIMEOUT_MS = 15_000;
   const PROVIDER_REFRESH_BUTTON_SELECTOR = [
     'button.monitor-icon-button[title="刷新监测数据"]',
@@ -4262,6 +4263,7 @@
       this.retryTimer = null;
       this.sortVerifyTimer = null;
       this.refreshTimer = null;
+      this.refreshCheckTimer = null;
       this.refreshCompletionTimer = null;
       this.refreshObserver = null;
       this.refreshButton = null;
@@ -4583,7 +4585,7 @@
       this.refreshRoot = observedRoot;
       this.refreshDataSignature = getProviderRefreshDataSignature(observedRoot);
       this.refreshSawDataChange = false;
-      this.refreshObserver = new MutationObserver((records) => this.handleRefreshMutations(records));
+      this.refreshObserver = new MutationObserver(() => this.queueRefreshCompletionCheck());
       this.refreshObserver.observe(observedRoot, {
         attributes: true,
         attributeFilter: ['disabled', 'aria-disabled', 'aria-busy', 'class'],
@@ -4591,20 +4593,39 @@
         childList: true,
         subtree: true,
       });
-      this.refreshCompletionTimer = window.setTimeout(() => this.completeRefreshTracking(false), PROVIDER_REFRESH_COMPLETION_TIMEOUT_MS);
+      this.refreshCompletionTimer = window.setTimeout(() => {
+        this.refreshCompletionTimer = null;
+        if (!this.checkProviderRefreshCompletion()) this.completeRefreshTracking(false);
+      }, PROVIDER_REFRESH_COMPLETION_TIMEOUT_MS);
       return true;
     }
 
-    handleRefreshMutations() {
-      if (!this.refreshing) return;
+    queueRefreshCompletionCheck() {
+      if (!this.refreshing || this.refreshCheckTimer) return false;
+      this.refreshCheckTimer = window.setTimeout(() => {
+        this.refreshCheckTimer = null;
+        this.checkProviderRefreshCompletion();
+      }, PROVIDER_REFRESH_COMPLETION_CHECK_DEBOUNCE_MS);
+      return true;
+    }
+
+    checkProviderRefreshCompletion() {
+      if (!this.refreshing) return false;
       const root = this.refreshRoot;
       const button = findProviderRefreshButtonInRoot(root) || this.refreshButton;
-      if (!button) return this.completeRefreshTracking(false);
+      if (!button) {
+        this.completeRefreshTracking(false);
+        return true;
+      }
       this.refreshButton = button;
       const busy = isProviderRefreshButtonBusy(button);
       const dataSignature = getProviderRefreshDataSignature(root);
       if (dataSignature && dataSignature !== this.refreshDataSignature) this.refreshSawDataChange = true;
-      if (this.refreshSawDataChange && !busy) this.completeRefreshTracking(true);
+      if (this.refreshSawDataChange && !busy) {
+        this.completeRefreshTracking(true);
+        return true;
+      }
+      return false;
     }
 
     completeRefreshTracking(succeeded) {
@@ -4616,8 +4637,10 @@
 
     stopRefreshTracking() {
       this.refreshObserver?.disconnect();
+      if (this.refreshCheckTimer) window.clearTimeout(this.refreshCheckTimer);
       if (this.refreshCompletionTimer) window.clearTimeout(this.refreshCompletionTimer);
       this.refreshObserver = null;
+      this.refreshCheckTimer = null;
       this.refreshCompletionTimer = null;
       this.refreshButton = null;
       this.refreshRoot = null;

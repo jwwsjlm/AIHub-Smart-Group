@@ -2296,10 +2296,12 @@ test('keeps provider auto refresh anchored to the last refresh time', () => {
   assert.match(providerEnhancerSource, /if \(this\.refreshing\) return;\s*if \(!this\.beginRefreshTracking\(button, root\)\)/);
   assert.match(providerEnhancerSource, /const refreshUnavailable = forceBackoff \|\| \(refreshDue && !refreshStarted\);/);
   assert.match(providerEnhancerSource, /getProviderRefreshTimerDelay\(Date\.now\(\), this\.lastRefreshAt, intervalMs, refreshUnavailable\)/);
-  assert.match(providerEnhancerSource, /this\.refreshCompletionTimer = window\.setTimeout\(\(\) => this\.completeRefreshTracking\(false\), PROVIDER_REFRESH_COMPLETION_TIMEOUT_MS\);/);
+  assert.match(providerEnhancerSource, /this\.refreshObserver = new MutationObserver\(\(\) => this\.queueRefreshCompletionCheck\(\)\);/);
+  assert.match(providerEnhancerSource, /this\.refreshCheckTimer = window\.setTimeout\(\(\) => \{[\s\S]*this\.checkProviderRefreshCompletion\(\);[\s\S]*PROVIDER_REFRESH_COMPLETION_CHECK_DEBOUNCE_MS/);
+  assert.match(providerEnhancerSource, /this\.refreshCompletionTimer = window\.setTimeout\(\(\) => \{[\s\S]*if \(!this\.checkProviderRefreshCompletion\(\)\) this\.completeRefreshTracking\(false\);[\s\S]*PROVIDER_REFRESH_COMPLETION_TIMEOUT_MS/);
   assert.match(providerEnhancerSource, /this\.refreshDataSignature = getProviderRefreshDataSignature\(observedRoot\);/);
   assert.match(providerEnhancerSource, /if \(dataSignature && dataSignature !== this\.refreshDataSignature\) this\.refreshSawDataChange = true;/);
-  assert.match(providerEnhancerSource, /if \(this\.refreshSawDataChange && !busy\) this\.completeRefreshTracking\(true\);/);
+  assert.match(providerEnhancerSource, /if \(this\.refreshSawDataChange && !busy\) \{\s*this\.completeRefreshTracking\(true\);/);
   assert.match(providerEnhancerSource, /this\.syncRefreshTimer\(false, !succeeded\);/);
   assert.match(providerEnhancerSource, /if \(!isPageVisible\(\)\) \{\s*if \(this\.refreshTimer\) window\.clearTimeout\(this\.refreshTimer\);/);
   assert.doesNotMatch(providerEnhancerSource, /this\.refreshTimer = window\.setInterval/);
@@ -2474,7 +2476,7 @@ test('confirms provider auto refresh only after data changes, then backs off whe
   globalThis.document = { hidden: false, querySelector: () => root };
   globalThis.window = {
     setTimeout: (callback, delay) => {
-      timers.push({ callback, delay });
+      timers.push({ callback, delay, ran: false });
       return timers.length;
     },
     clearTimeout: () => {},
@@ -2485,6 +2487,12 @@ test('confirms provider auto refresh only after data changes, then backs off whe
     disconnect() {}
   };
   Date.now = () => now;
+  const runNextTimer = (delay) => {
+    const timer = timers.find((item) => item.delay === delay && !item.ran);
+    assert.ok(timer, `expected a pending ${delay} ms timer`);
+    timer.ran = true;
+    timer.callback();
+  };
 
   try {
     const enhancer = new core.ProviderSortEnhancer();
@@ -2502,14 +2510,17 @@ test('confirms provider auto refresh only after data changes, then backs off whe
     assert.equal(timers[0].delay, 15_000);
 
     observer.callback([{ target: button }]);
+    runNextTimer(50);
     assert.equal(enhancer.refreshing, true);
     button.disabled = false;
     now = 61_000;
     observer.callback([{ target: button }]);
+    runNextTimer(50);
     assert.equal(enhancer.refreshing, true);
     assert.equal(enhancer.lastRefreshAt, 0);
     generatedText = '更新于 2026/08/24 17:00:01';
     observer.callback([{ target: generatedNode }]);
+    runNextTimer(50);
     assert.equal(enhancer.refreshing, false);
     assert.equal(enhancer.lastRefreshAt, 61_000);
     assert.deepEqual(schedules, [[false, false]]);
@@ -2520,8 +2531,10 @@ test('confirms provider auto refresh only after data changes, then backs off whe
     button.disabled = false;
     assert.equal(enhancer.refresh(undefined, now), true);
     observer.callback([{ target: button }]);
+    runNextTimer(50);
     button.disabled = false;
     observer.callback([{ target: button }]);
+    runNextTimer(50);
     assert.equal(enhancer.refreshing, true);
     assert.equal(enhancer.lastRefreshAt, 61_000);
     const timeout = timers.find((timer) => timer.delay === 15_000);
@@ -2529,8 +2542,80 @@ test('confirms provider auto refresh only after data changes, then backs off whe
     assert.equal(enhancer.lastRefreshAt, 61_000);
     assert.equal(enhancer.refreshing, false);
     assert.deepEqual(schedules, [[false, true]]);
+
+    now = 181_000;
+    schedules.length = 0;
+    timers.length = 0;
+    button.disabled = false;
+    assert.equal(enhancer.refresh(undefined, now), true);
+    generatedText = '更新于 2026/08/24 17:00:02';
+    button.disabled = false;
+    const finalCheckTimeout = timers.find((timer) => timer.delay === 15_000);
+    finalCheckTimeout.callback();
+    assert.equal(enhancer.lastRefreshAt, 181_000);
+    assert.equal(enhancer.refreshing, false);
+    assert.deepEqual(schedules, [[false, false]]);
   } finally {
     Date.now = originalDateNow;
+    if (originalMutationObserver === undefined) delete globalThis.MutationObserver;
+    else globalThis.MutationObserver = originalMutationObserver;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+});
+
+test('coalesces provider refresh mutation bursts into one completion scan', () => {
+  const originalWindow = globalThis.window;
+  const originalDocument = globalThis.document;
+  const originalMutationObserver = globalThis.MutationObserver;
+  let observer = null;
+  let signatureScans = 0;
+  const timers = [];
+  const generatedNode = { textContent: '更新于 2026/08/24 18:00:00' };
+  const button = { disabled: true, className: 'monitor-icon-button' };
+  const root = {
+    querySelector: (selector) => {
+      if (selector.includes('monitor-generated-at')) {
+        signatureScans += 1;
+        return generatedNode;
+      }
+      return button;
+    },
+    querySelectorAll: () => [],
+  };
+  globalThis.document = { hidden: false, querySelector: () => root };
+  globalThis.window = {
+    setTimeout: (callback, delay) => {
+      timers.push({ callback, delay });
+      return timers.length;
+    },
+    clearTimeout: () => {},
+  };
+  globalThis.MutationObserver = class {
+    constructor(callback) { this.callback = callback; observer = this; }
+    observe() {}
+    disconnect() {}
+  };
+
+  try {
+    const enhancer = new core.ProviderSortEnhancer();
+    enhancer.active = true;
+    assert.equal(enhancer.beginRefreshTracking(button, root), true);
+    assert.equal(signatureScans, 1);
+
+    for (let index = 0; index < 20; index += 1) observer.callback([{ target: generatedNode }]);
+    assert.equal(timers.filter((timer) => timer.delay === 50).length, 1);
+    assert.equal(signatureScans, 1);
+
+    timers.find((timer) => timer.delay === 50).callback();
+    assert.equal(signatureScans, 2);
+    assert.equal(enhancer.refreshing, true);
+
+    enhancer.stopRefreshTracking();
+    assert.equal(enhancer.refreshCheckTimer, null);
+  } finally {
     if (originalMutationObserver === undefined) delete globalThis.MutationObserver;
     else globalThis.MutationObserver = originalMutationObserver;
     if (originalWindow === undefined) delete globalThis.window;
