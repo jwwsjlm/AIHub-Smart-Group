@@ -55,6 +55,29 @@ test('reduces idle router polling while syncing browser history navigation immed
   assert.match(userscriptSource, /window\.addEventListener\('hashchange', this\.onRouteChange\);/);
 });
 
+test('replaces duplicate router instances and releases their global resources', () => {
+  const routerStart = userscriptSource.indexOf('class AppRouter');
+  const routerSource = userscriptSource.slice(routerStart, userscriptSource.indexOf('\n  return {', routerStart));
+  assert.match(userscriptSource, /\/\/ @grant\s+GM_unregisterMenuCommand/);
+  assert.match(routerSource, /if \(this\.active\) return;\s*this\.active = true;/);
+  assert.match(routerSource, /this\.menuCommandId = GM_registerMenuCommand/);
+  assert.match(routerSource, /GM_unregisterMenuCommand\(this\.menuCommandId\)/);
+  assert.match(routerSource, /window\.clearInterval\(this\.timer\)/);
+  assert.match(routerSource, /document\.removeEventListener\(ROUTER_REPLACE_EVENT, this\.onRouterReplace\)/);
+  assert.match(routerSource, /this\.panel\?\.stop\(\);[\s\S]*this\.providerSort\?\.stop\(\);/);
+  assert.match(routerSource, /sync\(\) \{\s*if \(!this\.active\) return;/);
+  assert.match(userscriptSource, /activeRouter\?\.stop\(\);\s*document\.dispatchEvent\(new window\.Event\(ROUTER_REPLACE_EVENT\)\);\s*activeRouter = new AppRouter\(\);/);
+});
+
+test('rebinds the usage observer when the SPA replaces its main element', () => {
+  const usageSource = userscriptSource.slice(userscriptSource.indexOf('class UsageMultiplierEnhancer'), userscriptSource.indexOf('class ProviderSortEnhancer'));
+  assert.match(usageSource, /this\.observedRoot = null;/);
+  assert.match(usageSource, /if \(nextRoot === this\.observedRoot && nextRoot\.isConnected\) return false;/);
+  assert.match(usageSource, /this\.observer\.disconnect\(\);\s*this\.observer\.takeRecords\?\.\(\);\s*this\.observedRoot = null;\s*this\.observer\.observe\(nextRoot/);
+  assert.match(usageSource, /record\.target === currentRoot \|\| currentRoot\.contains\(record\.target\)/);
+  assert.match(userscriptSource, /else if \(features\.usage && this\.usage\) \{\s*this\.usage\.syncObserverRoot\(\);/);
+});
+
 test('maps dropdown monitor tones to native group badge classes', () => {
   assert.equal(core.getGroupDropdownToneClass('available'), 'asg-key-group-badge-available');
   assert.equal(core.getGroupDropdownToneClass('warning'), 'asg-key-group-badge-warning');
@@ -160,6 +183,8 @@ test('finds the requested provider hall sort button without matching table heade
   assert.equal(core.findProviderSortButton(buttons, 'cacheHit'), buttons[4]);
   assert.equal(core.findProviderSortButton(buttons, 'successRate'), buttons[5]);
   assert.equal(core.findProviderSortButton(buttons, 'custom'), buttons[6]);
+  assert.equal(core.findProviderSortButton([{ textContent: '可用率 ↓' }], 'successRate')?.textContent, '可用率 ↓');
+  assert.deepEqual(core.getProviderSortButtonTexts('successRate'), ['成功率', '可用率']);
 });
 
 test('uses the native low-to-high or high-to-low direction for every provider sort mode', () => {

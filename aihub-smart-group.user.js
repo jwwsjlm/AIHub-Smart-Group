@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.11.8
+// @version      0.11.9
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -13,11 +13,12 @@
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_setValue
+// @grant        GM_unregisterMenuCommand
 // @grant        unsafeWindow
 // @run-at       document-idle
 // ==/UserScript==
 
-/* global module */
+/* global module, GM_unregisterMenuCommand */
 
 (function (factory) {
   const exported = factory();
@@ -28,9 +29,10 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.11.8';
+  const SCRIPT_VERSION = '0.11.9';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
+  const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
   const API_REQUEST_TIMEOUT_MS = 15_000;
   const MONITOR_SUMMARY_CACHE_TTL_MS = 2_000;
   const ENHANCER_RENDER_DEBOUNCE_MS = 50;
@@ -88,7 +90,7 @@
     realPrice: '真实价格',
     user: '用户速度',
     cacheHit: '缓存命中',
-    successRate: '成功率',
+    successRate: Object.freeze(['成功率', '可用率']),
     custom: '自定义',
   });
   const PROVIDER_SORT_DIRECTIONS = Object.freeze({
@@ -123,6 +125,7 @@
     providerAutoRefresh: true,
     providerRefreshIntervalSeconds: 60,
   });
+  let activeRouter = null;
 
   function numberOr(value, fallback) {
     const number = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
@@ -237,7 +240,13 @@
   }
 
   function getProviderSortButtonText(preference) {
-    return PROVIDER_SORT_BUTTON_TEXTS[normalizeProviderSortPreference(preference)];
+    const value = PROVIDER_SORT_BUTTON_TEXTS[normalizeProviderSortPreference(preference)];
+    return Array.isArray(value) ? value[0] : value;
+  }
+
+  function getProviderSortButtonTexts(preference) {
+    const value = PROVIDER_SORT_BUTTON_TEXTS[normalizeProviderSortPreference(preference)];
+    return Array.isArray(value) ? value : [value];
   }
 
   function getProviderSortDirection(preference) {
@@ -256,8 +265,8 @@
   }
 
   function findProviderSortButton(buttons, preference) {
-    const targetText = getProviderSortButtonText(preference);
-    return [...(buttons || [])].find((button) => String(button?.textContent || '').trim().replace(/\s*[↑↓]$/, '') === targetText) || null;
+    const targetTexts = getProviderSortButtonTexts(preference);
+    return [...(buttons || [])].find((button) => targetTexts.includes(String(button?.textContent || '').trim().replace(/\s*[↑↓]$/, ''))) || null;
   }
 
   function findProviderRefreshButton(buttons) {
@@ -2434,7 +2443,9 @@
     stop() {
       this.active = false;
       this.observer?.disconnect();
+      this.observer?.takeRecords?.();
       this.observer = null;
+      this.observedRoot = null;
       for (const observer of this.menuObservers.values()) observer.disconnect();
       this.menuObservers.clear();
       if (this.renderTimer) window.clearTimeout(this.renderTimer);
@@ -2641,6 +2652,7 @@
       this.usageItemsById = new Map();
       this.summaryByTable = new Map();
       this.observer = null;
+      this.observedRoot = null;
       this.renderQueued = false;
       this.active = false;
       this.refreshTimer = null;
@@ -2659,13 +2671,18 @@
     }
 
     start() {
+      if (this.active) return;
       this.active = true;
       addStyle(USAGE_STYLE, 'aihub-smart-group-usage-style');
       window.addEventListener(CONFIG_CHANGE_EVENT, this.onConfigChanged);
       this.observer = new MutationObserver((records) => {
-        if (this.mutationsNeedRender(records)) this.queueRender();
+        const currentRoot = this.observedRoot;
+        const currentRecords = currentRoot
+          ? [...records].filter((record) => record.target === currentRoot || currentRoot.contains(record.target))
+          : [];
+        if (this.mutationsNeedRender(currentRecords)) this.queueRender();
       });
-      this.observer.observe(document.querySelector('main') || document.body, { childList: true, subtree: true });
+      this.syncObserverRoot();
       this.refresh(true);
       this.refreshTimer = window.setInterval(() => {
         if (isPageVisible() && isRefreshDue(Date.now(), this.lastRefreshCompletedAt, USAGE_REFRESH_INTERVAL_MS)) this.refresh();
@@ -2683,6 +2700,20 @@
       window.removeEventListener(CONFIG_CHANGE_EVENT, this.onConfigChanged);
       document.querySelectorAll('.asg-usage-multiplier,.asg-usage-cost-audit,.asg-usage-cost-summary').forEach((node) => node.remove());
       this.summaryByTable.clear();
+    }
+
+    syncObserverRoot() {
+      if (!this.active || !this.observer) return false;
+      const nextRoot = document.querySelector('main') || document.body;
+      if (!nextRoot) return false;
+      if (nextRoot === this.observedRoot && nextRoot.isConnected) return false;
+      this.observer.disconnect();
+      this.observer.takeRecords?.();
+      this.observedRoot = null;
+      this.observer.observe(nextRoot, { childList: true, subtree: true });
+      this.observedRoot = nextRoot;
+      this.queueRender();
+      return true;
     }
 
     mutationsNeedRender(records) {
@@ -3083,7 +3114,10 @@
       this.providerSort = null;
       this.rejectedToken = '';
       this.timer = null;
+      this.menuCommandId = null;
+      this.active = false;
       this.onRouteChange = () => this.sync();
+      this.onRouterReplace = () => this.stop();
       this.onVisibilityChange = () => {
         if (isPageVisible()) {
           this.sync();
@@ -3096,11 +3130,14 @@
     }
 
     start() {
+      if (this.active) return;
+      this.active = true;
       if (typeof GM_registerMenuCommand === 'function') {
-        GM_registerMenuCommand('显示 AIHub 智能分组', () => {
+        this.menuCommandId = GM_registerMenuCommand('显示 AIHub 智能分组', () => {
           this.panel?.setMinimized(false);
         });
       }
+      document.addEventListener(ROUTER_REPLACE_EVENT, this.onRouterReplace);
       this.sync();
       this.timer = window.setInterval(() => {
         if (isPageVisible()) this.sync();
@@ -3110,7 +3147,36 @@
       document.addEventListener('visibilitychange', this.onVisibilityChange);
     }
 
+    stop() {
+      if (!this.active) return;
+      this.active = false;
+      if (this.timer) window.clearInterval(this.timer);
+      this.timer = null;
+      window.removeEventListener('popstate', this.onRouteChange);
+      window.removeEventListener('hashchange', this.onRouteChange);
+      document.removeEventListener('visibilitychange', this.onVisibilityChange);
+      document.removeEventListener(ROUTER_REPLACE_EVENT, this.onRouterReplace);
+      this.panel?.stop();
+      this.usage?.stop();
+      this.keyGroups?.stop();
+      this.providerSort?.stop();
+      this.panel = null;
+      this.usage = null;
+      this.keyGroups = null;
+      this.providerSort = null;
+      if (this.menuCommandId != null && typeof GM_unregisterMenuCommand === 'function') {
+        try {
+          GM_unregisterMenuCommand(this.menuCommandId);
+        } catch {
+          // Older userscript managers may expose registration without removal.
+        }
+      }
+      this.menuCommandId = null;
+      if (activeRouter === this) activeRouter = null;
+    }
+
     sync() {
+      if (!this.active) return;
       const token = getAuthToken();
       if (!token) this.rejectedToken = '';
       const features = getPageFeatures(location.pathname, Boolean(token) && token !== this.rejectedToken);
@@ -3129,6 +3195,8 @@
       if (features.usage && !this.usage) {
         this.usage = new UsageMultiplierEnhancer();
         this.usage.start();
+      } else if (features.usage && this.usage) {
+        this.usage.syncObserverRoot();
       } else if (!features.usage && this.usage) {
         this.usage.stop();
         this.usage = null;
@@ -3163,6 +3231,7 @@
     normalizeModelPriceModel,
     normalizeProviderSortPreference,
     getProviderSortButtonText,
+    getProviderSortButtonTexts,
     getProviderSortDirection,
     getProviderSortButtonDirection,
     shouldActivateProviderSort,
@@ -3250,7 +3319,10 @@
     formatLogLine,
     start() {
       if (location.hostname !== 'aihub.top') return;
-      new AppRouter().start();
+      activeRouter?.stop();
+      document.dispatchEvent(new window.Event(ROUTER_REPLACE_EVENT));
+      activeRouter = new AppRouter();
+      activeRouter.start();
     },
   };
 });
