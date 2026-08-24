@@ -1077,6 +1077,7 @@ test('normalizes the new cache, model health, and model detection fields', () =>
       rate_multiplier: 0.06,
       available: true,
       cache_hit_rate: '65.50%',
+      sla: 0.82,
       model_health: { sol: 'healthy', terra: 'healthy', luna: 'failed' },
       model_detection: { status: 'insufficient_evidence', applicable: true },
     }],
@@ -1084,6 +1085,7 @@ test('normalizes the new cache, model health, and model detection fields', () =>
   const row = summary.apis[0];
 
   assert.equal(row.cacheHitRate, 0.655);
+  assert.equal(row.sla, 0.82);
   assert.deepEqual(row.modelHealth, { sol: 'healthy', terra: 'healthy', luna: 'failed' });
   assert.equal(row.modelDetection.status, 'insufficient_evidence');
   assert.equal(row.warningReasons.includes('model_detection_insufficient_evidence'), true);
@@ -1483,6 +1485,15 @@ test('parses cache hit rates from percentages and decimals', () => {
   assert.equal(core.normalizeCacheHitRate(25), 0.25);
   assert.equal(core.normalizeCacheHitRate('bad'), null);
   assert.equal(core.formatCacheHitRate('65.50%'), '缓存命中率 65.5%');
+});
+
+test('parses and formats provider SLA ratios and percentages', () => {
+  assert.equal(core.normalizeSla(0.820039), 0.820039);
+  assert.equal(core.normalizeSla(82), 0.82);
+  assert.equal(core.normalizeSla('82%'), 0.82);
+  assert.equal(core.normalizeSla(101), null);
+  assert.equal(core.formatSla(0.820039), 'SLA 82.0%');
+  assert.equal(core.formatSla(null), 'SLA 暂无数据');
 });
 
 test('normalizes model prices across API casing and field conventions', () => {

@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.29
+// @version      0.14.30
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.29';
+  const SCRIPT_VERSION = '0.14.30';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -920,6 +920,15 @@
     return normalized === null ? '缓存命中率暂无数据' : `缓存命中率 ${(normalized * 100).toFixed(1)}%`;
   }
 
+  function normalizeSla(value) {
+    return normalizeCacheHitRate(value);
+  }
+
+  function formatSla(value) {
+    const normalized = normalizeSla(value);
+    return normalized === null ? 'SLA 暂无数据' : `SLA ${(normalized * 100).toFixed(1)}%`;
+  }
+
   function booleanOrNull(value) {
     if (value === true || value === false) return value;
     const normalized = String(value ?? '').trim().toLocaleLowerCase();
@@ -1472,6 +1481,7 @@
       modelHealth,
       modelPrices,
       cacheHitRate,
+      sla: normalizeSla(source.sla),
       runtimeCache1h,
       effectiveMultiplier,
       effectiveInputPricePerMillion1h,
@@ -2152,6 +2162,8 @@
         multiplier: nonNegativeNumberOrNull(row?.priceMultiplier),
         latencyMs: latencyMetric.value,
       };
+      const sla = normalizeSla(row?.sla);
+      if (sla !== null) metric.sla = sla;
       if (latencySource === 'user') {
         const latencySampleCount = latencyMetric.source === 'user' ? getUserLatencySampleCount(row) : null;
         if (latencySampleCount !== null) metric.latencySampleCount = latencySampleCount;
@@ -3399,6 +3411,7 @@
               <div class="asg-key-detail"><span>真实价格 / 预测倍率</span><strong class="asg-key-metric" data-key-detail="effective-price"></strong></div>
               <div class="asg-key-detail"><span>输出速度</span><strong class="asg-key-metric" data-key-detail="output-tps"></strong></div>
               <div class="asg-key-detail"><span>缓存命中率</span><strong class="asg-key-metric" data-key-detail="cache"></strong></div>
+              <div class="asg-key-detail"><span>历史 SLA</span><strong class="asg-key-metric" data-key-detail="sla"></strong></div>
               <div class="asg-key-detail asg-key-detail-wide" data-key-detail-row="provider-detail" hidden><span>供应商公告</span><strong data-key-detail="provider-detail"></strong></div>
               <div class="asg-key-detail asg-key-detail-wide" data-key-detail-row="hewei-report" hidden><span>检测报告</span><strong><a data-key-detail="hewei-report" target="_blank" rel="noopener noreferrer">查看禾维检测报告</a></strong></div>
             </div>
@@ -4112,11 +4125,12 @@
         const modelPriceText = formatModelPriceSummary(winner, this.config.modelPriceModel);
         const effectivePriceText = formatEffectivePricingSummary(winner);
         const outputTpsText = formatOutputThroughput(winner);
+        const slaText = normalizeSla(winner.sla) === null ? '' : ` · ${formatSla(winner.sla)}`;
         const providerContext = getProviderContext(winner);
         const cacheText = normalizeCacheHitRate(winner.cacheHitRate ?? winner.cache_hit_rate) === null
           ? ''
           : ` · ${formatCacheHitRate(winner.cacheHitRate ?? winner.cache_hit_rate)}`;
-        metrics.textContent = `10m ${availabilityText} · ${winner.recentSampleCount}次探测 · ${formatLatencyMetric(winner, this.config.latencySource, this.config.minUserTtftSamples)}${detectionText ? ` · 模型${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${modelPriceText ? ` · ${modelPriceText}` : ''}${effectivePriceText ? ` · ${effectivePriceText}` : ''}${outputTpsText ? ` · ${outputTpsText}` : ''}${cacheText}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
+        metrics.textContent = `10m ${availabilityText} · ${winner.recentSampleCount}次探测 · ${formatLatencyMetric(winner, this.config.latencySource, this.config.minUserTtftSamples)}${detectionText ? ` · 模型${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${modelPriceText ? ` · ${modelPriceText}` : ''}${effectivePriceText ? ` · ${effectivePriceText}` : ''}${outputTpsText ? ` · ${outputTpsText}` : ''}${cacheText}${slaText}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
         if (detectionTitle) metrics.title = detectionTitle;
         recommend.append(title, metrics);
         if (this.config.mode === 'balance') {
@@ -4258,6 +4272,7 @@
       details.querySelector('[data-key-detail="effective-price"]').textContent = effectivePriceText || '暂无数据';
       details.querySelector('[data-key-detail="output-tps"]').textContent = outputTpsText || '暂无数据';
       details.querySelector('[data-key-detail="cache"]').textContent = cacheHitRate === null ? '暂无数据' : `${(cacheHitRate * 100).toFixed(1)}%`;
+      details.querySelector('[data-key-detail="sla"]').textContent = formatSla(metric?.sla);
       const providerDetailRow = details.querySelector('[data-key-detail-row="provider-detail"]');
       const providerDetailNode = details.querySelector('[data-key-detail="provider-detail"]');
       providerDetailRow.hidden = !providerContext.publicDetail;
@@ -4284,8 +4299,9 @@
         const modelPriceText = formatModelPriceSummary(candidate, this.config.modelPriceModel, true);
         const effectivePriceText = formatEffectivePricingSummary(candidate, true);
         const outputTpsText = formatOutputThroughput(candidate, true);
+        const slaText = normalizeSla(candidate.sla) === null ? '' : ` · ${formatSla(candidate.sla)}`;
         const providerContext = getProviderContext(candidate);
-        metrics.textContent = `${formatRecommendationPriceCriterion(candidate)} · ${formatLatencyMetric(candidate, this.config.latencySource, this.config.minUserTtftSamples)} · 10m ${formatPercent(candidate.success10m)}${detectionText ? ` · ${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${modelPriceText ? ` · ${modelPriceText}` : ''}${effectivePriceText ? ` · ${effectivePriceText}` : ''}${outputTpsText ? ` · ${outputTpsText}` : ''}${cacheHitRate === null ? '' : ` · 缓存 ${(cacheHitRate * 100).toFixed(1)}%`}${providerContext.publicDetail ? ' · 有供应商公告' : ''}${providerContext.heweiCheckUrl ? ' · 有禾维报告' : ''}`;
+        metrics.textContent = `${formatRecommendationPriceCriterion(candidate)} · ${formatLatencyMetric(candidate, this.config.latencySource, this.config.minUserTtftSamples)} · 10m ${formatPercent(candidate.success10m)}${detectionText ? ` · ${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${modelPriceText ? ` · ${modelPriceText}` : ''}${effectivePriceText ? ` · ${effectivePriceText}` : ''}${outputTpsText ? ` · ${outputTpsText}` : ''}${cacheHitRate === null ? '' : ` · 缓存 ${(cacheHitRate * 100).toFixed(1)}%`}${slaText}${providerContext.publicDetail ? ' · 有供应商公告' : ''}${providerContext.heweiCheckUrl ? ' · 有禾维报告' : ''}`;
         const contextTitle = [detectionTitle, providerContext.publicDetail ? `供应商公告：${providerContext.publicDetail}` : ''].filter(Boolean).join('\n');
         if (contextTitle) metrics.title = contextTitle;
         item.append(name, metrics);
@@ -5928,6 +5944,8 @@
     getProviderContext,
     normalizeCacheHitRate,
     formatCacheHitRate,
+    normalizeSla,
+    formatSla,
     normalizeRuntimeCache1h,
     getEffectivePricing,
     getEffectiveMultiplierReasonLabel,
