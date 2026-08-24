@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.28
+// @version      0.14.29
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.28';
+  const SCRIPT_VERSION = '0.14.29';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -3312,9 +3312,7 @@
       if (registerMenu && typeof GM_registerMenuCommand === 'function') GM_registerMenuCommand('显示 AIHub 智能分组', () => this.setMinimized(false));
       if (!this.minimized || this.config.autoSwitch) this.refresh();
       else this.syncPollingTimer();
-      this.uiTimer = window.setInterval(() => {
-        if (isPageVisible() && !this.minimized) this.renderTimeSensitiveState();
-      }, 1000);
+      this.syncUiTimer();
     }
 
     syncPollingTimer() {
@@ -3347,10 +3345,19 @@
     }
 
     handleVisibilityChange() {
-      if (!this.active || !isPageVisible()) return;
+      if (!this.active) return;
+      this.syncUiTimer();
+      if (!isPageVisible()) return;
       if (!this.minimized) this.renderTimeSensitiveState();
       if (this.shouldAutoRefresh()) this.refresh();
       else this.syncPollingTimer();
+    }
+
+    syncUiTimer() {
+      if (this.uiTimer) window.clearInterval(this.uiTimer);
+      this.uiTimer = null;
+      if (!this.active || this.minimized || !isPageVisible()) return;
+      this.uiTimer = window.setInterval(() => this.renderTimeSensitiveState(), 1000);
     }
 
     stop() {
@@ -3576,6 +3583,7 @@
       if (this.panel) this.panel.hidden = this.minimized;
       if (this.toggleButton) this.toggleButton.hidden = !this.minimized;
       storageSet('minimized', this.minimized);
+      this.syncUiTimer();
       if (wasMinimized === this.minimized) return;
       if (wasMinimized && !this.minimized) {
         this.renderTimeSensitiveState();
@@ -5760,12 +5768,10 @@
       this.onRouterReplace = () => this.stop();
       this.onVisibilityChange = () => {
         this.syncFallbackTimer();
-        if (isPageVisible()) {
-          this.sync();
-          this.panel?.handleVisibilityChange();
-          this.usage?.handleVisibilityChange();
-          this.keyGroups?.handleVisibilityChange();
-        }
+        if (isPageVisible()) this.sync();
+        this.panel?.handleVisibilityChange();
+        this.usage?.handleVisibilityChange();
+        this.keyGroups?.handleVisibilityChange();
         this.providerSort?.handleVisibilityChange();
       };
     }

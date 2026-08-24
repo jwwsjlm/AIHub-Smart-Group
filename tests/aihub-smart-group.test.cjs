@@ -4023,6 +4023,17 @@ test('pauses minimized controller polling unless automatic switching is enabled'
   assert.equal(core.shouldRunControllerRefresh({ ...dueState, autoSwitch: true }), true);
 });
 
+test('pauses the controller UI timer while minimized or the page is hidden', () => {
+  const controllerSource = userscriptSource.slice(
+    userscriptSource.indexOf('class Controller'),
+    userscriptSource.indexOf('class KeyGroupDropdownEnhancer'),
+  );
+  assert.match(controllerSource, /syncUiTimer\(\) \{[\s\S]*if \(!this\.active \|\| this\.minimized \|\| !isPageVisible\(\)\) return;/);
+  assert.match(controllerSource, /this\.syncUiTimer\(\);[\s\S]*if \(!isPageVisible\(\)\) return;/);
+  assert.match(controllerSource, /this\.syncUiTimer\(\);[\s\S]*if \(wasMinimized === this\.minimized\) return;/);
+  assert.doesNotMatch(controllerSource, /this\.uiTimer = window\.setInterval\(\(\) => \{\s*if \(isPageVisible\(\) && !this\.minimized\)/);
+});
+
 test('does not duplicate a foreground controller refresh before the completion interval elapses', () => {
   const recentlyCompleted = {
     active: true,
