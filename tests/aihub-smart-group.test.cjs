@@ -50,10 +50,63 @@ test('filters native group picker mutations before scheduling another render', (
 });
 
 test('reduces idle router polling while syncing browser history navigation immediately', () => {
-  assert.match(userscriptSource, /const ROUTER_SYNC_INTERVAL_MS = 2_000;/);
-  assert.match(userscriptSource, /\}, ROUTER_SYNC_INTERVAL_MS\);/);
+  assert.match(userscriptSource, /const ROUTER_SYNC_INTERVAL_MS = 10_000;/);
+  assert.match(userscriptSource, /window\.setInterval\(\(\) => this\.sync\(\), ROUTER_SYNC_INTERVAL_MS\);/);
+  assert.match(userscriptSource, /installHistoryChangeListener\(this\.onRouteChange\)/);
   assert.match(userscriptSource, /window\.addEventListener\('popstate', this\.onRouteChange\);/);
   assert.match(userscriptSource, /window\.addEventListener\('hashchange', this\.onRouteChange\);/);
+});
+
+test('patches browser history once and restores it after the final route listener leaves', () => {
+  const hadWindow = Object.hasOwn(globalThis, 'window');
+  const originalWindow = globalThis.window;
+  let href = 'https://aihub.top/providers';
+  const history = {
+    pushState(state, title, url) {
+      if (url != null) href = new globalThis.URL(String(url), href).href;
+      return state;
+    },
+    replaceState(state, title, url) {
+      if (url != null) href = new globalThis.URL(String(url), href).href;
+      return state;
+    },
+  };
+  const originalPushState = history.pushState;
+  const originalReplaceState = history.replaceState;
+  globalThis.window = {
+    history,
+    get location() {
+      return { href };
+    },
+  };
+
+  try {
+    const firstCalls = [];
+    const secondCalls = [];
+    const releaseFirst = core.installHistoryChangeListener(() => firstCalls.push(href));
+    const wrappedPushState = history.pushState;
+    const releaseSecond = core.installHistoryChangeListener(() => secondCalls.push(href));
+
+    assert.notEqual(wrappedPushState, originalPushState);
+    assert.equal(history.pushState, wrappedPushState);
+    history.pushState({ page: 'usage' }, '', '/usage');
+    assert.deepEqual(firstCalls, ['https://aihub.top/usage']);
+    assert.deepEqual(secondCalls, ['https://aihub.top/usage']);
+
+    releaseFirst();
+    history.replaceState({ page: 'providers' }, '', '/providers?sort=rate');
+    assert.equal(firstCalls.length, 1);
+    assert.deepEqual(secondCalls, ['https://aihub.top/usage', 'https://aihub.top/providers?sort=rate']);
+    history.replaceState(null, '', '/providers?sort=rate');
+    assert.equal(secondCalls.length, 2);
+
+    releaseSecond();
+    assert.equal(history.pushState, originalPushState);
+    assert.equal(history.replaceState, originalReplaceState);
+  } finally {
+    if (hadWindow) globalThis.window = originalWindow;
+    else delete globalThis.window;
+  }
 });
 
 test('replaces duplicate router instances and releases their global resources', () => {
@@ -64,6 +117,9 @@ test('replaces duplicate router instances and releases their global resources', 
   assert.match(routerSource, /this\.menuCommandId = GM_registerMenuCommand/);
   assert.match(routerSource, /GM_unregisterMenuCommand\(this\.menuCommandId\)/);
   assert.match(routerSource, /window\.clearInterval\(this\.timer\)/);
+  assert.match(routerSource, /syncFallbackTimer\(\) \{[\s\S]*if \(!this\.active \|\| !isPageVisible\(\)\) return;/);
+  assert.match(routerSource, /this\.onVisibilityChange = \(\) => \{\s*this\.syncFallbackTimer\(\);/);
+  assert.match(routerSource, /this\.releaseHistoryChangeListener\?\.\(\)/);
   assert.match(routerSource, /document\.removeEventListener\(ROUTER_REPLACE_EVENT, this\.onRouterReplace\)/);
   assert.match(routerSource, /this\.panel\?\.stop\(\);[\s\S]*this\.providerSort\?\.stop\(\);/);
   assert.match(routerSource, /sync\(\) \{\s*if \(!this\.active\) return;/);

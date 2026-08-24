@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.16
+// @version      0.14.17
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,10 +29,11 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.16';
+  const SCRIPT_VERSION = '0.14.17';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
+  const ROUTER_HISTORY_PATCH_KEY = '__aihubSmartGroupHistoryPatch__';
   const API_REQUEST_TIMEOUT_MS = 15_000;
   const MONITOR_SUMMARY_CACHE_TTL_MS = 2_000;
   const PASSIVE_MONITOR_SUMMARY_CACHE_TTL_MS = 60_000;
@@ -42,7 +43,7 @@
   const MONITOR_HISTORY_SAMPLE_COUNT_CAP = 60;
   const USER_TTFT_SAMPLE_COUNT_MAX = 1_000_000;
   const ENHANCER_RENDER_DEBOUNCE_MS = 50;
-  const ROUTER_SYNC_INTERVAL_MS = 2_000;
+  const ROUTER_SYNC_INTERVAL_MS = 10_000;
   const USAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
   const USAGE_AUDIT_RETRY_MS = 15_000;
   const USAGE_AUDIT_CACHE_LIMIT = 8;
@@ -2229,6 +2230,95 @@
 
   function getPageWindow() {
     return typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+  }
+
+  function installHistoryChangeListener(listener) {
+    if (typeof listener !== 'function') return () => {};
+    const pageWindow = getPageWindow();
+    const historyObject = pageWindow?.history;
+    if (!historyObject || typeof historyObject.pushState !== 'function' || typeof historyObject.replaceState !== 'function') {
+      return () => {};
+    }
+    let patch;
+    try {
+      patch = pageWindow[ROUTER_HISTORY_PATCH_KEY];
+    } catch {
+      return () => {};
+    }
+    const reusable = patch?.history === historyObject
+      && typeof patch.listeners?.add === 'function'
+      && typeof patch.listeners?.delete === 'function';
+    if (!reusable) {
+      const listeners = new Set();
+      const originalPushState = historyObject.pushState;
+      const originalReplaceState = historyObject.replaceState;
+      const notify = () => {
+        for (const callback of [...listeners]) {
+          try {
+            callback();
+          } catch {
+            // Route synchronization must never break the host page navigation.
+          }
+        }
+      };
+      const wrap = (original) => function (...args) {
+        const previousUrl = String(pageWindow.location?.href ?? '');
+        const result = Reflect.apply(original, this, args);
+        if (String(pageWindow.location?.href ?? '') !== previousUrl) notify();
+        return result;
+      };
+      const pushState = wrap(originalPushState);
+      const replaceState = wrap(originalReplaceState);
+      patch = {
+        history: historyObject,
+        listeners,
+        originalPushState,
+        originalReplaceState,
+        pushState,
+        replaceState,
+      };
+      try {
+        historyObject.pushState = pushState;
+        historyObject.replaceState = replaceState;
+        if (historyObject.pushState !== pushState || historyObject.replaceState !== replaceState) throw new Error('history patch rejected');
+        Object.defineProperty(pageWindow, ROUTER_HISTORY_PATCH_KEY, {
+          configurable: true,
+          value: patch,
+        });
+      } catch {
+        try {
+          if (historyObject.pushState === pushState) historyObject.pushState = originalPushState;
+          if (historyObject.replaceState === replaceState) historyObject.replaceState = originalReplaceState;
+        } catch {
+          // The low-frequency router fallback remains available when patching is blocked.
+        }
+        return () => {};
+      }
+    }
+    patch.listeners.add(listener);
+    let subscribed = true;
+    return () => {
+      if (!subscribed) return;
+      subscribed = false;
+      patch.listeners.delete(listener);
+      if (patch.listeners.size > 0) return;
+      let currentPatch;
+      try {
+        currentPatch = pageWindow[ROUTER_HISTORY_PATCH_KEY];
+      } catch {
+        return;
+      }
+      if (currentPatch !== patch
+        || historyObject.pushState !== patch.pushState
+        || historyObject.replaceState !== patch.replaceState) return;
+      try {
+        historyObject.pushState = patch.originalPushState;
+        historyObject.replaceState = patch.originalReplaceState;
+        delete pageWindow[ROUTER_HISTORY_PATCH_KEY];
+      } catch {
+        // A later page patch may own the methods; leave its chain untouched.
+      }
+    };
   }
 
   function isPageVisible() {
@@ -4906,11 +4996,13 @@
       this.providerSort = null;
       this.rejectedToken = '';
       this.timer = null;
+      this.releaseHistoryChangeListener = null;
       this.menuCommandId = null;
       this.active = false;
       this.onRouteChange = () => this.sync();
       this.onRouterReplace = () => this.stop();
       this.onVisibilityChange = () => {
+        this.syncFallbackTimer();
         if (isPageVisible()) {
           this.sync();
           this.panel?.handleVisibilityChange();
@@ -4930,10 +5022,9 @@
         });
       }
       document.addEventListener(ROUTER_REPLACE_EVENT, this.onRouterReplace);
+      this.releaseHistoryChangeListener = installHistoryChangeListener(this.onRouteChange);
       this.sync();
-      this.timer = window.setInterval(() => {
-        if (isPageVisible()) this.sync();
-      }, ROUTER_SYNC_INTERVAL_MS);
+      this.syncFallbackTimer();
       window.addEventListener('popstate', this.onRouteChange);
       window.addEventListener('hashchange', this.onRouteChange);
       document.addEventListener('visibilitychange', this.onVisibilityChange);
@@ -4946,6 +5037,8 @@
       this.timer = null;
       window.removeEventListener('popstate', this.onRouteChange);
       window.removeEventListener('hashchange', this.onRouteChange);
+      this.releaseHistoryChangeListener?.();
+      this.releaseHistoryChangeListener = null;
       document.removeEventListener('visibilitychange', this.onVisibilityChange);
       document.removeEventListener(ROUTER_REPLACE_EVENT, this.onRouterReplace);
       this.panel?.stop();
@@ -4965,6 +5058,13 @@
       }
       this.menuCommandId = null;
       if (activeRouter === this) activeRouter = null;
+    }
+
+    syncFallbackTimer() {
+      if (this.timer) window.clearInterval(this.timer);
+      this.timer = null;
+      if (!this.active || !isPageVisible()) return;
+      this.timer = window.setInterval(() => this.sync(), ROUTER_SYNC_INTERVAL_MS);
     }
 
     sync() {
@@ -5156,6 +5256,7 @@
     getProviderRefreshDelay,
     getProviderRefreshTimerDelay,
     shouldRunControllerRefresh,
+    installHistoryChangeListener,
     isPageVisible,
     fetchMonitorSummary,
     clearMonitorSummaryCache,
