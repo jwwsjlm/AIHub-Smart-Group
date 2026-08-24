@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.11.6
+// @version      0.11.7
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.11.6';
+  const SCRIPT_VERSION = '0.11.7';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const API_REQUEST_TIMEOUT_MS = 15_000;
@@ -77,12 +77,18 @@
     default: '默认排序',
     realPrice: '真实价格优先',
     user: '用户速度排序',
+    cacheHit: '缓存命中优先',
+    successRate: '成功率优先',
+    custom: '自定义排序',
   });
   const PROVIDER_SORT_BUTTON_TEXTS = Object.freeze({
     rate: '倍率',
     default: '默认',
     realPrice: '真实价格',
     user: '用户速度',
+    cacheHit: '缓存命中',
+    successRate: '成功率',
+    custom: '自定义',
   });
   const DEFAULT_CONFIG = Object.freeze({
     minSuccess10m: 0.10,
@@ -1710,7 +1716,7 @@
               <section class="asg-settings-section">
                 <div class="asg-settings-head"><div class="asg-settings-title">供应商大厅</div><label class="asg-settings-inline-label" for="asg-provider-sort-setting">打开页面后自动选择排序</label></div>
                 <div class="asg-settings-grid">
-                  <label class="asg-setting-wide">自动排序<select id="asg-provider-sort-setting" data-setting="providerSortPreference"><option value="rate">倍率优先（从低到高）</option><option value="realPrice">真实价格优先</option><option value="default">默认排序</option><option value="user">用户速度排序</option></select></label>
+                  <label class="asg-setting-wide">自动排序<select id="asg-provider-sort-setting" data-setting="providerSortPreference"><option value="rate">倍率优先（从低到高）</option><option value="realPrice">真实价格优先</option><option value="user">用户速度排序</option><option value="cacheHit">缓存命中优先</option><option value="successRate">成功率优先</option><option value="custom">自定义排序</option><option value="default">默认排序</option></select></label>
                   <label class="asg-setting-compact asg-auto"><input type="checkbox" data-setting="providerAutoRefresh"> 定时自动刷新</label>
                   <label>刷新间隔（秒）<input type="number" min="15" max="3600" step="1" data-setting="providerRefreshIntervalSeconds"></label>
                   <span class="asg-setting-preview asg-setting-wide">排序保存后立即应用；自动刷新会点击页面原生“刷新”按钮，不会整页重载。</span>

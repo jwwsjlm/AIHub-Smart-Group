@@ -134,6 +134,9 @@ test('defaults provider hall auto sorting to multiplier priority', () => {
   assert.equal(core.normalizeProviderSortPreference('default'), 'default');
   assert.equal(core.normalizeProviderSortPreference('realPrice'), 'realPrice');
   assert.equal(core.normalizeProviderSortPreference('user'), 'user');
+  assert.equal(core.normalizeProviderSortPreference('cacheHit'), 'cacheHit');
+  assert.equal(core.normalizeProviderSortPreference('successRate'), 'successRate');
+  assert.equal(core.normalizeProviderSortPreference('custom'), 'custom');
   assert.equal(core.normalizeProviderSortPreference('unexpected'), 'rate');
   assert.equal(core.normalizeConfig({ providerAutoRefresh: false }).providerAutoRefresh, false);
   assert.equal(core.normalizeConfig({ providerRefreshIntervalSeconds: 2 }).providerRefreshIntervalSeconds, 15);
@@ -146,11 +149,17 @@ test('finds the requested provider hall sort button without matching table heade
     { textContent: '倍率' },
     { textContent: '真实价格' },
     { textContent: '用户速度 ↑' },
+    { textContent: '缓存命中' },
+    { textContent: '成功率 ↓' },
+    { textContent: '自定义' },
   ];
   assert.equal(core.findProviderSortButton(buttons, 'rate'), buttons[1]);
   assert.equal(core.findProviderSortButton(buttons, 'default'), buttons[0]);
   assert.equal(core.findProviderSortButton(buttons, 'realPrice'), buttons[2]);
   assert.equal(core.findProviderSortButton(buttons, 'user'), buttons[3]);
+  assert.equal(core.findProviderSortButton(buttons, 'cacheHit'), buttons[4]);
+  assert.equal(core.findProviderSortButton(buttons, 'successRate'), buttons[5]);
+  assert.equal(core.findProviderSortButton(buttons, 'custom'), buttons[6]);
 });
 
 test('finds only the native provider hall refresh button', () => {
