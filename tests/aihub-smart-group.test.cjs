@@ -213,6 +213,15 @@ test('forces a fresh balance only for manual controller checks', () => {
   assert.match(controllerSource, /余额最多每 60 秒自动更新；手动检测强制刷新/);
 });
 
+test('retains normalized monitor inputs so real-user window previews can be recomputed', () => {
+  const controllerSource = userscriptSource.slice(userscriptSource.indexOf('class Controller'), userscriptSource.indexOf('class KeyGroupDropdownEnhancer'));
+
+  assert.match(controllerSource, /this\.summaryRows = \[\];/);
+  assert.match(controllerSource, /this\.monitorSeries = null;/);
+  assert.match(controllerSource, /this\.summaryRows = Array\.isArray\(summary\?\.apis\) \? summary\.apis : \[\];/);
+  assert.match(controllerSource, /this\.rows = attachUserTtftWindow\(\s*attachRecentAvailability\(this\.summaryRows, this\.monitorSeries\),\s*this\.monitorSeries,\s*this\.config\.userTtftWindow/);
+});
+
 test('maps dropdown monitor tones to native group badge classes', () => {
   assert.equal(core.getGroupDropdownToneClass('available'), 'asg-key-group-badge-available');
   assert.equal(core.getGroupDropdownToneClass('warning'), 'asg-key-group-badge-warning');
@@ -258,10 +267,17 @@ test('normalizes selectable availability criteria', () => {
 
 test('normalizes the selectable TTFT source and preserves the legacy default', () => {
   assert.equal(core.DEFAULT_CONFIG.latencySource, 'probe');
+  assert.equal(core.DEFAULT_CONFIG.userTtftWindow, 'summary');
   assert.equal(core.DEFAULT_CONFIG.minUserTtftSamples, 1);
   assert.equal(core.LATENCY_SOURCE_LABELS.user, '真实用户平均 TTFT');
+  assert.equal(core.USER_TTFT_WINDOW_LABELS['10m'], '近 10 分钟');
   assert.equal(core.normalizeConfig({}).latencySource, 'probe');
+  assert.equal(core.normalizeConfig({}).userTtftWindow, 'summary');
   assert.equal(core.normalizeConfig({ latencySource: 'user' }).latencySource, 'user');
+  assert.equal(core.normalizeConfig({ userTtftWindow: '10m' }).userTtftWindow, '10m');
+  assert.equal(core.normalizeConfig({ userTtftWindow: '1h' }).userTtftWindow, '1h');
+  assert.equal(core.normalizeConfig({ userTtftWindow: '6h' }).userTtftWindow, '6h');
+  assert.equal(core.normalizeConfig({ userTtftWindow: 'unexpected' }).userTtftWindow, 'summary');
   assert.equal(core.normalizeConfig({ minUserTtftSamples: '12' }).minUserTtftSamples, 12);
   assert.equal(core.normalizeConfig({ minUserTtftSamples: 0 }).minUserTtftSamples, 1);
   assert.equal(core.normalizeConfig({ minUserTtftSamples: 9_999_999 }).minUserTtftSamples, 1_000_000);
@@ -342,6 +358,11 @@ test('exposes the provider time range preference in settings', () => {
   assert.match(userscriptSource, /<option value="default">跟随网站默认<\/option><option value="6h">6 小时<\/option><option value="24h">24 小时<\/option><option value="7d">7 天<\/option><option value="30d">30 天<\/option>/);
 });
 
+test('exposes selectable real-user TTFT windows in settings', () => {
+  assert.match(userscriptSource, /data-setting="userTtftWindow"/);
+  assert.match(userscriptSource, /<option value="summary">AIHub 页面汇总（默认）<\/option><option value="10m">近 10 分钟<\/option><option value="1h">近 1 小时<\/option><option value="6h">近 6 小时<\/option>/);
+});
+
 test('updates only settings previews affected by the edited field', () => {
   assert.deepEqual(core.getSettingsPreviewTargets(), {
     recommendation: true,
@@ -373,6 +394,12 @@ test('updates only settings previews affected by the edited field', () => {
     excluded: false,
     cooldown: false,
   });
+  assert.deepEqual(core.getSettingsPreviewTargets('userTtftWindow'), {
+    recommendation: false,
+    balance: true,
+    excluded: false,
+    cooldown: false,
+  });
   assert.deepEqual(core.getSettingsPreviewTargets('excludedGroupKeywords'), {
     recommendation: true,
     balance: true,
@@ -392,6 +419,7 @@ test('updates only settings previews affected by the edited field', () => {
   );
   assert.match(controllerSource, /renderSettingsPreviews\(event\.target\.dataset\.setting\)/);
   assert.match(controllerSource, /targets\.recommendation \|\| targets\.balance \? this\.readDraftConfig\(\) : null/);
+  assert.match(controllerSource, /attachUserTtftWindow\([\s\S]*normalizedDraft\.userTtftWindow/);
 });
 
 test('marks the price preview pending for unsaved candidate filters only', () => {
@@ -1785,6 +1813,7 @@ test('selects real-user TTFT when sampled and falls back to probe TTFT without s
 test('falls back from low-sample real-user TTFT with an explicit confidence reason', () => {
   const lowSample = { firstTokenLatencyMs: 900, userAvgTtftMs: 250, userSampleCount: 3, userHasData: true };
   const lowSampleWithoutProbe = { userAvgTtftMs: 250, userSampleCount: 3, userHasData: true };
+  const windowedLowSample = { ...lowSample, userTtftWindow: '1h' };
 
   assert.deepEqual(core.getLatencyMetric(lowSample, 'user', 3), { value: 250, source: 'user', fallback: false });
   assert.deepEqual(core.getLatencyMetric(lowSample, 'user', 5), {
@@ -1797,6 +1826,9 @@ test('falls back from low-sample real-user TTFT with an explicit confidence reas
   });
   assert.equal(core.formatLatencyMetric(lowSample, 'user', 5), '真实用户平均 TTFT 900 ms（样本不足 3/5，回退探测）');
   assert.equal(core.formatLatencyMetric(lowSampleWithoutProbe, 'user', 5), '真实用户平均 TTFT 暂无数据（样本不足 3/5，回退探测）');
+  assert.equal(core.getLatencyMetric(windowedLowSample, 'user', 3).userTtftWindow, '1h');
+  assert.equal(core.getLatencyMetricLabel('user', core.getLatencyMetric(windowedLowSample, 'user', 3)), '真实用户平均 TTFT（近 1 小时）');
+  assert.equal(core.formatLatencyMetric(windowedLowSample, 'user', 5), '真实用户平均 TTFT 900 ms（近 1 小时样本不足 3/5，回退探测）');
 });
 
 test('normalizes the monitor freshness limit', () => {
@@ -1938,6 +1970,84 @@ test('computes availability from valid monitor samples in the latest 10 minutes'
   assert.equal(Object.hasOwn(enriched[0], 'history'), false);
   assert.equal(Number.isNaN(enriched[1].successRates['10m']), true);
   assert.equal(enriched[1].recentSampleCount, 0);
+});
+
+test('aggregates real-user TTFT windows with sample-count weighting', () => {
+  const now = Date.parse('2026-08-24T06:00:00Z');
+  const rows = [{ id: 1, userAvgTtftMs: 999, userSampleCount: 99, userHasData: true }];
+  const series = {
+    generatedAt: new Date(now).toISOString(),
+    seriesByApiId: {},
+    userTtftByGroupId: {
+      1: [
+        [now - 5 * 60_000, 100, 2, true],
+        [now - 30 * 60_000, 400, 6, true],
+        [now - 2 * 60 * 60_000, 800, 10, true],
+        [now - 7 * 60 * 60_000, 20, 100, true],
+        [now - 3 * 60_000, 50, 5, false],
+        [now - 4 * 60_000, 0, 5, true],
+        [now - 4 * 60_000, 200, 0, true],
+      ],
+    },
+  };
+
+  assert.strictEqual(core.attachUserTtftWindow(rows, series, 'summary'), rows);
+
+  const [tenMinutes] = core.attachUserTtftWindow(rows, series, '10m');
+  assert.equal(tenMinutes.userAvgTtftMs, 100);
+  assert.equal(tenMinutes.userSampleCount, 2);
+  assert.equal(tenMinutes.userHasData, true);
+  assert.equal(tenMinutes.userTtftWindow, '10m');
+  assert.equal(tenMinutes.userTtftWindowLatestAt, now - 5 * 60_000);
+
+  const [oneHour] = core.attachUserTtftWindow(rows, series, '1h');
+  assert.equal(oneHour.userAvgTtftMs, 325);
+  assert.equal(oneHour.userSampleCount, 8);
+  assert.equal(oneHour.userTtftWindow, '1h');
+
+  const [sixHours] = core.attachUserTtftWindow(rows, series, '6h');
+  assert.equal(sixHours.userAvgTtftMs, (100 * 2 + 400 * 6 + 800 * 10) / 18);
+  assert.equal(sixHours.userSampleCount, 18);
+  assert.equal(sixHours.userTtftWindow, '6h');
+});
+
+test('marks an empty selected real-user TTFT window for probe fallback', () => {
+  const now = Date.parse('2026-08-24T06:00:00Z');
+  const [row] = core.attachUserTtftWindow(
+    [{ id: 2, group_id: 2, firstTokenLatencyMs: 900, userAvgTtftMs: 200, userSampleCount: 4, userHasData: true }],
+    {
+      generatedAt: new Date(now).toISOString(),
+      seriesByApiId: {},
+      userTtftByGroupId: {
+        2: [
+          [now - 20 * 60_000, 100, 3, true],
+          [now - 5 * 60_000, 0, 4, true],
+          [now - 4 * 60_000, 100, 0, true],
+          [now - 3 * 60_000, 100, 5, false],
+        ],
+      },
+    },
+    '10m',
+  );
+
+  assert.equal(row.userAvgTtftMs, 0);
+  assert.equal(row.userSampleCount, 0);
+  assert.equal(row.userHasData, false);
+  assert.equal(row.userTtftWindow, '10m');
+  assert.equal(Object.hasOwn(row, 'userTtftWindowLatestAt'), false);
+  assert.deepEqual(core.getLatencyMetric(row, 'user'), {
+    value: 900,
+    source: 'probe',
+    fallback: true,
+    userTtftWindow: '10m',
+    userWindowUnavailable: true,
+  });
+  assert.equal(core.getUserTtftFallbackText(core.getLatencyMetric(row, 'user')), '近 10 分钟无有效样本，回退探测');
+  assert.equal(core.formatLatencyMetric(row, 'user'), '真实用户平均 TTFT 900 ms（近 10 分钟无有效样本，回退探测）');
+  const metric = core.buildGroupMetricMap([row], { ...core.DEFAULT_CONFIG, latencySource: 'user', userTtftWindow: '10m' }).get(2);
+  assert.equal(metric.userTtftWindow, '10m');
+  assert.equal(metric.userWindowUnavailable, true);
+  assert.equal(core.formatKeyOptionLabel({ name: 'main', groupName: 'A002' }, metric, 'user'), 'main · A002 · 倍率暂无数据 · 真实用户平均 TTFT（近 10 分钟无有效样本，回退探测） 900 ms');
 });
 
 test('weights compact fallback samples without treating live 10-field samples as weighted', () => {
@@ -2285,6 +2395,18 @@ test('requires the configured real-user TTFT sample floor before ranking by user
     core.getRecommendationStrategySignature({ ...core.DEFAULT_CONFIG, latencySource: 'probe', minUserTtftSamples: 1 }),
     core.getRecommendationStrategySignature({ ...core.DEFAULT_CONFIG, latencySource: 'probe', minUserTtftSamples: 10 }),
   );
+});
+
+test('binds recommendation signatures to the selected real-user TTFT window only in user mode', () => {
+  const userSummary = { ...core.DEFAULT_CONFIG, latencySource: 'user', userTtftWindow: 'summary' };
+  const userTenMinutes = { ...userSummary, userTtftWindow: '10m' };
+  assert.notEqual(core.getCandidateAnalysisSignature(userSummary), core.getCandidateAnalysisSignature(userTenMinutes));
+  assert.notEqual(core.getRecommendationStrategySignature(userSummary), core.getRecommendationStrategySignature(userTenMinutes));
+
+  const probeSummary = { ...core.DEFAULT_CONFIG, latencySource: 'probe', userTtftWindow: 'summary' };
+  const probeTenMinutes = { ...probeSummary, userTtftWindow: '10m' };
+  assert.equal(core.getCandidateAnalysisSignature(probeSummary), core.getCandidateAnalysisSignature(probeTenMinutes));
+  assert.equal(core.getRecommendationStrategySignature(probeSummary), core.getRecommendationStrategySignature(probeTenMinutes));
 });
 
 test('counts only eligible-stage model warnings and real-user sample fallbacks in diagnostics', () => {

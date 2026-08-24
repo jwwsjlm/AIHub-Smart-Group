@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.18
+// @version      0.14.19
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.18';
+  const SCRIPT_VERSION = '0.14.19';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -108,6 +108,17 @@
   const LATENCY_SOURCE_LABELS = Object.freeze({
     probe: '主动探测首 Token',
     user: '真实用户平均 TTFT',
+  });
+  const USER_TTFT_WINDOW_LABELS = Object.freeze({
+    summary: 'AIHub 页面汇总',
+    '10m': '近 10 分钟',
+    '1h': '近 1 小时',
+    '6h': '近 6 小时',
+  });
+  const USER_TTFT_WINDOW_MS = Object.freeze({
+    '10m': 10 * 60 * 1000,
+    '1h': 60 * 60 * 1000,
+    '6h': 6 * 60 * 60 * 1000,
   });
   const MODEL_PRICE_MODEL_LABELS = Object.freeze({
     none: '不显示',
@@ -237,6 +248,7 @@
     minSuccessPoints10m: 1,
     minConsecutiveSuccesses10m: 2,
     latencySource: 'probe',
+    userTtftWindow: 'summary',
     minUserTtftSamples: 1,
     modelPriceModel: 'sol',
     usageCostAuditEnabled: true,
@@ -382,6 +394,7 @@
       minSuccessPoints10m: Math.round(clamp(numberOr(source.minSuccessPoints10m, DEFAULT_CONFIG.minSuccessPoints10m), 1, 60)),
       minConsecutiveSuccesses10m: Math.round(clamp(numberOr(source.minConsecutiveSuccesses10m, DEFAULT_CONFIG.minConsecutiveSuccesses10m), 1, 60)),
       latencySource: normalizeLatencySource(source.latencySource),
+      userTtftWindow: normalizeUserTtftWindow(source.userTtftWindow),
       minUserTtftSamples: normalizeUserTtftSampleCount(source.minUserTtftSamples),
       modelPriceModel: normalizeModelPriceModel(source.modelPriceModel),
       usageCostAuditEnabled: source.usageCostAuditEnabled !== false,
@@ -401,7 +414,7 @@
     const candidateFilterChanged = CANDIDATE_FILTER_SETTING_KEYS.includes(key);
     return {
       recommendation: renderAll || candidateFilterChanged || key === 'recommendationPriceBasis',
-      balance: renderAll || candidateFilterChanged || key === 'balanceMaxPrice' || key === 'latencySource' || key === 'minUserTtftSamples',
+      balance: renderAll || candidateFilterChanged || key === 'balanceMaxPrice' || key === 'latencySource' || key === 'userTtftWindow' || key === 'minUserTtftSamples',
       excluded: renderAll || key === 'excludedGroupKeywords',
       cooldown: renderAll || key === 'cooldownMinutes',
     };
@@ -434,6 +447,10 @@
 
   function normalizeLatencySource(value) {
     return value === 'user' ? 'user' : 'probe';
+  }
+
+  function normalizeUserTtftWindow(value) {
+    return Object.prototype.hasOwnProperty.call(USER_TTFT_WINDOW_LABELS, value) ? value : 'summary';
   }
 
   function normalizeUserTtftSampleCount(value) {
@@ -1058,8 +1075,13 @@
       || row?.user_has_data === true
       || userSampleCount !== null;
     const user = userHasData && userValue !== null && userValue > 0 ? userValue : null;
+    const selectedUserWindow = row?.userTtftWindow == null
+      ? null
+      : normalizeUserTtftWindow(row.userTtftWindow);
+    const userWindow = selectedUserWindow && selectedUserWindow !== 'summary' ? selectedUserWindow : null;
+    const windowMetric = userWindow ? { userTtftWindow: userWindow } : {};
     if (latencySource === 'user' && user !== null && userSampleCount !== null && userSampleCount >= minimumSamples) {
-      return { value: user, source: 'user', fallback: false };
+      return { value: user, source: 'user', fallback: false, ...windowMetric };
     }
     const fallback = latencySource === 'user' && probe !== null;
     if (latencySource === 'user' && user !== null) {
@@ -1067,9 +1089,19 @@
         value: probe,
         source: 'probe',
         fallback,
+        ...windowMetric,
         userSampleInsufficient: true,
         userSampleCount: userSampleCount ?? 0,
         minUserTtftSamples: minimumSamples,
+      };
+    }
+    if (latencySource === 'user' && userWindow) {
+      return {
+        value: probe,
+        source: 'probe',
+        fallback,
+        userTtftWindow: userWindow,
+        userWindowUnavailable: true,
       };
     }
     return { value: probe, source: 'probe', fallback };
@@ -1081,10 +1113,15 @@
   }
 
   function getUserTtftFallbackText(metric) {
+    const window = normalizeUserTtftWindow(metric?.userTtftWindow);
+    const windowLabel = window === 'summary' ? '' : USER_TTFT_WINDOW_LABELS[window];
+    if (metric?.userWindowUnavailable === true) {
+      return `${windowLabel}无有效样本，回退探测`;
+    }
     if (metric?.userSampleInsufficient === true) {
       const sampleCount = Math.max(0, Math.floor(Number(metric.userSampleCount) || 0));
       const minimumSamples = normalizeUserTtftSampleCount(metric.minUserTtftSamples);
-      return `样本不足 ${sampleCount}/${minimumSamples}，回退探测`;
+      return `${windowLabel}样本不足 ${sampleCount}/${minimumSamples}，回退探测`;
     }
     return metric?.fallback ? '回退探测' : '';
   }
@@ -1092,7 +1129,11 @@
   function getLatencyMetricLabel(source = 'probe', metric = null) {
     if (normalizeLatencySource(source) !== 'user') return '首 Token';
     const fallbackText = getUserTtftFallbackText(metric);
-    return fallbackText ? `真实用户平均 TTFT（${fallbackText}）` : '真实用户平均 TTFT';
+    if (fallbackText) return `真实用户平均 TTFT（${fallbackText}）`;
+    const window = normalizeUserTtftWindow(metric?.userTtftWindow);
+    return window === 'summary'
+      ? '真实用户平均 TTFT'
+      : `真实用户平均 TTFT（${USER_TTFT_WINDOW_LABELS[window]}）`;
   }
 
   function formatLatencyMetric(row, source = 'probe', minUserTtftSamples = DEFAULT_CONFIG.minUserTtftSamples) {
@@ -1104,7 +1145,7 @@
       const fallbackText = getUserTtftFallbackText(metric);
       return fallbackText
         ? `真实用户平均 TTFT ${valueText}（${fallbackText}）`
-        : `真实用户平均 TTFT ${valueText}${sampleText}`;
+        : `${getLatencyMetricLabel('user', metric)} ${valueText}${sampleText}`;
     }
     return `首 Token ${valueText}`;
   }
@@ -1501,6 +1542,7 @@
       requireNoWarnings: normalizedConfig.requireNoWarnings,
       excludedGroupKeywords: normalizedConfig.excludedGroupKeywords,
       latencySource: normalizedConfig.latencySource,
+      userTtftWindow: normalizedConfig.latencySource === 'user' ? normalizedConfig.userTtftWindow : null,
       minUserTtftSamples: normalizedConfig.latencySource === 'user' ? normalizedConfig.minUserTtftSamples : null,
     });
   }
@@ -1762,6 +1804,47 @@
     });
   }
 
+  function attachUserTtftWindow(rows, seriesPayload, window = DEFAULT_CONFIG.userTtftWindow) {
+    const normalizedWindow = normalizeUserTtftWindow(window);
+    const sourceRows = Array.isArray(rows) ? rows : [];
+    if (normalizedWindow === 'summary') return sourceRows;
+    const anchor = getMonitorSeriesWindowAnchor(seriesPayload);
+    const now = anchor === null ? Date.now() : anchor;
+    const cutoff = now - USER_TTFT_WINDOW_MS[normalizedWindow];
+    const userTtftByGroupId = seriesPayload?.userTtftByGroupId || {};
+    return sourceRows.map((row) => {
+      const groupId = String(row?.id ?? row?.group_id ?? '');
+      const samples = Array.isArray(userTtftByGroupId[groupId]) ? userTtftByGroupId[groupId] : [];
+      let weightedLatency = 0;
+      let totalSamples = 0;
+      let latestAt = null;
+      for (const sample of samples) {
+        const at = Number(sample?.[0]);
+        const average = Number(sample?.[1]);
+        const sampleCount = Number(sample?.[2]);
+        const hasData = sample?.[3];
+        if (!Number.isFinite(at) || at < cutoff || at > now) continue;
+        if (hasData === false || !Number.isFinite(average) || average <= 0) continue;
+        if (!Number.isFinite(sampleCount) || sampleCount <= 0) continue;
+        const weight = Math.floor(sampleCount);
+        if (weight <= 0) continue;
+        weightedLatency += average * weight;
+        totalSamples += weight;
+        if (latestAt === null || at > latestAt) latestAt = at;
+      }
+      const normalizedRow = {
+        ...row,
+        userAvgTtftMs: totalSamples > 0 ? weightedLatency / totalSamples : 0,
+        userSampleCount: totalSamples,
+        userHasData: totalSamples > 0,
+        userTtftWindow: normalizedWindow,
+      };
+      delete normalizedRow.userTtftWindowLatestAt;
+      if (latestAt !== null) normalizedRow.userTtftWindowLatestAt = latestAt;
+      return normalizedRow;
+    });
+  }
+
   function normalizeGroupName(value) {
     return String(value ?? '').trim().toLocaleLowerCase();
   }
@@ -1801,6 +1884,8 @@
           metric.latencyMetricSource = latencyMetric.source;
           metric.latencyFallback = latencyMetric.fallback;
         }
+        if (latencyMetric.userTtftWindow) metric.userTtftWindow = latencyMetric.userTtftWindow;
+        if (latencyMetric.userWindowUnavailable) metric.userWindowUnavailable = true;
         if (latencyMetric.userSampleInsufficient) {
           metric.userSampleInsufficient = true;
           metric.userSampleCount = latencyMetric.userSampleCount;
@@ -2127,6 +2212,7 @@
       recommendationPriceBasis: normalized.mode === 'price' ? normalized.recommendationPriceBasis : 'nominal',
       balanceMaxPrice: normalized.mode === 'balance' ? normalized.balanceMaxPrice : null,
       latencySource: normalized.latencySource,
+      userTtftWindow: normalized.latencySource === 'user' ? normalized.userTtftWindow : null,
       minUserTtftSamples: normalized.latencySource === 'user' ? normalized.minUserTtftSamples : null,
       availabilityMode: normalized.availabilityMode,
       minSuccess10m: normalized.minSuccess10m,
@@ -2893,6 +2979,8 @@
       this.selectedKeyId = storageGet('selectedKeyId', null);
       this.lastSwitch = storageGet('lastSwitch', { at: null, keyId: null, groupId: null });
       this.stability = createStabilityState();
+      this.summaryRows = [];
+      this.monitorSeries = null;
       this.rows = [];
       this.ranked = [];
       this.keys = [];
@@ -2984,6 +3072,9 @@
       if (this.uiTimer) window.clearInterval(this.uiTimer);
       this.timer = null;
       this.uiTimer = null;
+      this.summaryRows = [];
+      this.monitorSeries = null;
+      this.rows = [];
       this.panel?.remove();
       this.toggleButton?.remove();
       this.panel = null;
@@ -3045,6 +3136,7 @@
                 <div class="asg-settings-head"><div class="asg-settings-title">TTFT 采集</div><label class="asg-settings-inline-label" for="asg-latency-source-setting">推荐、密钥详情和分组下拉使用的延迟指标</label></div>
                 <div class="asg-settings-grid">
                   <label class="asg-setting-wide">采集指标<select id="asg-latency-source-setting" data-setting="latencySource"><option value="probe">主动探测首 Token</option><option value="user">真实用户平均 TTFT（无样本时回退探测）</option></select></label>
+                  <label class="asg-setting-wide" data-latency-setting="user">真实用户速度窗口<select data-setting="userTtftWindow"><option value="summary">AIHub 页面汇总（默认）</option><option value="10m">近 10 分钟</option><option value="1h">近 1 小时</option><option value="6h">近 6 小时</option></select></label>
                   <label class="asg-setting-wide" data-latency-setting="user" title="真实用户平均 TTFT 样本不足时改用主动探测，避免少量真实请求影响推荐">真实用户平均 TTFT 最低有效样本数<input type="number" min="1" max="1000000" step="1" data-setting="minUserTtftSamples"></label>
                 </div>
               </section>
@@ -3287,7 +3379,15 @@
         preview.classList.add('asg-preview-pending');
         return;
       }
-      const candidateCount = getEligibleCandidates(this.rows, { ...normalizedDraft, mode: 'balance' })
+      const previewRows = normalizedDraft.latencySource === 'user'
+        && normalizedDraft.userTtftWindow !== this.config.userTtftWindow
+        ? attachUserTtftWindow(
+          attachRecentAvailability(this.summaryRows, this.monitorSeries),
+          this.monitorSeries,
+          normalizedDraft.userTtftWindow,
+        )
+        : this.rows;
+      const candidateCount = getEligibleCandidates(previewRows, { ...normalizedDraft, mode: 'balance' })
         .filter((candidate) => candidate.price <= normalizedDraft.balanceMaxPrice).length;
       const hasUnsavedFilter = normalizedDraft.balanceMaxPrice !== this.config.balanceMaxPrice
         || normalizedDraft.minSuccess10m !== this.config.minSuccess10m
@@ -3298,6 +3398,8 @@
         || normalizedDraft.excludedGroupKeywords !== this.config.excludedGroupKeywords
         || normalizedDraft.latencySource !== this.config.latencySource
         || (normalizedDraft.latencySource === 'user'
+          && normalizedDraft.userTtftWindow !== this.config.userTtftWindow)
+        || (normalizedDraft.latencySource === 'user'
           && normalizedDraft.minUserTtftSamples !== this.config.minUserTtftSamples);
       const suffix = hasUnsavedFilter ? ' · 未保存' : '';
       const limit = formatMultiplier(normalizedDraft.balanceMaxPrice);
@@ -3306,7 +3408,10 @@
       } else if (candidateCount === 0) {
         preview.textContent = `最高倍率 ${limit} · 当前没有符合条件的分组${suffix}`;
       } else {
-        preview.textContent = `只考虑倍率 ≤ ${limit} · ${candidateCount} 个分组可选 · 将选${LATENCY_SOURCE_LABELS[normalizedDraft.latencySource]} 最快${suffix}`;
+        const latencyLabel = normalizedDraft.latencySource === 'user' && normalizedDraft.userTtftWindow !== 'summary'
+          ? `${LATENCY_SOURCE_LABELS.user}（${USER_TTFT_WINDOW_LABELS[normalizedDraft.userTtftWindow]}）`
+          : LATENCY_SOURCE_LABELS[normalizedDraft.latencySource];
+        preview.textContent = `只考虑倍率 ≤ ${limit} · ${candidateCount} 个分组可选 · 将选${latencyLabel} 最快${suffix}`;
       }
       preview.classList.toggle('asg-preview-pending', hasUnsavedFilter);
     }
@@ -3461,7 +3566,13 @@
           this.log('info', '密钥读取已恢复');
         }
         this.lastAuthLogSignature = this.authError;
-        this.rows = attachRecentAvailability(summary?.apis, series);
+        this.summaryRows = Array.isArray(summary?.apis) ? summary.apis : [];
+        this.monitorSeries = series;
+        this.rows = attachUserTtftWindow(
+          attachRecentAvailability(this.summaryRows, this.monitorSeries),
+          this.monitorSeries,
+          this.config.userTtftWindow,
+        );
         this.monitorGeneratedAt = getMonitorSeriesWindowAnchor(series) ?? summary?.generatedAt ?? null;
         this.updateMonitorFreshness();
         this.recordMonitorFreshnessState();
@@ -3699,7 +3810,10 @@
         if (this.config.mode === 'balance') {
           const reason = document.createElement('div');
           reason.className = 'asg-balance-reason';
-          reason.textContent = `倍率上限 ${formatMultiplier(this.config.balanceMaxPrice)} · 范围内${LATENCY_SOURCE_LABELS[this.config.latencySource]} 最快`;
+          const latencyLabel = this.config.latencySource === 'user' && this.config.userTtftWindow !== 'summary'
+            ? `${LATENCY_SOURCE_LABELS.user}（${USER_TTFT_WINDOW_LABELS[this.config.userTtftWindow]}）`
+            : LATENCY_SOURCE_LABELS[this.config.latencySource];
+          reason.textContent = `倍率上限 ${formatMultiplier(this.config.balanceMaxPrice)} · 范围内${latencyLabel} 最快`;
           recommend.appendChild(reason);
         }
         if (providerContext.publicDetail || providerContext.heweiCheckUrl) {
@@ -5204,6 +5318,7 @@
     DEFAULT_CONFIG,
     GROUP_MODE_LABELS,
     LATENCY_SOURCE_LABELS,
+    USER_TTFT_WINDOW_LABELS,
     MODEL_PRICE_MODEL_LABELS,
     MODEL_DETECTION_REASON_LABELS,
     PROVIDER_RANGE_LABELS,
@@ -5215,6 +5330,7 @@
     normalizeGroupMode,
     normalizeAvailabilityMode,
     normalizeLatencySource,
+    normalizeUserTtftWindow,
     normalizeUserTtftSampleCount,
     normalizeModelPriceModel,
     normalizeRecommendationPriceBasis,
@@ -5297,6 +5413,7 @@
     getMonitorSeriesWindowAnchor,
     getCooldownInfo,
     attachRecentAvailability,
+    attachUserTtftWindow,
     normalizeGroupName,
     buildGroupMultiplierMap,
     buildGroupMetricMap,
