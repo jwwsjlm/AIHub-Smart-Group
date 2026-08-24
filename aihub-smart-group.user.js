@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.11.2
+// @version      0.11.3
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.11.2';
+  const SCRIPT_VERSION = '0.11.3';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const API_REQUEST_TIMEOUT_MS = 15_000;
@@ -2378,7 +2378,8 @@
       this.observer = new MutationObserver((records) => {
         if (this.mutationsNeedMenuScan(records)) this.queueRender();
       });
-      this.observer.observe(document.querySelector('main') || document.body, { childList: true, subtree: true });
+      // New AIHub group pickers are portaled directly under <body>, outside <main>.
+      this.observer.observe(document.body, { childList: true, subtree: true });
       this.queueRender();
       this.refreshTimer = window.setInterval(() => {
         if (isPageVisible() && this.findMenus().length && Date.now() - this.lastAttemptAt >= 60_000) this.refresh();
@@ -2418,6 +2419,11 @@
     findMenus() {
       return [...document.querySelectorAll('input[placeholder="搜索分组..."]')]
         .map((input) => {
+          const portal = input.closest?.('[role="listbox"]');
+          if (portal) {
+            const optionList = portal.querySelector('.select-options') || portal;
+            return optionList && portal.contains(optionList) ? { menu: portal, optionList } : null;
+          }
           const searchArea = input.parentElement?.parentElement;
           const menu = searchArea?.parentElement;
           const optionList = searchArea?.nextElementSibling;
@@ -2491,7 +2497,7 @@
       if (!menus.length) return;
       if (!this.hasMonitorData && !this.loading && Date.now() - this.lastAttemptAt >= 60_000) this.refresh();
       for (const { optionList } of menus) {
-        for (const button of optionList.querySelectorAll('button')) this.renderOption(button);
+        for (const option of optionList.querySelectorAll('button,[role="option"]')) this.renderOption(option);
       }
     }
 

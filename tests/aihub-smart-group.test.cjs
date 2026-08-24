@@ -32,6 +32,13 @@ test('wires the native key group dropdown enhancer through the app router', () =
   assert.match(userscriptSource, /input\[placeholder="搜索分组\.\.\."\]/);
 });
 
+test('supports the portaled role=listbox group picker used by the current keys page', () => {
+  assert.match(userscriptSource, /this\.observer\.observe\(document\.body, \{ childList: true, subtree: true \}\);/);
+  assert.match(userscriptSource, /const portal = input\.closest\?\.\('\[role="listbox"\]'\);/);
+  assert.match(userscriptSource, /portal\.querySelector\('\.select-options'\) \|\| portal/);
+  assert.match(userscriptSource, /optionList\.querySelectorAll\('button,\[role="option"\]'\)/);
+});
+
 test('reduces idle router polling while syncing browser history navigation immediately', () => {
   assert.match(userscriptSource, /const ROUTER_SYNC_INTERVAL_MS = 2_000;/);
   assert.match(userscriptSource, /\}, ROUTER_SYNC_INTERVAL_MS\);/);
