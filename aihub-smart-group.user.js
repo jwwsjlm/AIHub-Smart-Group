@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.3
+// @version      0.14.4
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.3';
+  const SCRIPT_VERSION = '0.14.4';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -462,6 +462,28 @@
       const text = String(entry?.textContent || '').replace(/\s+/g, ' ').trim();
       return `${identity}:${text}`;
     }).join('|');
+  }
+
+  function normalizeProviderPublicDetail(value) {
+    return typeof value === 'string' ? value.trim() || null : null;
+  }
+
+  function normalizeProviderReportUrl(value) {
+    const source = typeof value === 'string' ? value.trim() : '';
+    if (!source) return null;
+    try {
+      const parsed = new globalThis.URL(source);
+      return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function getProviderContext(row) {
+    return {
+      publicDetail: normalizeProviderPublicDetail(row?.publicDetail ?? row?.public_detail),
+      heweiCheckUrl: normalizeProviderReportUrl(row?.heweiCheckUrl ?? row?.hewei_check_url),
+    };
   }
 
   function normalizeCacheHitRate(value) {
@@ -949,6 +971,7 @@
     );
     const effectiveMultiplierReady = booleanOrNull(source.effectiveMultiplierReady ?? source.effective_multiplier_ready);
     const effectiveMultiplierReason = String(source.effectiveMultiplierReason ?? source.effective_multiplier_reason ?? '').trim() || null;
+    const providerContext = getProviderContext(source);
     return {
       ...source,
       id: source.id ?? (Number.isInteger(groupId) ? groupId : undefined),
@@ -969,6 +992,7 @@
       effectiveInputPricePerMillion1h,
       effectiveMultiplierReady,
       effectiveMultiplierReason,
+      ...providerContext,
       checkedAt: source.checkedAt ?? source.last_probed_at ?? source.lastProbedAt,
       probeFirstTokenLatencyMs: source.probeFirstTokenLatencyMs
         ?? source.probe_ttft_ms
@@ -1481,6 +1505,9 @@
       if (effectivePricing.hasData) metric.effectivePricing = effectivePricing;
       const outputTokensPerSecond = nonNegativeNumberOrNull(row?.outputTokensPerSecond ?? row?.outputTps ?? row?.output_tps);
       if (outputTokensPerSecond !== null) metric.outputTokensPerSecond = outputTokensPerSecond;
+      const providerContext = getProviderContext(row);
+      if (providerContext.publicDetail) metric.publicDetail = providerContext.publicDetail;
+      if (providerContext.heweiCheckUrl) metric.heweiCheckUrl = providerContext.heweiCheckUrl;
       result.set(groupId, metric);
     }
     return result;
@@ -2270,9 +2297,15 @@
     #${ROOT_ID} .asg-key-details[hidden]{display:none}
     #${ROOT_ID} .asg-key-details{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px 10px;margin-top:5px;padding:6px 0 2px;border-bottom:1px solid #eef0f3}
     #${ROOT_ID} .asg-key-detail{min-width:0}
+    #${ROOT_ID} .asg-key-detail-wide{grid-column:1/-1}
     #${ROOT_ID} .asg-key-detail span{display:block;color:#667085;font-size:10px}
     #${ROOT_ID} .asg-key-detail strong{display:block;margin-top:1px;font-size:12px;line-height:1.35;overflow-wrap:anywhere}
+    #${ROOT_ID} .asg-key-detail a,#${ROOT_ID} .asg-provider-notice a{color:#1456d9;text-decoration:none}
+    #${ROOT_ID} .asg-key-detail a:hover,#${ROOT_ID} .asg-provider-notice a:hover{text-decoration:underline}
     #${ROOT_ID} .asg-key-metric{color:#15803d}
+    #${ROOT_ID} .asg-provider-notice{margin-top:6px;padding:6px 8px;color:#7a2e0e;background:#fffaeb;border:1px solid #fedf89;border-radius:5px;font-size:11px;line-height:1.45;overflow-wrap:anywhere}
+    #${ROOT_ID} .asg-provider-notice a{display:inline-block;margin-left:8px;font-weight:600}
+    #${ROOT_ID} .asg-provider-notice a:first-child{margin-left:0}
     #${ROOT_ID} .asg-actions{display:flex;gap:7px;margin-top:10px}
     #${ROOT_ID} .asg-actions button:last-child{flex:1;background:#1456d9;color:#fff;border-color:#1456d9}
     #${ROOT_ID} .asg-actions button:last-child:hover:not(:disabled){background:#0f46b6}
@@ -2539,6 +2572,8 @@
               <div class="asg-key-detail"><span>真实价格 / 预测倍率</span><strong class="asg-key-metric" data-key-detail="effective-price"></strong></div>
               <div class="asg-key-detail"><span>输出速度</span><strong class="asg-key-metric" data-key-detail="output-tps"></strong></div>
               <div class="asg-key-detail"><span>缓存命中率</span><strong class="asg-key-metric" data-key-detail="cache"></strong></div>
+              <div class="asg-key-detail asg-key-detail-wide" data-key-detail-row="provider-detail" hidden><span>供应商公告</span><strong data-key-detail="provider-detail"></strong></div>
+              <div class="asg-key-detail asg-key-detail-wide" data-key-detail-row="hewei-report" hidden><span>检测报告</span><strong><a data-key-detail="hewei-report" target="_blank" rel="noopener noreferrer">查看禾维检测报告</a></strong></div>
             </div>
             <div class="asg-actions"><button data-action="refresh">检测</button><button data-action="switch" disabled>切换到推荐分组</button></div>
             <label class="asg-auto"><input type="checkbox" data-field="auto"> 自动切换（默认关闭）</label>
@@ -3211,6 +3246,7 @@
         const modelPriceText = formatModelPriceSummary(winner, this.config.modelPriceModel);
         const effectivePriceText = formatEffectivePricingSummary(winner);
         const outputTpsText = formatOutputThroughput(winner);
+        const providerContext = getProviderContext(winner);
         const cacheText = normalizeCacheHitRate(winner.cacheHitRate ?? winner.cache_hit_rate) === null
           ? ''
           : ` · ${formatCacheHitRate(winner.cacheHitRate ?? winner.cache_hit_rate)}`;
@@ -3222,6 +3258,24 @@
           reason.className = 'asg-balance-reason';
           reason.textContent = `倍率上限 ${formatMultiplier(this.config.balanceMaxPrice)} · 范围内${LATENCY_SOURCE_LABELS[this.config.latencySource]} 最快`;
           recommend.appendChild(reason);
+        }
+        if (providerContext.publicDetail || providerContext.heweiCheckUrl) {
+          const notice = document.createElement('div');
+          notice.className = 'asg-provider-notice';
+          if (providerContext.publicDetail) {
+            const text = document.createElement('span');
+            text.textContent = `供应商公告：${providerContext.publicDetail}`;
+            notice.appendChild(text);
+          }
+          if (providerContext.heweiCheckUrl) {
+            const report = document.createElement('a');
+            report.href = providerContext.heweiCheckUrl;
+            report.target = '_blank';
+            report.rel = 'noopener noreferrer';
+            report.textContent = '禾维检测报告';
+            notice.appendChild(report);
+          }
+          recommend.appendChild(notice);
         }
       }
       const diagnostics = this.candidateDiagnostics?.counts || {};
@@ -3312,6 +3366,7 @@
       const effectivePriceText = formatEffectivePricingSummary(metric?.effectivePricing, true, true);
       const outputTpsText = formatOutputThroughput(metric, true);
       const cacheHitRate = normalizeCacheHitRate(metric?.cacheHitRate);
+      const providerContext = getProviderContext(metric);
       const latencyLabel = details.querySelector('[data-key-detail-label="latency"]');
       const modelPriceRow = details.querySelector('[data-key-detail-row="model-price"]');
       const modelPriceLabel = details.querySelector('[data-key-detail-label="model-price"]');
@@ -3334,6 +3389,15 @@
       details.querySelector('[data-key-detail="effective-price"]').textContent = effectivePriceText || '暂无数据';
       details.querySelector('[data-key-detail="output-tps"]').textContent = outputTpsText || '暂无数据';
       details.querySelector('[data-key-detail="cache"]').textContent = cacheHitRate === null ? '暂无数据' : `${(cacheHitRate * 100).toFixed(1)}%`;
+      const providerDetailRow = details.querySelector('[data-key-detail-row="provider-detail"]');
+      const providerDetailNode = details.querySelector('[data-key-detail="provider-detail"]');
+      providerDetailRow.hidden = !providerContext.publicDetail;
+      providerDetailNode.textContent = providerContext.publicDetail || '';
+      const heweiReportRow = details.querySelector('[data-key-detail-row="hewei-report"]');
+      const heweiReportLink = details.querySelector('[data-key-detail="hewei-report"]');
+      heweiReportRow.hidden = !providerContext.heweiCheckUrl;
+      if (providerContext.heweiCheckUrl) heweiReportLink.href = providerContext.heweiCheckUrl;
+      else heweiReportLink.removeAttribute('href');
     }
 
     renderCandidates() {
@@ -3351,8 +3415,10 @@
         const modelPriceText = formatModelPriceSummary(candidate, this.config.modelPriceModel, true);
         const effectivePriceText = formatEffectivePricingSummary(candidate, true);
         const outputTpsText = formatOutputThroughput(candidate, true);
-        metrics.textContent = `${formatRecommendationPriceCriterion(candidate)} · ${formatLatencyMetric(candidate, this.config.latencySource, this.config.minUserTtftSamples)} · 10m ${formatPercent(candidate.success10m)}${detectionText ? ` · ${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${modelPriceText ? ` · ${modelPriceText}` : ''}${effectivePriceText ? ` · ${effectivePriceText}` : ''}${outputTpsText ? ` · ${outputTpsText}` : ''}${cacheHitRate === null ? '' : ` · 缓存 ${(cacheHitRate * 100).toFixed(1)}%`}`;
-        if (detectionTitle) metrics.title = detectionTitle;
+        const providerContext = getProviderContext(candidate);
+        metrics.textContent = `${formatRecommendationPriceCriterion(candidate)} · ${formatLatencyMetric(candidate, this.config.latencySource, this.config.minUserTtftSamples)} · 10m ${formatPercent(candidate.success10m)}${detectionText ? ` · ${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${modelPriceText ? ` · ${modelPriceText}` : ''}${effectivePriceText ? ` · ${effectivePriceText}` : ''}${outputTpsText ? ` · ${outputTpsText}` : ''}${cacheHitRate === null ? '' : ` · 缓存 ${(cacheHitRate * 100).toFixed(1)}%`}${providerContext.publicDetail ? ' · 有供应商公告' : ''}${providerContext.heweiCheckUrl ? ' · 有禾维报告' : ''}`;
+        const contextTitle = [detectionTitle, providerContext.publicDetail ? `供应商公告：${providerContext.publicDetail}` : ''].filter(Boolean).join('\n');
+        if (contextTitle) metrics.title = contextTitle;
         item.append(name, metrics);
         list.appendChild(item);
       }
@@ -4606,6 +4672,9 @@
     isProviderRefreshButtonDisabled,
     isProviderRefreshButtonBusy,
     getProviderRefreshDataSignature,
+    normalizeProviderPublicDetail,
+    normalizeProviderReportUrl,
+    getProviderContext,
     normalizeCacheHitRate,
     formatCacheHitRate,
     normalizeRuntimeCache1h,

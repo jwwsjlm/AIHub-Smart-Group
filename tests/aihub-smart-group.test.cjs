@@ -487,6 +487,35 @@ test('uses the provider update marker before falling back to visible data rows',
   assert.equal(core.getProviderRefreshDataSignature(rowRoot), 'provider-a001:A001 0.1x 可用|1:A002 0.2x 异常');
 });
 
+test('normalizes provider notices and only accepts HTTP report links', () => {
+  assert.equal(core.normalizeProviderPublicDetail('  倍率可能调整，请设置上限  '), '倍率可能调整，请设置上限');
+  assert.equal(core.normalizeProviderPublicDetail('   '), null);
+  assert.equal(core.normalizeProviderPublicDetail({ text: 'invalid' }), null);
+  assert.equal(core.normalizeProviderReportUrl(' https://hvoy.ai/report/example '), 'https://hvoy.ai/report/example');
+  assert.equal(core.normalizeProviderReportUrl('http://example.test/report'), 'http://example.test/report');
+  assert.equal(core.normalizeProviderReportUrl('javascript:alert(1)'), null);
+  assert.equal(core.normalizeProviderReportUrl('/relative/report'), null);
+  assert.deepEqual(core.getProviderContext({
+    public_detail: ' 公告 ',
+    hewei_check_url: 'https://hvoy.ai/report/abc',
+  }), {
+    publicDetail: '公告',
+    heweiCheckUrl: 'https://hvoy.ai/report/abc',
+  });
+});
+
+test('surfaces provider notices and safe report links in recommendation and key details', () => {
+  const controllerSource = userscriptSource.slice(
+    userscriptSource.indexOf('class Controller'),
+    userscriptSource.indexOf('class KeyGroupDropdownEnhancer'),
+  );
+  assert.match(controllerSource, /data-key-detail-row="provider-detail"/);
+  assert.match(controllerSource, /data-key-detail-row="hewei-report"/);
+  assert.match(controllerSource, /report\.rel = 'noopener noreferrer'/);
+  assert.match(controllerSource, /供应商公告：\$\{providerContext\.publicDetail\}/);
+  assert.match(controllerSource, /providerContext\.heweiCheckUrl \? ' · 有禾维报告'/);
+});
+
 test('normalizes the new provider summary response and keeps both TTFT metrics', () => {
   const summary = core.normalizeMonitorSummaryPayload({
     data: {
@@ -586,6 +615,8 @@ test('normalizes effective pricing, runtime cache, throughput, and provider capa
       output_tps: 87.25,
       support_ws: true,
       subscription_type: 'standard',
+      public_detail: '  该渠道倍率可能调整  ',
+      hewei_check_url: 'https://hvoy.ai/report/example',
     }],
   } });
   const row = summary.apis[0];
@@ -610,6 +641,8 @@ test('normalizes effective pricing, runtime cache, throughput, and provider capa
   assert.equal(row.outputTokensPerSecond, 87.25);
   assert.equal(row.supportWs, true);
   assert.equal(row.subscriptionType, 'standard');
+  assert.equal(row.publicDetail, '该渠道倍率可能调整');
+  assert.equal(row.heweiCheckUrl, 'https://hvoy.ai/report/example');
   assert.deepEqual(core.getEffectivePricing(row), {
     inputPricePerMillion: 0.42,
     multiplier: 0.07,
@@ -2698,6 +2731,8 @@ test('maps current group metrics by group id without filtering unavailable rows'
       effectiveMultiplier: 0.05,
       effectiveMultiplierReady: true,
       outputTps: 55,
+      public_detail: '倍率变更提示',
+      hewei_check_url: 'https://hvoy.ai/report/group-20',
       model_detection: { status: 'suspected', reason_codes: ['MIXED_VARIANT_SIGNAL'] },
     },
     { group_id: 21, priceMultiplier: null, firstTokenLatencyMs: null },
@@ -2723,6 +2758,8 @@ test('maps current group metrics by group id without filtering unavailable rows'
       hasData: true,
     },
     outputTokensPerSecond: 55,
+    publicDetail: '倍率变更提示',
+    heweiCheckUrl: 'https://hvoy.ai/report/group-20',
   });
   assert.deepEqual(metrics.get(21), { multiplier: null, latencyMs: null });
   assert.equal(metrics.has('same-name'), false);

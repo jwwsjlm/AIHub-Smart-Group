@@ -93,7 +93,7 @@
 
 ## 新版供应商监控字段
 
-脚本兼容供应商大厅新版 `model_health`、`model_detection`、`model_prices`、`cache_hit_rate`、`runtime_cache_1h`、`effective_input_price_per_million_1h`、`effective_multiplier` 和 `output_tps` 字段：
+脚本兼容供应商大厅新版 `model_health`、`model_detection`、`model_prices`、`cache_hit_rate`、`runtime_cache_1h`、`effective_input_price_per_million_1h`、`effective_multiplier`、`output_tps`、`public_detail` 和 `hewei_check_url` 字段：
 
 - `model_detection.status` 兼容 `passed`、`insufficient_evidence`、`detection_failed`、`suspected`、`not_tested` 等新版状态。除通过和明确不适用外，所有显式检测状态都会归入监控警告；默认“排除监控警告”会避免把失败、疑似、未检测或未来新增的未知状态线路作为推荐。
 - `model_detection.status` 为 `passed` 时在推荐卡片、目标密钥和原生分组下拉中显示“检测通过”。
@@ -104,6 +104,7 @@
 - `runtime_cache_1h` 会规范化最近 1 小时的用量、Token、缓存成本、刷新时间和就绪状态；顶层缓存命中率缺失时，仅在运行期数据已就绪且未过期时使用其中的精确命中率降级展示。
 - 后端明确标记 `effective_multiplier_ready` 且运行期数据未过期时，推荐卡片、候选和密钥详情会显示最近 1 小时真实输入价格与预测倍率；样本不足、数据未就绪或已过期时只在密钥详情解释原因。标称倍率仍是默认推荐依据；显式选择真实输入价或预测倍率时，仅价格模式使用新口径。
 - `output_tps` 会在有有效数据时显示输出 Token 速度。WebSocket 支持与订阅类型也会被规范化保留，便于后续页面功能继续适配。
+- `public_detail` 会作为供应商公告显示在推荐卡片、候选提示和当前密钥详情中；`hewei_check_url` 仅接受 HTTP(S) 地址，并以新标签页安全打开禾维检测报告。公告只用于提示，不会自动排除分组。
 
 缺失这些字段时保持旧版行为，不会因为接口未返回新版数据而排除分组。
 
@@ -297,4 +298,4 @@ node --test tests/*.test.cjs
 npx --yes eslint@9.39.2 aihub-smart-group.user.js scripts/check-repository.cjs tests/*.test.cjs
 ```
 
-当前版本：`0.14.3`
+当前版本：`0.14.4`
