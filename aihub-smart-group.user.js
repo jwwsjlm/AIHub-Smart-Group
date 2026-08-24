@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.11.9
+// @version      0.12.0
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.11.9';
+  const SCRIPT_VERSION = '0.12.0';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -38,6 +38,8 @@
   const ENHANCER_RENDER_DEBOUNCE_MS = 50;
   const ROUTER_SYNC_INTERVAL_MS = 2_000;
   const USAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+  const USAGE_AUDIT_RETRY_MS = 15_000;
+  const USAGE_AUDIT_CACHE_LIMIT = 8;
   const PROVIDER_REFRESH_RETRY_MS = 1_000;
   const USAGE_DETAIL_REQUIRED_HEADERS = Object.freeze([
     'API 密钥',
@@ -1325,7 +1327,14 @@
   }
 
   function getCurrentUsageRequestPath(entries, pageWindow = getPageWindow()) {
-    const resourceEntries = entries ?? pageWindow?.performance?.getEntriesByType?.('resource');
+    let resourceEntries = entries;
+    if (resourceEntries == null) {
+      try {
+        resourceEntries = pageWindow?.performance?.getEntriesByType?.('resource');
+      } catch {
+        resourceEntries = [];
+      }
+    }
     const pageOrigin = pageWindow?.location?.origin || (typeof location !== 'undefined' ? location.origin : '');
     const baseUrl = pageWindow?.location?.href || (typeof location !== 'undefined' ? location.href : 'https://aihub.top/usage');
     const URLCtor = pageWindow?.URL;
@@ -1341,6 +1350,25 @@
       }
     }
     return null;
+  }
+
+  function buildUsageAuditViewKey(path, rowIds) {
+    const requestPath = String(path ?? '').trim();
+    const ids = [...new Set([...(rowIds || [])].map((id) => String(id ?? '').trim()).filter(Boolean))].sort();
+    return requestPath && ids.length ? `${requestPath}#${ids.join(',')}` : '';
+  }
+
+  function shouldLoadUsageAuditView({
+    key = '',
+    loadedKey = '',
+    pendingKey = '',
+    failedKey = '',
+    now = Date.now(),
+    lastAttemptAt = 0,
+    retryMs = USAGE_AUDIT_RETRY_MS,
+  } = {}) {
+    if (!key || key === loadedKey || key === pendingKey) return false;
+    return key !== failedKey || Number(now) - Number(lastAttemptAt) >= Math.max(0, Number(retryMs) || 0);
   }
 
   function projectUsageAuditItems(items) {
@@ -1381,9 +1409,10 @@
   }
 
   async function fetchCurrentUsageAuditItems(options = {}) {
-    const path = getCurrentUsageRequestPath();
+    const { path: requestedPath, ...requestOptions } = options;
+    const path = String(requestedPath || getCurrentUsageRequestPath() || '').trim();
     if (!path) return null;
-    const payload = await apiRequest(path, options);
+    const payload = await apiRequest(path, requestOptions);
     const items = Array.isArray(payload?.data?.items)
       ? payload.data.items
       : (Array.isArray(payload?.items) ? payload.items : []);
@@ -2650,6 +2679,15 @@
       this.multiplierByGroup = new Map();
       this.modelPriceIndex = buildUsageModelPriceIndex([]);
       this.usageItemsById = new Map();
+      this.usageAuditCache = new Map();
+      this.pendingUsageLoads = new Map();
+      this.usageViewKey = '';
+      this.usageRequestPath = '';
+      this.loadedUsageViewKey = '';
+      this.pendingUsageViewKey = '';
+      this.failedUsageViewKey = '';
+      this.lastUsageFailureAt = 0;
+      this.usageRetryTimer = null;
       this.summaryByTable = new Map();
       this.observer = null;
       this.observedRoot = null;
@@ -2692,14 +2730,29 @@
     stop() {
       this.active = false;
       this.observer?.disconnect();
+      this.observer?.takeRecords?.();
       this.observer = null;
+      this.observedRoot = null;
       if (this.refreshTimer) window.clearInterval(this.refreshTimer);
       if (this.renderTimer) window.clearTimeout(this.renderTimer);
+      if (this.usageRetryTimer !== null) window.clearTimeout(this.usageRetryTimer);
       this.refreshTimer = null;
       this.renderTimer = null;
+      this.usageRetryTimer = null;
       window.removeEventListener(CONFIG_CHANGE_EVENT, this.onConfigChanged);
       document.querySelectorAll('.asg-usage-multiplier,.asg-usage-cost-audit,.asg-usage-cost-summary').forEach((node) => node.remove());
       this.summaryByTable.clear();
+      this.usageItemsById.clear();
+      this.usageAuditCache.clear();
+      this.pendingUsageLoads.clear();
+      this.usageViewKey = '';
+      this.usageRequestPath = '';
+      this.loadedUsageViewKey = '';
+      this.pendingUsageViewKey = '';
+      this.failedUsageViewKey = '';
+      this.lastUsageFailureAt = 0;
+      this.usageDataAvailable = false;
+      this.usageLoadFailed = false;
     }
 
     syncObserverRoot() {
@@ -2710,7 +2763,12 @@
       this.observer.disconnect();
       this.observer.takeRecords?.();
       this.observedRoot = null;
-      this.observer.observe(nextRoot, { childList: true, subtree: true });
+      this.observer.observe(nextRoot, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['data-row-id'],
+      });
       this.observedRoot = nextRoot;
       this.queueRender();
       return true;
@@ -2720,8 +2778,9 @@
       return [...(records || [])].some((record) => {
         const target = record.target?.nodeType === 1 ? record.target : record.target?.parentElement;
         if (target?.closest?.('.asg-usage-multiplier,.asg-usage-cost-audit,.asg-usage-cost-summary')) return false;
+        if (record.type === 'attributes' && target?.matches?.('tr[data-row-id]')) return true;
         if (target?.closest?.('thead') || target?.matches?.('tbody')) return true;
-        return [...record.addedNodes, ...record.removedNodes].some((node) => node.nodeType === 1
+        return [...(record.addedNodes || []), ...(record.removedNodes || [])].some((node) => node.nodeType === 1
           && (node.matches?.('table,thead,tbody,tr') || node.querySelector?.('table,thead,tbody,tr')));
       });
     }
@@ -2731,10 +2790,7 @@
       if (!force && !isRefreshDue(Date.now(), this.lastRefreshCompletedAt, USAGE_REFRESH_INTERVAL_MS)) return;
       this.loading = true;
       try {
-        const [monitorResult, usageResult] = await Promise.allSettled([
-          fetchMonitorSummary(),
-          fetchCurrentUsageAuditItems(),
-        ]);
+        const [monitorResult] = await Promise.allSettled([fetchMonitorSummary()]);
         if (!this.active) return;
         if (monitorResult.status === 'fulfilled') {
           this.multiplierByGroup = buildGroupMultiplierMap(monitorResult.value?.apis);
@@ -2743,15 +2799,6 @@
           this.loadFailed = false;
         } else {
           this.loadFailed = !this.hasMonitorData;
-        }
-        if (usageResult.status === 'fulfilled' && Array.isArray(usageResult.value)) {
-          this.usageItemsById = new Map(usageResult.value.map((item) => [item.id, item]));
-          this.usageDataAvailable = true;
-          this.usageLoadFailed = false;
-        } else {
-          this.usageItemsById.clear();
-          this.usageDataAvailable = false;
-          this.usageLoadFailed = usageResult.status === 'rejected';
         }
         this.render();
       } finally {
@@ -2782,6 +2829,7 @@
       const tables = [...document.querySelectorAll('table')];
       for (const table of tables) this.renderMultipliers(table);
       const detailTables = tables.filter((table) => this.isUsageDetailTable(table));
+      this.syncUsageAuditView(detailTables);
       const activeTables = new Set(detailTables);
       for (const [table, summary] of this.summaryByTable) {
         if (table.isConnected && activeTables.has(table)) continue;
@@ -2789,6 +2837,170 @@
         this.summaryByTable.delete(table);
       }
       for (const table of detailTables) this.renderCostAudit(table);
+    }
+
+    getUsageAuditView(detailTables) {
+      const path = getCurrentUsageRequestPath();
+      const rowIds = [...new Set([...(detailTables || [])]
+        .flatMap((table) => [...table.querySelectorAll('tbody tr[data-row-id]')])
+        .map((row) => String(row.dataset.rowId || '').trim())
+        .filter(Boolean))]
+        .sort();
+      return {
+        path: String(path || '').trim(),
+        rowIds,
+        key: buildUsageAuditViewKey(path, rowIds),
+      };
+    }
+
+    syncUsageQueryPath() {
+      if (!this.active) return false;
+      const path = String(getCurrentUsageRequestPath() || '').trim();
+      if (!path || path === this.usageRequestPath) return false;
+      this.queueRender();
+      return true;
+    }
+
+    clearUsageAuditRetry() {
+      const timerWindow = typeof window !== 'undefined' ? window : globalThis;
+      if (this.usageRetryTimer !== null) timerWindow.clearTimeout(this.usageRetryTimer);
+      this.usageRetryTimer = null;
+    }
+
+    scheduleUsageAuditRetry(key) {
+      this.clearUsageAuditRetry();
+      const timerWindow = typeof window !== 'undefined' ? window : globalThis;
+      const retry = () => {
+        this.usageRetryTimer = null;
+        if (!this.active || this.usageViewKey !== key || this.failedUsageViewKey !== key) return;
+        const remaining = USAGE_AUDIT_RETRY_MS - (Date.now() - this.lastUsageFailureAt);
+        if (remaining > 0) {
+          this.usageRetryTimer = timerWindow.setTimeout(retry, remaining);
+          return;
+        }
+        this.queueRender();
+      };
+      this.usageRetryTimer = timerWindow.setTimeout(retry, USAGE_AUDIT_RETRY_MS);
+    }
+
+    markUsageAuditFailure(key) {
+      if (!this.active || this.usageViewKey !== key) return false;
+      this.failedUsageViewKey = key;
+      this.lastUsageFailureAt = Date.now();
+      this.usageLoadFailed = true;
+      this.scheduleUsageAuditRetry(key);
+      return true;
+    }
+
+    isUsageAuditViewCurrent(view) {
+      if (!view?.key || this.usageViewKey !== view.key) return false;
+      if (typeof document === 'undefined') return true;
+      const tables = [...document.querySelectorAll('table')];
+      const detailTables = tables.filter((table) => this.isUsageDetailTable(table));
+      return this.getUsageAuditView(detailTables).key === view.key;
+    }
+
+    syncUsageAuditView(detailTables) {
+      const view = this.getUsageAuditView(detailTables);
+      if (!view.key) {
+        this.clearUsageAuditRetry();
+        this.usageViewKey = '';
+        this.usageRequestPath = view.path;
+        this.loadedUsageViewKey = '';
+        this.pendingUsageViewKey = '';
+        this.usageItemsById.clear();
+        this.usageDataAvailable = false;
+        return false;
+      }
+
+      if (view.key !== this.usageViewKey) {
+        this.clearUsageAuditRetry();
+        if (this.failedUsageViewKey !== view.key) {
+          this.failedUsageViewKey = '';
+          this.lastUsageFailureAt = 0;
+        }
+        this.usageViewKey = view.key;
+        this.usageRequestPath = view.path;
+        this.loadedUsageViewKey = '';
+        this.usageItemsById.clear();
+        this.usageDataAvailable = false;
+        this.usageLoadFailed = false;
+      }
+
+      if (this.loadedUsageViewKey === view.key) return false;
+
+      const cached = this.usageAuditCache.get(view.key);
+      if (cached) {
+        this.usageAuditCache.delete(view.key);
+        this.usageAuditCache.set(view.key, cached);
+        this.applyUsageAuditItems(view.key, cached);
+        return false;
+      }
+
+      const pendingKey = this.pendingUsageLoads.has(view.key) ? view.key : '';
+      if (!shouldLoadUsageAuditView({
+        key: view.key,
+        loadedKey: this.loadedUsageViewKey,
+        pendingKey,
+        failedKey: this.failedUsageViewKey,
+        lastAttemptAt: this.lastUsageFailureAt,
+      })) return false;
+
+      this.loadUsageAuditView(view);
+      return true;
+    }
+
+    applyUsageAuditItems(key, itemsById) {
+      if (!key || key !== this.usageViewKey) return false;
+      this.usageItemsById = new Map(itemsById || []);
+      this.loadedUsageViewKey = key;
+      this.usageDataAvailable = true;
+      this.usageLoadFailed = false;
+      if (this.failedUsageViewKey === key) {
+        this.failedUsageViewKey = '';
+        this.lastUsageFailureAt = 0;
+        this.clearUsageAuditRetry();
+      }
+      return true;
+    }
+
+    cacheUsageAuditItems(key, items) {
+      const itemsById = items instanceof Map
+        ? new Map(items)
+        : new Map([...(items || [])].map((item) => [String(item?.id ?? '').trim(), item]).filter(([id]) => id));
+      this.usageAuditCache.delete(key);
+      this.usageAuditCache.set(key, itemsById);
+      while (this.usageAuditCache.size > USAGE_AUDIT_CACHE_LIMIT) {
+        this.usageAuditCache.delete(this.usageAuditCache.keys().next().value);
+      }
+      return itemsById;
+    }
+
+    loadUsageAuditView(view) {
+      this.clearUsageAuditRetry();
+      this.pendingUsageViewKey = view.key;
+      const load = (async () => {
+        try {
+          const items = await fetchCurrentUsageAuditItems({ path: view.path });
+          if (!this.active || !Array.isArray(items)) return;
+          const rowIds = new Set(view.rowIds);
+          const viewIsCurrent = this.isUsageAuditViewCurrent(view);
+          if (rowIds.size && !items.some((item) => rowIds.has(String(item?.id ?? '').trim()))) {
+            if (viewIsCurrent) this.markUsageAuditFailure(view.key);
+            return;
+          }
+          const itemsById = this.cacheUsageAuditItems(view.key, items);
+          if (viewIsCurrent) this.applyUsageAuditItems(view.key, itemsById);
+        } catch {
+          this.markUsageAuditFailure(view.key);
+        } finally {
+          this.pendingUsageLoads.delete(view.key);
+          if (this.pendingUsageViewKey === view.key) this.pendingUsageViewKey = '';
+          if (this.active && this.usageViewKey === view.key) this.queueRender();
+        }
+      })();
+      this.pendingUsageLoads.set(view.key, load);
+      return load;
     }
 
     getHeaderLabels(table) {
@@ -3197,6 +3409,7 @@
         this.usage.start();
       } else if (features.usage && this.usage) {
         this.usage.syncObserverRoot();
+        this.usage.syncUsageQueryPath();
       } else if (!features.usage && this.usage) {
         this.usage.stop();
         this.usage = null;
@@ -3312,9 +3525,12 @@
     fetchMonitorSummary,
     clearMonitorSummaryCache,
     getCurrentUsageRequestPath,
+    buildUsageAuditViewKey,
+    shouldLoadUsageAuditView,
     projectUsageAuditItems,
     buildUsageAuditRecordFromApiItem,
     fetchCurrentUsageAuditItems,
+    UsageMultiplierEnhancer,
     appendLogEntries,
     formatLogLine,
     start() {

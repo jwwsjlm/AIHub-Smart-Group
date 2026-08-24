@@ -74,8 +74,19 @@ test('rebinds the usage observer when the SPA replaces its main element', () => 
   assert.match(usageSource, /this\.observedRoot = null;/);
   assert.match(usageSource, /if \(nextRoot === this\.observedRoot && nextRoot\.isConnected\) return false;/);
   assert.match(usageSource, /this\.observer\.disconnect\(\);\s*this\.observer\.takeRecords\?\.\(\);\s*this\.observedRoot = null;\s*this\.observer\.observe\(nextRoot/);
+  assert.match(usageSource, /attributes: true,\s*attributeFilter: \['data-row-id'\]/);
+  assert.match(usageSource, /record\.type === 'attributes' && target\?\.matches\?\.\('tr\[data-row-id\]'\)/);
   assert.match(usageSource, /record\.target === currentRoot \|\| currentRoot\.contains\(record\.target\)/);
-  assert.match(userscriptSource, /else if \(features\.usage && this\.usage\) \{\s*this\.usage\.syncObserverRoot\(\);/);
+  assert.match(userscriptSource, /else if \(features\.usage && this\.usage\) \{\s*this\.usage\.syncObserverRoot\(\);\s*this\.usage\.syncUsageQueryPath\(\);/);
+});
+
+test('refreshes usage prices without repeatedly reloading exact usage rows', () => {
+  const usageSource = userscriptSource.slice(userscriptSource.indexOf('class UsageMultiplierEnhancer'), userscriptSource.indexOf('class ProviderSortEnhancer'));
+  const refreshSource = usageSource.slice(usageSource.indexOf('async refresh(force = false)'), usageSource.indexOf('handleVisibilityChange()'));
+
+  assert.match(refreshSource, /fetchMonitorSummary\(\)/);
+  assert.doesNotMatch(refreshSource, /fetchCurrentUsageAuditItems\(/);
+  assert.match(usageSource, /this\.syncUsageAuditView\(detailTables\);/);
 });
 
 test('maps dropdown monitor tones to native group badge classes', () => {
@@ -1338,9 +1349,46 @@ test('selects only the current exact usage resource request', () => {
     { name: 'https://aihub.top/api/v1/usage/stats?start_date=2026-08-01' },
     { name: 'https://example.test/api/v1/usage?page=2' },
     { name: '/api/v1/usage?page=3&page_size=50&sort_by=created_at&sort_order=desc' },
+    { name: 'not a valid url%' },
   ], pageWindow);
 
   assert.equal(path, '/usage?page=3&page_size=50&sort_by=created_at&sort_order=desc');
+});
+
+test('degrades safely when usage resource timing is unavailable', () => {
+  const pageWindow = {
+    URL: globalThis.URL,
+    location: { origin: 'https://aihub.top', href: 'https://aihub.top/usage' },
+    performance: { getEntriesByType: () => { throw new Error('unavailable'); } },
+  };
+
+  assert.equal(core.getCurrentUsageRequestPath(undefined, pageWindow), null);
+});
+
+test('builds stable usage audit view keys from the query and visible row ids', () => {
+  const key = core.buildUsageAuditViewKey('/usage?page=2', ['3', '1', '2', '2', '', null]);
+
+  assert.equal(key, '/usage?page=2#1,2,3');
+  assert.equal(core.buildUsageAuditViewKey('/usage?page=2', ['2', '3', '1']), key);
+  assert.notEqual(core.buildUsageAuditViewKey('/usage?page=3', ['1', '2', '3']), key);
+  assert.notEqual(core.buildUsageAuditViewKey('/usage?page=2', ['1', '2', '4']), key);
+  assert.equal(core.buildUsageAuditViewKey('', ['1']), '');
+  assert.equal(core.buildUsageAuditViewKey('/usage?page=2', []), '');
+});
+
+test('deduplicates loaded and pending usage views while backing off failed views', () => {
+  assert.equal(core.shouldLoadUsageAuditView({ key: '' }), false);
+  assert.equal(core.shouldLoadUsageAuditView({ key: 'view', loadedKey: 'view' }), false);
+  assert.equal(core.shouldLoadUsageAuditView({ key: 'view', pendingKey: 'view' }), false);
+  assert.equal(core.shouldLoadUsageAuditView({
+    key: 'view', failedKey: 'view', lastAttemptAt: 1_000, now: 15_999, retryMs: 15_000,
+  }), false);
+  assert.equal(core.shouldLoadUsageAuditView({
+    key: 'view', failedKey: 'view', lastAttemptAt: 1_000, now: 16_000, retryMs: 15_000,
+  }), true);
+  assert.equal(core.shouldLoadUsageAuditView({
+    key: 'next-view', failedKey: 'view', lastAttemptAt: 15_999, now: 16_000, retryMs: 15_000,
+  }), true);
 });
 
 test('reuses the visible usage query when loading exact audit records', async () => {
@@ -1387,6 +1435,223 @@ test('reuses the visible usage query when loading exact audit records', async ()
       actualCost: 0.00001,
       billingMode: 'token',
     }]);
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = originalLocalStorage;
+  }
+});
+
+test('uses an explicitly captured usage path even when the latest resource entry changes', async () => {
+  const originalWindow = globalThis.window;
+  const originalLocalStorage = globalThis.localStorage;
+  const storage = { getItem: () => '' };
+  let requestedUrl = '';
+  globalThis.localStorage = storage;
+  globalThis.window = {
+    URL: globalThis.URL,
+    localStorage: storage,
+    location: { origin: 'https://aihub.top', href: 'https://aihub.top/usage?page=9' },
+    performance: { getEntriesByType: () => [{ name: 'https://aihub.top/api/v1/usage?page=9&page_size=20' }] },
+    fetch: async (url) => {
+      requestedUrl = url;
+      return { ok: true, status: 200, json: async () => ({ data: { items: [] } }) };
+    },
+  };
+
+  try {
+    await core.fetchCurrentUsageAuditItems({ path: '/usage?page=4&page_size=20' });
+    assert.equal(requestedUrl, '/api/v1/usage?page=4&page_size=20');
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = originalLocalStorage;
+  }
+});
+
+test('keeps only eight recent usage audit views and refreshes cache recency on a hit', () => {
+  const enhancer = new core.UsageMultiplierEnhancer();
+  for (let index = 1; index <= 8; index += 1) {
+    enhancer.cacheUsageAuditItems(`view-${index}`, [{ id: String(index) }]);
+  }
+  enhancer.getUsageAuditView = () => ({ path: '/usage?page=1', rowIds: ['1'], key: 'view-1' });
+  enhancer.syncUsageAuditView([]);
+  enhancer.cacheUsageAuditItems('view-9', [{ id: '9' }]);
+
+  assert.equal(enhancer.usageAuditCache.size, 8);
+  assert.equal(enhancer.usageAuditCache.has('view-1'), true);
+  assert.equal(enhancer.usageAuditCache.has('view-2'), false);
+  assert.equal(enhancer.usageItemsById.has('1'), true);
+});
+
+test('rechecks the live usage table before applying an exact response', () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = { querySelectorAll: () => [{}] };
+
+  try {
+    const enhancer = new core.UsageMultiplierEnhancer();
+    enhancer.usageViewKey = 'captured-view';
+    enhancer.isUsageDetailTable = () => true;
+    enhancer.getUsageAuditView = () => ({ key: 'new-live-view' });
+
+    assert.equal(enhancer.isUsageAuditViewCurrent({ key: 'captured-view' }), false);
+  } finally {
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+});
+
+test('wakes the current usage view when its failure backoff expires', () => {
+  const originalWindow = globalThis.window;
+  const originalDateNow = Date.now;
+  const timers = [];
+  let now = 1_000;
+  let renderCount = 0;
+  globalThis.window = {
+    setTimeout: (callback, delay) => {
+      timers.push({ callback, delay });
+      return timers.length;
+    },
+    clearTimeout: () => {},
+  };
+  Date.now = () => now;
+
+  try {
+    const enhancer = new core.UsageMultiplierEnhancer();
+    enhancer.active = true;
+    enhancer.usageViewKey = 'view';
+    enhancer.queueRender = () => { renderCount += 1; };
+
+    enhancer.markUsageAuditFailure('view');
+    assert.equal(enhancer.lastUsageFailureAt, 1_000);
+    assert.equal(timers[0].delay, 15_000);
+
+    now = 15_999;
+    timers.shift().callback();
+    assert.equal(renderCount, 0);
+    assert.equal(timers[0].delay, 1);
+
+    now = 16_000;
+    timers.shift().callback();
+    assert.equal(renderCount, 1);
+  } finally {
+    Date.now = originalDateNow;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+test('starts usage backoff when a failed request settles instead of when it starts', async () => {
+  const originalWindow = globalThis.window;
+  const originalLocalStorage = globalThis.localStorage;
+  const originalDateNow = Date.now;
+  const storage = { getItem: () => '' };
+  const timers = [];
+  let rejectRequest;
+  let now = 1_000;
+  globalThis.localStorage = storage;
+  globalThis.window = {
+    URL: globalThis.URL,
+    AbortController: globalThis.AbortController,
+    localStorage: storage,
+    location: { origin: 'https://aihub.top', href: 'https://aihub.top/usage' },
+    setTimeout: (callback, delay) => {
+      timers.push({ callback, delay, cleared: false });
+      return timers.length;
+    },
+    clearTimeout: (id) => {
+      if (timers[id - 1]) timers[id - 1].cleared = true;
+    },
+    fetch: () => new Promise((resolve, reject) => { rejectRequest = reject; }),
+  };
+  Date.now = () => now;
+
+  try {
+    const enhancer = new core.UsageMultiplierEnhancer();
+    enhancer.active = true;
+    enhancer.queueRender = () => {};
+    const view = { path: '/usage?page=1', rowIds: ['1'], key: '/usage?page=1#1' };
+    enhancer.usageViewKey = view.key;
+
+    const load = enhancer.loadUsageAuditView(view);
+    now = 16_000;
+    rejectRequest(new Error('request failed after 15 seconds'));
+    await load;
+
+    assert.equal(enhancer.lastUsageFailureAt, 16_000);
+    assert.equal(core.shouldLoadUsageAuditView({
+      key: view.key,
+      failedKey: enhancer.failedUsageViewKey,
+      lastAttemptAt: enhancer.lastUsageFailureAt,
+      now,
+      retryMs: 15_000,
+    }), false);
+    assert.equal(timers.at(-1).delay, 15_000);
+    enhancer.clearUsageAuditRetry();
+  } finally {
+    Date.now = originalDateNow;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = originalLocalStorage;
+  }
+});
+
+test('does not let a stale usage response overwrite the active page', async () => {
+  const originalWindow = globalThis.window;
+  const originalLocalStorage = globalThis.localStorage;
+  const storage = { getItem: () => '' };
+  const pending = new Map();
+  globalThis.localStorage = storage;
+  globalThis.window = {
+    URL: globalThis.URL,
+    AbortController: globalThis.AbortController,
+    setTimeout: globalThis.setTimeout,
+    clearTimeout: globalThis.clearTimeout,
+    localStorage: storage,
+    location: { origin: 'https://aihub.top', href: 'https://aihub.top/usage' },
+    fetch: (url) => new Promise((resolve) => pending.set(url, resolve)),
+  };
+  const makeResponse = (id) => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ data: { items: [{
+      id,
+      model: 'gpt-5.6-sol',
+      group: { name: 'A003-Plus' },
+      rate_multiplier: 0.11,
+      input_tokens: 1,
+      output_tokens: 2,
+      cache_read_tokens: 3,
+      actual_cost: 0.00001,
+      billing_mode: 'token',
+    }] } }),
+  });
+
+  try {
+    const enhancer = new core.UsageMultiplierEnhancer();
+    enhancer.active = true;
+    enhancer.queueRender = () => {};
+    const page1 = { path: '/usage?page=1', rowIds: ['1'], key: '/usage?page=1#1' };
+    const page2 = { path: '/usage?page=2', rowIds: ['2'], key: '/usage?page=2#2' };
+
+    enhancer.usageViewKey = page1.key;
+    const firstLoad = enhancer.loadUsageAuditView(page1);
+    enhancer.usageViewKey = page2.key;
+    const secondLoad = enhancer.loadUsageAuditView(page2);
+
+    pending.get('/api/v1/usage?page=2')(makeResponse(2));
+    await secondLoad;
+    pending.get('/api/v1/usage?page=1')(makeResponse(1));
+    await firstLoad;
+
+    assert.equal(enhancer.loadedUsageViewKey, page2.key);
+    assert.equal(enhancer.usageItemsById.has('2'), true);
+    assert.equal(enhancer.usageItemsById.has('1'), false);
+    assert.equal(enhancer.usageAuditCache.has(page1.key), true);
+    assert.equal(enhancer.usageAuditCache.has(page2.key), true);
   } finally {
     if (originalWindow === undefined) delete globalThis.window;
     else globalThis.window = originalWindow;
