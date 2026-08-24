@@ -1712,6 +1712,44 @@ test('keeps slightly newer summary history samples inside the availability windo
   assert.equal(core.getMonitorSeriesWindowAnchor({ seriesByApiId: {}, userTtftByGroupId: {} }), null);
 });
 
+test('compacts probe history to the active availability window without trimming user TTFT', () => {
+  const generatedAt = Date.parse('2026-08-24T06:00:00Z');
+  const recentAt = generatedAt - 5 * 60_000;
+  const slightlyNewerAt = generatedAt + 30_000;
+  const userTtft = [[generatedAt - 5 * 60_000, 500, 3]];
+  const compacted = core.compactMonitorProbeSeries({
+    generatedAt,
+    range: '6h',
+    seriesByApiId: {
+      1: [[generatedAt - 6 * 60 * 60_000, 1], [recentAt, 0], [slightlyNewerAt, 1]],
+      2: [[generatedAt - 30 * 60_000, 0]],
+      3: [[generatedAt + 2 * 60_000, 1]],
+    },
+    userTtftByGroupId: { 1: userTtft },
+  });
+
+  assert.deepEqual(compacted.seriesByApiId, { 1: [[recentAt, 0], [slightlyNewerAt, 1]] });
+  assert.strictEqual(compacted.userTtftByGroupId['1'], userTtft);
+  assert.equal(core.getMonitorFreshnessTimestamp(compacted), slightlyNewerAt);
+});
+
+test('retains only the globally latest old probe when the availability window has expired', () => {
+  const generatedAt = Date.parse('2026-08-24T06:00:00Z');
+  const latestAt = generatedAt - 20 * 60_000;
+  const compacted = core.compactMonitorProbeSeries({
+    generatedAt,
+    seriesByApiId: {
+      1: [[generatedAt - 60 * 60_000, 1]],
+      2: [[latestAt, 0]],
+    },
+    userTtftByGroupId: {},
+  });
+
+  assert.deepEqual(compacted.seriesByApiId, { 2: [[latestAt, 0]] });
+  assert.equal(core.getMonitorFreshnessTimestamp(compacted), latestAt);
+  assert.equal(core.attachRecentAvailability([{ id: 2, successRates: {} }], compacted)[0].recentSampleCount, 0);
+});
+
 test('merges provider samples while collapsing nearby summary fallback buckets', () => {
   const base = Date.parse('2026-08-24T02:10:00Z');
   const primaryTenFieldSample = [base + 5 * 60_000, 0, 9_999, 4, 5, 6, 7, 8, 9, 10];
@@ -1927,7 +1965,10 @@ test('deduplicates and caches provider series requests independently', async () 
       return {
         ok: true,
         status: 200,
-        json: async () => ({ data: { items: [{ group_id: 1, probe: [[requestCount, 1]], user_ttft: [] }] } }),
+        json: async () => ({ data: {
+          generated_at: now,
+          items: [{ group_id: 1, probe: [[now - 700_000, 0], [now, 1]], user_ttft: [] }],
+        } }),
       };
     },
   };
@@ -1940,6 +1981,7 @@ test('deduplicates and caches provider series requests independently', async () 
     assert.equal(requestCount, 1);
     assert.equal(left, right);
     assert.equal(cached, left);
+    assert.deepEqual(left.seriesByApiId['1'], [[now, 1]]);
 
     const forced = await core.fetchMonitorSeries({ force: true });
     assert.equal(requestCount, 2);

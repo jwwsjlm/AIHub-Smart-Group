@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.32
+// @version      0.14.33
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.32';
+  const SCRIPT_VERSION = '0.14.33';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -40,6 +40,7 @@
   const MONITOR_SERIES_CACHE_TTL_MS = 60_000;
   const ACCOUNT_BALANCE_CACHE_TTL_MS = 60_000;
   const MONITOR_SAMPLE_CLOCK_SKEW_MS = 60_000;
+  const MONITOR_AVAILABILITY_WINDOW_MS = 10 * 60 * 1000;
   const MONITOR_HISTORY_SAMPLE_COUNT_CAP = 60;
   // Overview history buckets represent the same probe cycles with slightly shifted timestamps.
   const MONITOR_SERIES_FALLBACK_OVERLAP_MS = 3 * 60 * 1000;
@@ -2025,6 +2026,39 @@
     return null;
   }
 
+  function compactMonitorProbeSeries(seriesPayload, windowMs = MONITOR_AVAILABILITY_WINDOW_MS) {
+    const source = normalizeMonitorSeriesPayload(seriesPayload || {});
+    const anchor = getMonitorSeriesWindowAnchor(source);
+    if (anchor === null) return source;
+    const cutoff = anchor - Math.max(1, Number(windowMs) || 1);
+    const seriesByApiId = {};
+    let latestOlderSample = null;
+    let latestOlderGroupId = null;
+    let recentSampleCount = 0;
+    for (const [groupId, samples] of Object.entries(source.seriesByApiId || {})) {
+      const recent = [];
+      for (const sample of Array.isArray(samples) ? samples : []) {
+        const timestamp = Number(sample?.[0]);
+        if (!Number.isFinite(timestamp) || timestamp > anchor) continue;
+        if (timestamp >= cutoff) {
+          recent.push(sample);
+          recentSampleCount += 1;
+        } else if (!latestOlderSample || timestamp > Number(latestOlderSample[0])) {
+          latestOlderSample = sample;
+          latestOlderGroupId = groupId;
+        }
+      }
+      if (recent.length) seriesByApiId[groupId] = recent;
+    }
+    if (!recentSampleCount && latestOlderSample && latestOlderGroupId !== null) {
+      seriesByApiId[latestOlderGroupId] = [latestOlderSample];
+    }
+    return {
+      ...source,
+      seriesByApiId,
+    };
+  }
+
   function getMonitorFreshnessTimestamp(seriesPayload, fallbackGeneratedAt = null) {
     const generatedAt = parseMonitorSampleTimestamp(seriesPayload?.generatedAt);
     return getLatestMonitorSampleAt(
@@ -2048,7 +2082,7 @@
     return { remainingMs, active: remainingMs > 0, label: remainingMs > 0 ? `剩余 ${formatRemainingTime(remainingMs)}` : '冷却已结束' };
   }
 
-  function attachRecentAvailability(rows, seriesPayload, windowMs = 10 * 60 * 1000) {
+  function attachRecentAvailability(rows, seriesPayload, windowMs = MONITOR_AVAILABILITY_WINDOW_MS) {
     const anchor = getMonitorSeriesWindowAnchor(seriesPayload);
     const now = anchor === null ? Date.now() : anchor;
     const cutoff = now - Math.max(1, Number(windowMs) || 1);
@@ -2925,11 +2959,11 @@
   async function requestMonitorSeries(options = {}) {
     try {
       const payload = await apiRequest('/public/providers/series?range=6h&timezone=Asia%2FShanghai', options);
-      return normalizeMonitorSeriesPayload(payload);
+      return compactMonitorProbeSeries(payload);
     } catch (primaryError) {
       if (![404, 410].includes(Number(primaryError?.status))) throw primaryError;
       try {
-        return normalizeMonitorSeriesPayload(await apiRequest('/public/monitor/series/6h', options));
+        return compactMonitorProbeSeries(await apiRequest('/public/monitor/series/6h', options));
       } catch {
         throw primaryError;
       }
@@ -3865,9 +3899,9 @@
           fetchCurrentBalance({ force: forceLog }).then((payload) => ({ payload })).catch((error) => ({ error })),
         ]);
         if (!this.active) return;
-        const fallbackSeries = buildMonitorSeriesFromSummary(summary);
+        const fallbackSeries = compactMonitorProbeSeries(buildMonitorSeriesFromSummary(summary));
         const series = seriesResult.value
-          ? mergeMonitorSeries(seriesResult.value, fallbackSeries)
+          ? compactMonitorProbeSeries(mergeMonitorSeries(seriesResult.value, fallbackSeries))
           : fallbackSeries;
         const usingSeriesFallback = Boolean(seriesResult.error);
         if (usingSeriesFallback && this.lastSeriesFallbackLogState !== true) {
@@ -6023,6 +6057,7 @@
     getMonitorFreshness,
     getLatestMonitorSampleAt,
     getMonitorSeriesWindowAnchor,
+    compactMonitorProbeSeries,
     getMonitorFreshnessTimestamp,
     getCooldownInfo,
     attachRecentAvailability,
