@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.8
+// @version      0.14.9
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.8';
+  const SCRIPT_VERSION = '0.14.9';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -57,6 +57,36 @@
     'button.monitor-icon-button[title="刷新监测数据"]',
     'button.monitor-icon-button[title="Refresh monitoring data"]',
   ].join(',');
+  const PROVIDER_SORT_BUTTON_SELECTOR = [
+    'button.monitor-sort-head',
+    'button[data-testid^="monitor-sort-"]',
+    'button[data-sort-key]',
+    'button[data-sort-by]',
+  ].join(',');
+  const PROVIDER_SCOPED_SORT_BUTTON_SELECTOR = [
+    '[data-testid="llm-monitor-panel"] button.monitor-sort-head',
+    '[data-testid="llm-monitor-panel"] button[data-testid^="monitor-sort-"]',
+    '[data-testid="llm-monitor-panel"] button[data-sort-key]',
+    '[data-testid="llm-monitor-panel"] button[data-sort-by]',
+  ].join(',');
+  const PROVIDER_SORT_MUTATION_SELECTOR = [
+    PROVIDER_SORT_BUTTON_SELECTOR,
+    '.monitor-range-tabs button',
+    '[data-testid^="monitor-range-"]',
+  ].join(',');
+  const PROVIDER_SORT_OBSERVED_ATTRIBUTES = Object.freeze([
+    'class',
+    'aria-sort',
+    'aria-pressed',
+    'aria-selected',
+    'data-state',
+    'data-testid',
+    'data-sort-key',
+    'data-sort-by',
+    'data-sort-direction',
+    'data-direction',
+    'data-order',
+  ]);
   const USAGE_DETAIL_REQUIRED_HEADERS = Object.freeze([
     'API 密钥',
     '模型',
@@ -153,6 +183,15 @@
     cacheHit: '↓',
     successRate: '↓',
     custom: '↓',
+  });
+  const PROVIDER_SORT_SEMANTIC_KEYS = Object.freeze({
+    rate: Object.freeze(['rate', 'multiplier']),
+    default: Object.freeze(['default']),
+    realPrice: Object.freeze(['real-price', 'realprice', 'effective-price']),
+    user: Object.freeze(['user', 'user-speed']),
+    cacheHit: Object.freeze(['cache-hit', 'cachehit']),
+    successRate: Object.freeze(['success-rate', 'successrate', 'availability']),
+    custom: Object.freeze(['custom']),
   });
   const PROVIDER_RANGE_LABELS = Object.freeze({
     default: '跟随网站默认',
@@ -380,12 +419,40 @@
     return PROVIDER_SORT_DIRECTIONS[normalizeProviderSortPreference(preference)];
   }
 
+  function normalizeProviderSortSemanticKey(value) {
+    return String(value || '')
+      .trim()
+      .replace(/([a-z\d])([A-Z])/g, '$1-$2')
+      .replace(/[\s_]+/g, '-')
+      .toLocaleLowerCase();
+  }
+
+  function getProviderSortButtonSemanticKeys(button) {
+    const testId = normalizeProviderSortSemanticKey(button?.getAttribute?.('data-testid'))
+      .replace(/^(?:monitor|provider)-sort-/, '');
+    return [
+      testId,
+      normalizeProviderSortSemanticKey(button?.getAttribute?.('data-sort-key')),
+      normalizeProviderSortSemanticKey(button?.getAttribute?.('data-sort-by')),
+    ].filter(Boolean);
+  }
+
+  function isProviderControlActive(control) {
+    const className = String(control?.className || '').split(/\s+/);
+    if (control?.classList?.contains?.('active') === true || className.includes('active')) return true;
+    if (['aria-pressed', 'aria-selected'].some((name) => String(control?.getAttribute?.(name) || '').trim().toLocaleLowerCase() === 'true')) return true;
+    const state = String(control?.getAttribute?.('data-state') || '').trim().toLocaleLowerCase();
+    return state === 'active' || state === 'on' || state === 'checked' || state === 'selected';
+  }
+
   function getProviderSortButtonDirection(button) {
     const textDirection = String(button?.textContent || '').trim().match(/([↑↓])$/)?.[1];
     if (textDirection) return textDirection;
-    const ariaSort = String(button?.getAttribute?.('aria-sort') || '').trim().toLocaleLowerCase();
-    if (ariaSort === 'ascending') return '↑';
-    if (ariaSort === 'descending') return '↓';
+    const direction = ['aria-sort', 'data-sort-direction', 'data-direction', 'data-order']
+      .map((name) => String(button?.getAttribute?.(name) || '').trim().toLocaleLowerCase())
+      .find((value) => ['ascending', 'asc', 'ascend', 'up', 'descending', 'desc', 'descend', 'down'].includes(value));
+    if (direction === 'ascending' || direction === 'asc' || direction === 'ascend' || direction === 'up') return '↑';
+    if (direction === 'descending' || direction === 'desc' || direction === 'descend' || direction === 'down') return '↓';
     return '';
   }
 
@@ -398,8 +465,7 @@
 
   function findActiveProviderSortButton(buttons) {
     const candidates = [...(buttons || [])];
-    return candidates.find((button) => button?.classList?.contains?.('active') === true
-      || String(button?.className || '').split(/\s+/).includes('active'))
+    return candidates.find((button) => isProviderControlActive(button))
       || candidates.find((button) => Boolean(getProviderSortButtonDirection(button)))
       || null;
   }
@@ -407,7 +473,12 @@
   function getProviderSortStateSignature(buttons) {
     const activeButton = findActiveProviderSortButton(buttons);
     if (!activeButton) return '';
-    const label = String(activeButton.textContent || '')
+    const label = String(activeButton?.getAttribute?.('data-testid')
+      || activeButton?.getAttribute?.('data-sort-key')
+      || activeButton?.getAttribute?.('data-sort-by')
+      || activeButton?.getAttribute?.('aria-label')
+      || activeButton.textContent
+      || '')
       .trim()
       .replace(/\s*[↑↓]$/, '')
       .toLocaleLowerCase();
@@ -418,15 +489,24 @@
     const candidates = [...(buttons || [])];
     const scopedCandidates = candidates.filter((button) => {
       const className = String(button?.className || '').split(/\s+/);
-      const isSortHead = button?.classList?.contains?.('monitor-sort-head') === true || className.includes('monitor-sort-head');
+      const testId = String(button?.getAttribute?.('data-testid') || '').trim();
+      const isSortHead = button?.classList?.contains?.('monitor-sort-head') === true
+        || className.includes('monitor-sort-head')
+        || testId.startsWith('monitor-sort-')
+        || Boolean(button?.getAttribute?.('data-sort-key'))
+        || Boolean(button?.getAttribute?.('data-sort-by'));
       if (!isSortHead) return false;
-      const closest = button?.closest?.('.monitor-sort-controls');
+      const closest = button?.closest?.('.monitor-sort-controls,[data-testid="monitor-sort-controls"]');
       return typeof button?.closest !== 'function' || Boolean(closest);
     });
     const searchPool = scopedCandidates.length > 0 ? scopedCandidates : candidates.filter((button) => {
       const className = String(button?.className || '').split(/\s+/);
       return !button?.classList?.contains?.('header-sort') && !className.includes('header-sort');
     });
+    const targetKeys = PROVIDER_SORT_SEMANTIC_KEYS[normalizeProviderSortPreference(preference)];
+    const semanticTarget = searchPool.find((button) => getProviderSortButtonSemanticKeys(button)
+      .some((key) => targetKeys.includes(key)));
+    if (semanticTarget) return semanticTarget;
     const targetTexts = getProviderSortButtonTexts(preference).map((text) => text.toLocaleLowerCase());
     return searchPool.find((button) => {
       const text = String(button?.textContent || '').trim().replace(/\s*[↑↓]$/, '').toLocaleLowerCase();
@@ -444,8 +524,7 @@
   }
 
   function findActiveProviderRangeButton(buttons) {
-    return [...(buttons || [])].find((button) => button?.classList?.contains?.('active') === true
-      || String(button?.className || '').split(/\s+/).includes('active'))
+    return [...(buttons || [])].find((button) => isProviderControlActive(button))
       || null;
   }
 
@@ -4381,7 +4460,16 @@
 
     getSortRoot() {
       const panel = document.querySelector('[data-testid="llm-monitor-panel"]');
-      return panel?.querySelector?.('.monitor-sort-controls') || document.querySelector('.monitor-sort-controls') || null;
+      const selector = '.monitor-sort-controls,[data-testid="monitor-sort-controls"]';
+      return panel?.querySelector?.(selector) || document.querySelector(selector) || null;
+    }
+
+    getSortObserverRoot() {
+      const panelSelector = '[data-testid="llm-monitor-panel"]';
+      return (this.sortRoot?.isConnected !== false ? this.sortRoot : null)
+        || document.querySelector(panelSelector)
+        || document.querySelector('main')
+        || document.body;
     }
 
     resetPreferenceApplication() {
@@ -4413,11 +4501,17 @@
       if (!this.active || this.applied || this.sortConvergenceExhausted || this.observer) return;
       if (this.retryTimer) window.clearInterval(this.retryTimer);
       this.retryTimer = null;
+      const observedRoot = this.getSortObserverRoot();
+      if (!observedRoot) {
+        this.startLowFrequencyRetry();
+        return;
+      }
       this.observer = new MutationObserver((records) => {
         if (this.mutationsNeedSortScan(records)) this.queueApply();
       });
-      this.observer.observe(document.querySelector('main') || document.body, {
+      this.observer.observe(observedRoot, {
         attributes: true,
+        attributeFilter: PROVIDER_SORT_OBSERVED_ATTRIBUTES,
         characterData: true,
         childList: true,
         subtree: true,
@@ -4434,10 +4528,10 @@
     mutationsNeedSortScan(records) {
       return [...(records || [])].some((record) => {
         const target = record.target?.nodeType === 1 ? record.target : record.target?.parentElement;
-        if (target?.closest?.('button.monitor-sort-head,.monitor-range-tabs button,[data-testid^="monitor-range-"]')) return true;
+        if (target?.closest?.(PROVIDER_SORT_MUTATION_SELECTOR)) return true;
         return [...record.addedNodes, ...record.removedNodes].some((node) => node.nodeType === 1
-          && (node.matches?.('button.monitor-sort-head,.monitor-range-tabs button,[data-testid^="monitor-range-"]')
-            || node.querySelector?.('button.monitor-sort-head,.monitor-range-tabs button,[data-testid^="monitor-range-"]')));
+          && (node.matches?.(PROVIDER_SORT_MUTATION_SELECTOR)
+            || node.querySelector?.(PROVIDER_SORT_MUTATION_SELECTOR)));
       });
     }
 
@@ -4488,8 +4582,8 @@
       const config = this.getProviderConfig();
       if (!this.applyRangePreference(config.providerRangePreference)) return false;
       const preference = config.providerSortPreference;
-      const scopedButtons = document.querySelectorAll('[data-testid="llm-monitor-panel"] .monitor-sort-controls button.monitor-sort-head');
-      const buttons = scopedButtons.length ? scopedButtons : document.querySelectorAll('button.monitor-sort-head');
+      const scopedButtons = document.querySelectorAll(PROVIDER_SCOPED_SORT_BUTTON_SELECTOR);
+      const buttons = scopedButtons.length ? scopedButtons : document.querySelectorAll(PROVIDER_SORT_BUTTON_SELECTOR);
       const target = findProviderSortButton(buttons, preference);
       if (!target) return false;
       const activeButton = findActiveProviderSortButton(buttons);
@@ -4818,6 +4912,7 @@
     getProviderSortButtonTexts,
     getProviderSortDirection,
     getProviderSortButtonDirection,
+    isProviderControlActive,
     findActiveProviderSortButton,
     shouldActivateProviderSort,
     findProviderSortButton,

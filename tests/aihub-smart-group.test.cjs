@@ -89,6 +89,8 @@ test('re-arms provider sorting only when the provider sort root is replaced', ()
   const routerSource = userscriptSource.slice(userscriptSource.indexOf('class AppRouter'), userscriptSource.indexOf('\n  return {'));
   assert.match(providerSource, /this\.sortRoot = null;/);
   assert.match(providerSource, /getSortRoot\(\) \{[\s\S]*monitor-sort-controls/);
+  assert.match(providerSource, /getSortObserverRoot\(\) \{[\s\S]*this\.sortRoot/);
+  assert.match(providerSource, /this\.observer\.observe\(observedRoot, \{[\s\S]*attributeFilter: PROVIDER_SORT_OBSERVED_ATTRIBUTES/);
   assert.match(providerSource, /syncSortRoot\(\) \{[\s\S]*nextRoot !== currentRoot/);
   assert.match(providerSource, /this\.sortRoot = nextRoot;[\s\S]*this\.resetPreferenceApplication\(\);/);
   assert.match(routerSource, /else if \(features\.providerSort && this\.providerSort\) \{\s*this\.providerSort\.syncSortRoot\(\);/);
@@ -100,7 +102,7 @@ test('does not re-arm applied provider sorting while the same sort root remains 
   const replacementRoot = { isConnected: true };
   let currentRoot = firstRoot;
   globalThis.document = {
-    querySelector: (selector) => (selector === '.monitor-sort-controls' ? currentRoot : null),
+    querySelector: (selector) => (selector.includes('monitor-sort-controls') ? currentRoot : null),
   };
 
   try {
@@ -410,6 +412,33 @@ test('matches the English provider sort controls while rejecting duplicate table
   assert.equal(core.findProviderSortButton([headerButton('Effective price / predicted multiplier')], 'realPrice'), null);
 });
 
+test('matches semantic provider sort controls without relying on visible text', () => {
+  const controls = {};
+  const semanticButton = (attributes) => ({
+    textContent: '',
+    className: '',
+    closest: (selector) => (selector.includes('monitor-sort-controls') ? controls : null),
+    getAttribute: (name) => attributes[name] || null,
+  });
+  const buttons = [
+    semanticButton({ 'data-testid': 'monitor-sort-default' }),
+    semanticButton({ 'data-testid': 'monitor-sort-multiplier' }),
+    semanticButton({ 'data-sort-key': 'realPrice' }),
+    semanticButton({ 'data-sort-by': 'user_speed' }),
+    semanticButton({ 'data-testid': 'monitor-sort-cache-hit' }),
+    semanticButton({ 'data-testid': 'monitor-sort-availability' }),
+    semanticButton({ 'data-testid': 'monitor-sort-custom' }),
+  ];
+
+  assert.equal(core.findProviderSortButton(buttons, 'default'), buttons[0]);
+  assert.equal(core.findProviderSortButton(buttons, 'rate'), buttons[1]);
+  assert.equal(core.findProviderSortButton(buttons, 'realPrice'), buttons[2]);
+  assert.equal(core.findProviderSortButton(buttons, 'user'), buttons[3]);
+  assert.equal(core.findProviderSortButton(buttons, 'cacheHit'), buttons[4]);
+  assert.equal(core.findProviderSortButton(buttons, 'successRate'), buttons[5]);
+  assert.equal(core.findProviderSortButton(buttons, 'custom'), buttons[6]);
+});
+
 test('keeps the legacy provider sort control fallback outside the new sort container', () => {
   const legacyButton = {
     textContent: '可用率 ↓',
@@ -430,6 +459,14 @@ test('uses the native low-to-high or high-to-low direction for every provider so
   assert.equal(core.getProviderSortButtonDirection({ textContent: '成功率 ↓ ' }), '↓');
   assert.equal(core.getProviderSortButtonDirection({ textContent: '用户速度' }), '');
   assert.equal(core.getProviderSortButtonDirection({ textContent: 'Multiplier', getAttribute: () => 'ascending' }), '↑');
+  assert.equal(core.getProviderSortButtonDirection({
+    textContent: 'Multiplier',
+    getAttribute: (name) => (name === 'aria-sort' ? 'none' : name === 'data-order' ? 'ascend' : null),
+  }), '↑');
+  assert.equal(core.getProviderSortButtonDirection({
+    textContent: 'Success rate',
+    getAttribute: (name) => (name === 'data-sort-direction' ? 'desc' : null),
+  }), '↓');
 
   const correctRate = { textContent: '倍率 ↑' };
   const reversedRate = { textContent: '倍率 ↓' };
@@ -441,6 +478,73 @@ test('uses the native low-to-high or high-to-low direction for every provider so
   const ariaOnly = { textContent: 'Multiplier', getAttribute: (name) => (name === 'aria-sort' ? 'ascending' : null) };
   assert.equal(core.findActiveProviderSortButton([{ textContent: 'Default' }, ariaOnly]), ariaOnly);
   assert.equal(core.shouldActivateProviderSort(ariaOnly, core.findActiveProviderSortButton([ariaOnly]), 'rate'), false);
+});
+
+test('recognizes ARIA and data-state provider controls as active', () => {
+  const withAttribute = (name, value) => ({
+    className: '',
+    getAttribute: (candidate) => (candidate === name ? value : null),
+  });
+  const ariaPressed = withAttribute('aria-pressed', 'true');
+  const ariaSelected = withAttribute('aria-selected', 'TRUE');
+  const dataState = withAttribute('data-state', 'active');
+  const inactive = withAttribute('data-state', 'inactive');
+
+  assert.equal(core.isProviderControlActive(ariaPressed), true);
+  assert.equal(core.isProviderControlActive(ariaSelected), true);
+  assert.equal(core.isProviderControlActive(dataState), true);
+  assert.equal(core.isProviderControlActive(inactive), false);
+  assert.equal(core.findActiveProviderSortButton([inactive, ariaPressed]), ariaPressed);
+  assert.equal(core.findActiveProviderRangeButton([inactive, dataState]), dataState);
+});
+
+test('observes mounted provider sort controls with a filtered attribute set', () => {
+  const originalWindow = globalThis.window;
+  const originalMutationObserver = globalThis.MutationObserver;
+  const sortRoot = { isConnected: true };
+  let observedRoot = null;
+  let observedOptions = null;
+  globalThis.window = {
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+    clearInterval: () => {},
+  };
+  globalThis.MutationObserver = class {
+    observe(root, options) {
+      observedRoot = root;
+      observedOptions = options;
+    }
+    disconnect() {}
+  };
+
+  try {
+    const enhancer = new core.ProviderSortEnhancer();
+    enhancer.active = true;
+    enhancer.sortRoot = sortRoot;
+    enhancer.observeUntilApplied();
+
+    assert.equal(observedRoot, sortRoot);
+    assert.equal(observedOptions.subtree, true);
+    assert.equal(observedOptions.characterData, true);
+    assert.deepEqual(observedOptions.attributeFilter, [
+      'class',
+      'aria-sort',
+      'aria-pressed',
+      'aria-selected',
+      'data-state',
+      'data-testid',
+      'data-sort-key',
+      'data-sort-by',
+      'data-sort-direction',
+      'data-direction',
+      'data-order',
+    ]);
+  } finally {
+    if (originalMutationObserver === undefined) delete globalThis.MutationObserver;
+    else globalThis.MutationObserver = originalMutationObserver;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
 });
 
 test('finds only the native provider hall refresh button', () => {
