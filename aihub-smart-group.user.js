@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.12.0
+// @version      0.12.1
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.12.0';
+  const SCRIPT_VERSION = '0.12.1';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -41,6 +41,7 @@
   const USAGE_AUDIT_RETRY_MS = 15_000;
   const USAGE_AUDIT_CACHE_LIMIT = 8;
   const PROVIDER_REFRESH_RETRY_MS = 1_000;
+  const PROVIDER_REFRESH_UNAVAILABLE_RETRY_MS = 5_000;
   const USAGE_DETAIL_REQUIRED_HEADERS = Object.freeze([
     'API 密钥',
     '模型',
@@ -158,6 +159,13 @@
     const interval = Number(intervalMs);
     if (!Number.isFinite(current) || !Number.isFinite(refreshedAt) || !Number.isFinite(interval) || interval <= 0) return 0;
     return Math.max(0, interval - Math.max(0, current - refreshedAt));
+  }
+
+  function getProviderRefreshTimerDelay(now, lastRefreshAt, intervalMs, refreshUnavailable = false) {
+    const minimumDelay = refreshUnavailable
+      ? PROVIDER_REFRESH_UNAVAILABLE_RETRY_MS
+      : PROVIDER_REFRESH_RETRY_MS;
+    return Math.max(minimumDelay, getProviderRefreshDelay(now, lastRefreshAt, intervalMs));
   }
 
   function shouldRunControllerRefresh({
@@ -3282,8 +3290,10 @@
       const config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
       if (!config.providerAutoRefresh) return;
       const intervalMs = config.providerRefreshIntervalSeconds * 1000;
-      if (refreshIfDue && isRefreshDue(Date.now(), this.lastRefreshAt, intervalMs)) this.refresh();
-      const delayMs = Math.max(PROVIDER_REFRESH_RETRY_MS, getProviderRefreshDelay(Date.now(), this.lastRefreshAt, intervalMs));
+      const now = Date.now();
+      const refreshDue = refreshIfDue && isRefreshDue(now, this.lastRefreshAt, intervalMs);
+      const refreshUnavailable = refreshDue && !this.refresh(config, now);
+      const delayMs = getProviderRefreshTimerDelay(Date.now(), this.lastRefreshAt, intervalMs, refreshUnavailable);
       this.refreshTimer = window.setTimeout(() => {
         this.refreshTimer = null;
         this.syncRefreshTimer(true);
@@ -3300,11 +3310,11 @@
       this.syncRefreshTimer(true);
     }
 
-    refresh() {
+    refresh(config, now = Date.now()) {
       if (!this.active || !isPageVisible()) return false;
-      const config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
-      if (!config.providerAutoRefresh
-        || !isRefreshDue(Date.now(), this.lastRefreshAt, config.providerRefreshIntervalSeconds * 1000)) return false;
+      const currentConfig = config || normalizeConfig(storageGet('config', DEFAULT_CONFIG));
+      if (!currentConfig.providerAutoRefresh
+        || !isRefreshDue(now, this.lastRefreshAt, currentConfig.providerRefreshIntervalSeconds * 1000)) return false;
       const button = findProviderRefreshButton(document.querySelectorAll('main button'));
       if (!button || button.disabled) return false;
       this.refreshing = true;
@@ -3520,6 +3530,7 @@
     shouldRefreshKeys,
     isRefreshDue,
     getProviderRefreshDelay,
+    getProviderRefreshTimerDelay,
     shouldRunControllerRefresh,
     isPageVisible,
     fetchMonitorSummary,
@@ -3531,6 +3542,7 @@
     buildUsageAuditRecordFromApiItem,
     fetchCurrentUsageAuditItems,
     UsageMultiplierEnhancer,
+    ProviderSortEnhancer,
     appendLogEntries,
     formatLogLine,
     start() {

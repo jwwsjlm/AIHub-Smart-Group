@@ -920,9 +920,109 @@ test('keeps provider auto refresh anchored to the last refresh time', () => {
   assert.equal(core.getProviderRefreshDelay(90_000, 0, 60_000), 0);
   assert.equal(core.getProviderRefreshDelay(10_000, 20_000, 60_000), 60_000);
   assert.equal(core.getProviderRefreshDelay(Number.NaN, 0, 60_000), 0);
+  assert.equal(core.getProviderRefreshTimerDelay(59_000, 0, 60_000), 1_000);
+  assert.equal(core.getProviderRefreshTimerDelay(59_999, 0, 60_000), 1_000);
+  assert.equal(core.getProviderRefreshTimerDelay(60_000, 0, 60_000), 1_000);
+  assert.equal(core.getProviderRefreshTimerDelay(60_000, 0, 60_000, true), 5_000);
+  assert.equal(core.getProviderRefreshTimerDelay(90_000, 0, 60_000, true), 5_000);
+  assert.equal(core.getProviderRefreshTimerDelay(10_000, 20_000, 60_000), 60_000);
+  assert.equal(core.getProviderRefreshTimerDelay(Number.NaN, 0, 60_000), 1_000);
+  assert.equal(core.getProviderRefreshTimerDelay(Number.NaN, 0, 60_000, true), 5_000);
   assert.match(providerEnhancerSource, /this\.refreshTimer = window\.setTimeout\(\(\) => \{/);
+  assert.match(providerEnhancerSource, /const refreshUnavailable = refreshDue && !this\.refresh\(config, now\);/);
+  assert.match(providerEnhancerSource, /getProviderRefreshTimerDelay\(Date\.now\(\), this\.lastRefreshAt, intervalMs, refreshUnavailable\)/);
+  assert.match(providerEnhancerSource, /if \(!this\.refreshing\) this\.syncRefreshTimer\(false\);/);
   assert.match(providerEnhancerSource, /if \(!isPageVisible\(\)\) \{\s*if \(this\.refreshTimer\) window\.clearTimeout\(this\.refreshTimer\);/);
   assert.doesNotMatch(providerEnhancerSource, /this\.refreshTimer = window\.setInterval/);
+});
+
+test('backs off provider DOM scans only while the native refresh button is unavailable', () => {
+  const originalWindow = globalThis.window;
+  const originalDocument = globalThis.document;
+  const originalLocalStorage = globalThis.localStorage;
+  const originalDateNow = Date.now;
+  const config = JSON.stringify({ providerAutoRefresh: true, providerRefreshIntervalSeconds: 60 });
+  let now = 60_000;
+  let buttons = [];
+  let scheduledDelay = null;
+  let storageReads = 0;
+  let domScans = 0;
+  let clicks = 0;
+  globalThis.localStorage = {
+    getItem: () => {
+      storageReads += 1;
+      return config;
+    },
+  };
+  globalThis.document = {
+    hidden: false,
+    querySelectorAll: (selector) => {
+      assert.equal(selector, 'main button');
+      domScans += 1;
+      return buttons;
+    },
+  };
+  globalThis.window = {
+    setTimeout: (callback, delay) => {
+      scheduledDelay = delay;
+      return 1;
+    },
+    clearTimeout: () => {},
+  };
+  Date.now = () => now;
+
+  try {
+    const enhancer = new core.ProviderSortEnhancer();
+    enhancer.active = true;
+    enhancer.lastRefreshAt = 0;
+    enhancer.syncRefreshTimer(true);
+    assert.equal(scheduledDelay, 5_000);
+    assert.equal(storageReads, 1);
+    assert.equal(domScans, 1);
+
+    buttons = [{ textContent: '刷新', disabled: true }];
+    scheduledDelay = null;
+    storageReads = 0;
+    domScans = 0;
+    enhancer.lastRefreshAt = 0;
+    enhancer.syncRefreshTimer(true);
+    assert.equal(scheduledDelay, 5_000);
+    assert.equal(storageReads, 1);
+    assert.equal(domScans, 1);
+
+    buttons = [{
+      textContent: '刷新',
+      disabled: false,
+      click: () => { clicks += 1; },
+    }];
+    scheduledDelay = null;
+    storageReads = 0;
+    domScans = 0;
+    enhancer.lastRefreshAt = 0;
+    enhancer.syncRefreshTimer(true);
+    assert.equal(clicks, 1);
+    assert.equal(enhancer.lastRefreshAt, 60_000);
+    assert.equal(scheduledDelay, 60_000);
+    assert.equal(storageReads, 1);
+    assert.equal(domScans, 1);
+
+    scheduledDelay = null;
+    storageReads = 0;
+    domScans = 0;
+    enhancer.lastRefreshAt = 1_000;
+    enhancer.syncRefreshTimer(true);
+    assert.equal(scheduledDelay, 1_000);
+    assert.equal(storageReads, 1);
+    assert.equal(domScans, 0);
+  } finally {
+    Date.now = originalDateNow;
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+    if (originalLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = originalLocalStorage;
+  }
 });
 
 test('runs controller polling when expanded and due', () => {
