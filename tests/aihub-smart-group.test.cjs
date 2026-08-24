@@ -757,6 +757,9 @@ test('does not retain the raw provider rows beside normalized history', () => {
   const items = [{
     code: 'A001',
     group_id: 1,
+    rate_multiplier: 0.08,
+    avg_ping_ms: 123,
+    debug_payload: { unused: 'discard me' },
     history: Array.from({ length: 40 }, (_, index) => ({
       probed_at: new Date(1_700_000_000_000 + (index * 60_000)).toISOString(),
       status: index % 2 ? 'operational' : 'failed',
@@ -769,6 +772,11 @@ test('does not retain the raw provider rows beside normalized history', () => {
 
   assert.equal(Object.hasOwn(normalized, 'items'), false);
   assert.equal(normalized.apis[0].history.length, 40);
+  assert.equal(normalized.apis[0].planType, 'A001');
+  assert.equal(normalized.apis[0].priceMultiplier, 0.08);
+  for (const rawKey of ['code', 'rate_multiplier', 'avg_ping_ms', 'debug_payload']) {
+    assert.equal(Object.hasOwn(normalized.apis[0], rawKey), false);
+  }
   assert.ok(JSON.stringify(normalized).length < JSON.stringify(legacyShape).length);
 });
 
