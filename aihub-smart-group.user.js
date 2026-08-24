@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.41
+// @version      0.14.42
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.41';
+  const SCRIPT_VERSION = '0.14.42';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -559,18 +559,31 @@
     };
   }
 
+  function getNormalizedCandidateFilterState(normalizedConfig) {
+    const availabilityThreshold = normalizedConfig.availabilityMode === 'successes'
+      ? normalizedConfig.minSuccessPoints10m
+      : normalizedConfig.availabilityMode === 'consecutive'
+        ? normalizedConfig.minConsecutiveSuccesses10m
+        : normalizedConfig.minSuccess10m;
+    return {
+      availabilityMode: normalizedConfig.availabilityMode,
+      availabilityThreshold,
+      minSla: normalizedConfig.minSla,
+      minOutputTokensPerSecond: normalizedConfig.minOutputTokensPerSecond,
+      requireNoWarnings: normalizedConfig.requireNoWarnings,
+      excludedGroupKeywords: normalizedConfig.excludedGroupKeywords,
+    };
+  }
+
+  function getCandidateFilterSignature(config = DEFAULT_CONFIG) {
+    return JSON.stringify(getNormalizedCandidateFilterState(normalizeConfig(config)));
+  }
+
   function getRecommendationPricePreviewSignature(config = DEFAULT_CONFIG) {
     const normalized = normalizeConfig(config);
     return JSON.stringify({
       recommendationPriceBasis: normalized.recommendationPriceBasis,
-      availabilityMode: normalized.availabilityMode,
-      minSuccess10m: normalized.minSuccess10m,
-      minSuccessPoints10m: normalized.minSuccessPoints10m,
-      minConsecutiveSuccesses10m: normalized.minConsecutiveSuccesses10m,
-      minSla: normalized.minSla,
-      minOutputTokensPerSecond: normalized.minOutputTokensPerSecond,
-      requireNoWarnings: normalized.requireNoWarnings,
-      excludedGroupKeywords: normalized.excludedGroupKeywords,
+      ...getNormalizedCandidateFilterState(normalized),
     });
   }
 
@@ -1838,19 +1851,9 @@
 
   function getCandidateAnalysisSignature(config = DEFAULT_CONFIG) {
     const normalizedConfig = normalizeConfig(config);
-    const availabilityThreshold = normalizedConfig.availabilityMode === 'successes'
-      ? normalizedConfig.minSuccessPoints10m
-      : normalizedConfig.availabilityMode === 'consecutive'
-        ? normalizedConfig.minConsecutiveSuccesses10m
-        : normalizedConfig.minSuccess10m;
     return JSON.stringify({
       recommendationPriceBasis: normalizedConfig.mode === 'price' ? normalizedConfig.recommendationPriceBasis : 'nominal',
-      availabilityMode: normalizedConfig.availabilityMode,
-      availabilityThreshold,
-      minSla: normalizedConfig.minSla,
-      minOutputTokensPerSecond: normalizedConfig.minOutputTokensPerSecond,
-      requireNoWarnings: normalizedConfig.requireNoWarnings,
-      excludedGroupKeywords: normalizedConfig.excludedGroupKeywords,
+      ...getNormalizedCandidateFilterState(normalizedConfig),
       latencySource: normalizedConfig.latencySource,
       userTtftWindow: normalizedConfig.latencySource === 'user' ? normalizedConfig.userTtftWindow : null,
       minUserTtftSamples: normalizedConfig.latencySource === 'user' ? normalizedConfig.minUserTtftSamples : null,
@@ -2663,12 +2666,7 @@
       latencySource: normalized.latencySource,
       userTtftWindow: normalized.latencySource === 'user' ? normalized.userTtftWindow : null,
       minUserTtftSamples: normalized.latencySource === 'user' ? normalized.minUserTtftSamples : null,
-      availabilityMode: normalized.availabilityMode,
-      minSuccess10m: normalized.minSuccess10m,
-      minSuccessPoints10m: normalized.minSuccessPoints10m,
-      minConsecutiveSuccesses10m: normalized.minConsecutiveSuccesses10m,
-      requireNoWarnings: normalized.requireNoWarnings,
-      excludedGroupKeywords: normalized.excludedGroupKeywords,
+      ...getNormalizedCandidateFilterState(normalized),
     });
   }
 
@@ -3893,14 +3891,7 @@
       const candidateCount = getEligibleCandidates(previewRows, { ...normalizedDraft, mode: 'balance' })
         .filter((candidate) => candidate.price <= normalizedDraft.balanceMaxPrice).length;
       const hasUnsavedFilter = normalizedDraft.balanceMaxPrice !== this.config.balanceMaxPrice
-        || normalizedDraft.minSuccess10m !== this.config.minSuccess10m
-        || normalizedDraft.availabilityMode !== this.config.availabilityMode
-        || normalizedDraft.minSuccessPoints10m !== this.config.minSuccessPoints10m
-        || normalizedDraft.minConsecutiveSuccesses10m !== this.config.minConsecutiveSuccesses10m
-        || normalizedDraft.minSla !== this.config.minSla
-        || normalizedDraft.minOutputTokensPerSecond !== this.config.minOutputTokensPerSecond
-        || normalizedDraft.requireNoWarnings !== this.config.requireNoWarnings
-        || normalizedDraft.excludedGroupKeywords !== this.config.excludedGroupKeywords
+        || getCandidateFilterSignature(normalizedDraft) !== getCandidateFilterSignature(this.config)
         || normalizedDraft.latencySource !== this.config.latencySource
         || (normalizedDraft.latencySource === 'user'
           && normalizedDraft.userTtftWindow !== this.config.userTtftWindow)
@@ -6181,6 +6172,7 @@
     RECOMMENDATION_PRICE_BASIS_LABELS,
     normalizeConfig,
     getSettingsPreviewTargets,
+    getCandidateFilterSignature,
     getRecommendationPricePreviewSignature,
     normalizeGroupMode,
     normalizeAvailabilityMode,

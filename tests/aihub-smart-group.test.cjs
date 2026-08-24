@@ -616,6 +616,15 @@ test('marks the price preview pending for unsaved candidate filters only', () =>
     ...core.DEFAULT_CONFIG,
     minOutputTokensPerSecond: 120,
   }));
+  assert.notEqual(signature, core.getRecommendationPricePreviewSignature({
+    ...core.DEFAULT_CONFIG,
+    minSuccess10m: 0.5,
+  }));
+  assert.equal(signature, core.getRecommendationPricePreviewSignature({
+    ...core.DEFAULT_CONFIG,
+    minSuccessPoints10m: 5,
+    minConsecutiveSuccesses10m: 5,
+  }));
   assert.equal(signature, core.getRecommendationPricePreviewSignature({
     ...core.DEFAULT_CONFIG,
     providerAutoRefresh: false,
@@ -2690,6 +2699,7 @@ test('binds reusable candidate analyses to the current rows and relevant normali
     { ...config, mode: 'price', recommendationPriceBasis: 'effectiveInput1h' },
     { ...config, availabilityMode: 'successes', minSuccessPoints10m: 2 },
     { ...config, minSuccess10m: 0.5 },
+    { ...config, minSla: 0.8 },
     { ...config, minOutputTokensPerSecond: 120 },
     { ...config, requireNoWarnings: false },
     { ...config, excludedGroupKeywords: 'cached' },
@@ -3154,6 +3164,31 @@ test('resets winner stability when the recommendation strategy changes', () => {
   assert.equal(state.count, 1);
   assert.equal(state.stable, false);
   assert.equal(state.strategySignature, effectiveSignature);
+});
+
+test('binds stability to active candidate filters only', () => {
+  const baseline = core.getRecommendationStrategySignature(core.DEFAULT_CONFIG);
+  const filterSignature = core.getCandidateFilterSignature(core.DEFAULT_CONFIG);
+
+  for (const variant of [
+    { minSuccess10m: 0.5 },
+    { minSla: 0.8 },
+    { minOutputTokensPerSecond: 120 },
+    { requireNoWarnings: false },
+    { excludedGroupKeywords: 'free' },
+  ]) {
+    const config = { ...core.DEFAULT_CONFIG, ...variant };
+    assert.notEqual(core.getRecommendationStrategySignature(config), baseline);
+    assert.notEqual(core.getCandidateFilterSignature(config), filterSignature);
+  }
+
+  const inactiveThresholds = {
+    ...core.DEFAULT_CONFIG,
+    minSuccessPoints10m: 5,
+    minConsecutiveSuccesses10m: 5,
+  };
+  assert.equal(core.getRecommendationStrategySignature(inactiveThresholds), baseline);
+  assert.equal(core.getCandidateFilterSignature(inactiveThresholds), filterSignature);
 });
 
 test('blocks switching when the cached recommendation price snapshot is no longer current', () => {
