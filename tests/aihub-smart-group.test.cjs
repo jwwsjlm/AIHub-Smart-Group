@@ -213,6 +213,24 @@ test('re-arms provider sorting only when the provider sort root is replaced', ()
   assert.match(routerSource, /else if \(features\.providerSort && this\.providerSort\) \{\s*this\.providerSort\.syncSortRoot\(\);/);
 });
 
+test('backs off provider sort discovery and pauses retries in the background', () => {
+  const providerSource = userscriptSource.slice(userscriptSource.indexOf('class ProviderSortEnhancer'), userscriptSource.indexOf('class AppRouter'));
+
+  assert.equal(core.getProviderSortRetryDelay(0), 5_000);
+  assert.equal(core.getProviderSortRetryDelay(1), 10_000);
+  assert.equal(core.getProviderSortRetryDelay(2), 20_000);
+  assert.equal(core.getProviderSortRetryDelay(3), 40_000);
+  assert.equal(core.getProviderSortRetryDelay(4), 60_000);
+  assert.equal(core.getProviderSortRetryDelay(20), 60_000);
+  assert.match(providerSource, /const delay = getProviderSortRetryDelay\(this\.sortRetryAttemptCount\);/);
+  assert.match(providerSource, /this\.sortRetryAttemptCount \+= 1;/);
+  assert.match(providerSource, /if \(this\.syncSortRoot\(\)\) return;/);
+  assert.match(providerSource, /if \(this\.retryTimer\) window\.clearTimeout\(this\.retryTimer\);/);
+  assert.match(providerSource, /if \(!this\.applied && !this\.sortConvergenceExhausted\) \{\s*this\.syncSortRoot\(\);\s*this\.observeUntilApplied\(\);\s*this\.queueApply\(\);/);
+  assert.doesNotMatch(providerSource, /this\.retryTimer = window\.setInterval/);
+  assert.doesNotMatch(providerSource, /clearInterval\(this\.retryTimer\)/);
+});
+
 test('does not re-arm applied provider sorting while the same sort root remains mounted', () => {
   const originalDocument = globalThis.document;
   const firstRoot = { isConnected: true };

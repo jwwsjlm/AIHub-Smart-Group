@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.36
+// @version      0.14.37
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.36';
+  const SCRIPT_VERSION = '0.14.37';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -55,6 +55,8 @@
   const PROVIDER_CUSTOM_WEIGHT_MAX_ATTEMPTS = 4;
   const PROVIDER_RANGE_MAX_CLICKS = 1;
   const PROVIDER_SORT_VERIFY_DELAY_MS = 250;
+  const PROVIDER_SORT_RETRY_BASE_MS = 5_000;
+  const PROVIDER_SORT_RETRY_MAX_MS = 60_000;
   const PROVIDER_RANGE_CONTROL_RETRY_MS = 250;
   const PROVIDER_RANGE_CONTROL_WAIT_TIMEOUT_MS = 5_000;
   const PROVIDER_REFRESH_RETRY_MS = 1_000;
@@ -468,6 +470,11 @@
     const completedAt = Number(lastCompletedAt);
     if (!Number.isFinite(completedAt) || completedAt <= 0) return 1_000;
     return Math.max(1_000, getProviderRefreshDelay(now, completedAt, USAGE_REFRESH_INTERVAL_MS));
+  }
+
+  function getProviderSortRetryDelay(attemptCount) {
+    const attempt = Math.max(0, Math.floor(Number(attemptCount) || 0));
+    return Math.min(PROVIDER_SORT_RETRY_MAX_MS, PROVIDER_SORT_RETRY_BASE_MS * (2 ** Math.min(attempt, 4)));
   }
 
   function shouldRunControllerRefresh({
@@ -5461,6 +5468,7 @@
       this.refreshSawDataChange = false;
       this.refreshNoChangeRetryCount = 0;
       this.sortClickCount = 0;
+      this.sortRetryAttemptCount = 0;
       this.sortConvergenceExhausted = false;
       this.sortClickPending = false;
       this.sortPendingStateSignature = '';
@@ -5564,6 +5572,7 @@
       this.clearRangeControlWait();
       this.applied = false;
       this.sortClickCount = 0;
+      this.sortRetryAttemptCount = 0;
       this.sortConvergenceExhausted = false;
       this.sortClickPending = false;
       this.sortPendingStateSignature = '';
@@ -5625,7 +5634,7 @@
 
     observeUntilApplied() {
       if (!this.active || this.applied || this.sortConvergenceExhausted || this.observer) return;
-      if (this.retryTimer) window.clearInterval(this.retryTimer);
+      if (this.retryTimer) window.clearTimeout(this.retryTimer);
       this.retryTimer = null;
       const observedRoot = this.getSortObserverRoot();
       if (!observedRoot) {
@@ -5662,8 +5671,16 @@
     }
 
     startLowFrequencyRetry() {
-      if (!this.active || this.applied || this.sortConvergenceExhausted || this.retryTimer) return;
-      this.retryTimer = window.setInterval(() => this.queueApply(), 5_000);
+      if (!this.active || !isPageVisible() || this.applied || this.sortConvergenceExhausted || this.retryTimer) return;
+      const delay = getProviderSortRetryDelay(this.sortRetryAttemptCount);
+      this.retryTimer = window.setTimeout(() => {
+        this.retryTimer = null;
+        if (!this.active || !isPageVisible() || this.applied || this.sortConvergenceExhausted) return;
+        this.sortRetryAttemptCount += 1;
+        if (this.syncSortRoot()) return;
+        this.queueApply();
+        this.startLowFrequencyRetry();
+      }, delay);
     }
 
     stop() {
@@ -5785,7 +5802,7 @@
       this.observer?.disconnect();
       this.observer = null;
       if (this.observerDeadlineTimer) window.clearTimeout(this.observerDeadlineTimer);
-      if (this.retryTimer) window.clearInterval(this.retryTimer);
+      if (this.retryTimer) window.clearTimeout(this.retryTimer);
       if (this.sortVerifyTimer) window.clearTimeout(this.sortVerifyTimer);
       this.observerDeadlineTimer = null;
       this.retryTimer = null;
@@ -5817,8 +5834,15 @@
       if (!this.active) return;
       if (!isPageVisible()) {
         if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
+        if (this.retryTimer) window.clearTimeout(this.retryTimer);
         this.refreshTimer = null;
+        this.retryTimer = null;
         return;
+      }
+      if (!this.applied && !this.sortConvergenceExhausted) {
+        this.syncSortRoot();
+        this.observeUntilApplied();
+        this.queueApply();
       }
       this.syncRefreshTimer(true);
     }
@@ -6223,6 +6247,7 @@
     getProviderRefreshDelay,
     getProviderRefreshTimerDelay,
     getUsageRefreshTimerDelay,
+    getProviderSortRetryDelay,
     shouldRunControllerRefresh,
     installHistoryChangeListener,
     isPageVisible,
