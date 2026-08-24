@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.33
+// @version      0.14.34
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.33';
+  const SCRIPT_VERSION = '0.14.34';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -2082,6 +2082,38 @@
     return { remainingMs, active: remainingMs > 0, label: remainingMs > 0 ? `剩余 ${formatRemainingTime(remainingMs)}` : '冷却已结束' };
   }
 
+  function getRelativeAgeNextChangeDelay(timestamp, now = Date.now()) {
+    const parsed = parseMonitorSampleTimestamp(timestamp);
+    const current = Number(now);
+    if (!Number.isFinite(parsed) || !Number.isFinite(current)) return null;
+    const rawAgeMs = current - parsed;
+    if (rawAgeMs < 0) return -rawAgeMs + 5_000;
+    const seconds = Math.floor(rawAgeMs / 1000);
+    if (seconds < 5) return 5_000 - rawAgeMs;
+    if (seconds < 60) return (seconds + 1) * 1000 - rawAgeMs;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return (minutes + 1) * 60_000 - rawAgeMs;
+    const hours = Math.floor(minutes / 60);
+    return (hours + 1) * 60 * 60_000 - rawAgeMs;
+  }
+
+  function getTimeSensitiveUpdateDelay(options = {}) {
+    const now = Number(options.now ?? Date.now());
+    if (!Number.isFinite(now)) return null;
+    const delays = [];
+    const generatedAt = parseMonitorSampleTimestamp(options.monitorGeneratedAt);
+    const ageDelay = getRelativeAgeNextChangeDelay(generatedAt, now);
+    if (ageDelay !== null) {
+      delays.push(ageDelay);
+      const staleAt = generatedAt + Math.max(0, Number(options.maxMonitorAgeSeconds) || 0) * 1000;
+      if (now <= staleAt) delays.push(staleAt - now + 1);
+    }
+    const cooldown = getCooldownInfo(options.lastSwitchAt, options.cooldownMinutes, now);
+    if (cooldown.active) delays.push(Math.min(1000, cooldown.remainingMs));
+    if (!delays.length) return null;
+    return Math.max(50, Math.ceil(Math.min(...delays)));
+  }
+
   function attachRecentAvailability(rows, seriesPayload, windowMs = MONITOR_AVAILABILITY_WINDOW_MS) {
     const anchor = getMonitorSeriesWindowAnchor(seriesPayload);
     const now = anchor === null ? Date.now() : anchor;
@@ -3415,16 +3447,32 @@
     }
 
     syncUiTimer() {
-      if (this.uiTimer) window.clearInterval(this.uiTimer);
+      if (this.uiTimer) window.clearTimeout(this.uiTimer);
       this.uiTimer = null;
       if (!this.active || this.minimized || !isPageVisible()) return;
-      this.uiTimer = window.setInterval(() => this.renderTimeSensitiveState(), 1000);
+      const cooldownInput = this.panel?.querySelector('[data-setting="cooldownMinutes"]');
+      const cooldownMinutes = cooldownInput?.value?.trim() !== '' && cooldownInput?.checkValidity?.()
+        ? normalizeConfig({ ...this.config, cooldownMinutes: cooldownInput.value }).cooldownMinutes
+        : this.config.cooldownMinutes;
+      const delay = getTimeSensitiveUpdateDelay({
+        monitorGeneratedAt: this.monitorGeneratedAt,
+        maxMonitorAgeSeconds: this.config.maxMonitorAgeSeconds,
+        lastSwitchAt: this.lastSwitch.at,
+        cooldownMinutes,
+      });
+      if (delay === null) return;
+      this.uiTimer = window.setTimeout(() => {
+        this.uiTimer = null;
+        if (!this.active || this.minimized || !isPageVisible()) return;
+        this.renderTimeSensitiveState();
+        this.syncUiTimer();
+      }, delay);
     }
 
     stop() {
       this.active = false;
       if (this.timer) window.clearTimeout(this.timer);
-      if (this.uiTimer) window.clearInterval(this.uiTimer);
+      if (this.uiTimer) window.clearTimeout(this.uiTimer);
       this.timer = null;
       this.uiTimer = null;
       this.summaryRows = [];
@@ -3623,6 +3671,7 @@
       this.panel.addEventListener('input', (event) => {
         if (event.target.matches('[data-setting]') && event.target.dataset.setting !== 'availabilityMode') {
           this.renderSettingsPreviews(event.target.dataset.setting);
+          if (event.target.dataset.setting === 'cooldownMinutes') this.syncUiTimer();
         }
       });
       this.panel.addEventListener('change', (event) => {
@@ -3847,6 +3896,7 @@
       window.dispatchEvent(new window.CustomEvent(CONFIG_CHANGE_EVENT));
       this.syncSettingsInputs();
       this.syncPollingTimer();
+      this.syncUiTimer();
       this.setStatus('设置已保存');
       this.log('info', '设置已保存');
       this.refresh(true);
@@ -3991,6 +4041,7 @@
         if (this.active) {
           this.renderActionState();
           this.syncPollingTimer();
+          this.syncUiTimer();
         }
       }
     }
@@ -4125,6 +4176,7 @@
         this.setStatus(`已切换到 ${winner.name}`);
         this.log('info', `已切换到${winner.name}`);
         this.renderData();
+        this.syncUiTimer();
         return true;
       } catch (error) {
         if (!this.active) return false;
@@ -6060,6 +6112,7 @@
     compactMonitorProbeSeries,
     getMonitorFreshnessTimestamp,
     getCooldownInfo,
+    getTimeSensitiveUpdateDelay,
     attachRecentAvailability,
     attachUserTtftWindow,
     shouldUseUserTtftSeries,

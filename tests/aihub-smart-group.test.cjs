@@ -2380,6 +2380,38 @@ test('computes availability from valid monitor samples in the latest 10 minutes'
   assert.equal(enriched[1].recentSampleCount, 0);
 });
 
+test('schedules time-sensitive UI updates only when their visible state can change', () => {
+  const now = Date.parse('2026-08-24T06:00:00Z');
+
+  assert.equal(core.getTimeSensitiveUpdateDelay({
+    now,
+    monitorGeneratedAt: now - 10_500,
+    maxMonitorAgeSeconds: 600,
+  }), 500);
+  assert.equal(core.getTimeSensitiveUpdateDelay({
+    now,
+    monitorGeneratedAt: now - 5 * 60_000 - 10_000,
+    maxMonitorAgeSeconds: 600,
+  }), 50_000);
+  assert.equal(core.getTimeSensitiveUpdateDelay({
+    now,
+    monitorGeneratedAt: now - 599_500,
+    maxMonitorAgeSeconds: 600,
+  }), 500);
+  assert.equal(core.getTimeSensitiveUpdateDelay({
+    now: now + 500,
+    monitorGeneratedAt: now - 599_500,
+    maxMonitorAgeSeconds: 600,
+  }), 50);
+  assert.equal(core.getTimeSensitiveUpdateDelay({
+    now,
+    monitorGeneratedAt: null,
+    lastSwitchAt: now - 30_250,
+    cooldownMinutes: 1,
+  }), 1_000);
+  assert.equal(core.getTimeSensitiveUpdateDelay({ now, monitorGeneratedAt: null, cooldownMinutes: 0 }), null);
+});
+
 test('aggregates real-user TTFT windows with sample-count weighting', () => {
   const now = Date.parse('2026-08-24T06:00:00Z');
   const rows = [{ id: 1, userAvgTtftMs: 999, userSampleCount: 99, userHasData: true }];
@@ -4205,7 +4237,9 @@ test('pauses the controller UI timer while minimized or the page is hidden', () 
   assert.match(controllerSource, /syncUiTimer\(\) \{[\s\S]*if \(!this\.active \|\| this\.minimized \|\| !isPageVisible\(\)\) return;/);
   assert.match(controllerSource, /this\.syncUiTimer\(\);[\s\S]*if \(!isPageVisible\(\)\) return;/);
   assert.match(controllerSource, /this\.syncUiTimer\(\);[\s\S]*if \(wasMinimized === this\.minimized\) return;/);
-  assert.doesNotMatch(controllerSource, /this\.uiTimer = window\.setInterval\(\(\) => \{\s*if \(isPageVisible\(\) && !this\.minimized\)/);
+  assert.match(controllerSource, /const delay = getTimeSensitiveUpdateDelay\(/);
+  assert.match(controllerSource, /this\.uiTimer = window\.setTimeout\(/);
+  assert.doesNotMatch(controllerSource, /this\.uiTimer = window\.setInterval/);
 });
 
 test('does not duplicate a foreground controller refresh before the completion interval elapses', () => {
