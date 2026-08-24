@@ -126,16 +126,76 @@ test('replaces duplicate router instances and releases their global resources', 
   assert.match(userscriptSource, /activeRouter\?\.stop\(\);\s*document\.dispatchEvent\(new window\.Event\(ROUTER_REPLACE_EVENT\)\);\s*activeRouter = new AppRouter\(\);/);
 });
 
-test('rebinds the usage observer when the SPA replaces its main element', () => {
+test('rebinds the usage observers when the SPA replaces its main element', () => {
   const usageSource = userscriptSource.slice(userscriptSource.indexOf('class UsageMultiplierEnhancer'), userscriptSource.indexOf('class ProviderSortEnhancer'));
+  const mainObserverSource = usageSource.slice(
+    usageSource.indexOf('\n    syncObserverRoot() {'),
+    usageSource.indexOf('\n    disconnectUsageDetailObserver() {'),
+  );
+  const detailObserverSource = usageSource.slice(
+    usageSource.indexOf('\n    syncUsageDetailObserver('),
+    usageSource.indexOf('\n    mutationsNeedRender('),
+  );
   assert.match(usageSource, /this\.observedRoot = null;/);
+  assert.match(usageSource, /this\.observedDetailRoots = new Set\(\);/);
   assert.match(usageSource, /if \(nextRoot === this\.observedRoot && nextRoot\.isConnected\) return false;/);
-  assert.match(usageSource, /this\.observer\.disconnect\(\);\s*this\.observer\.takeRecords\?\.\(\);\s*this\.observedRoot = null;\s*this\.observer\.observe\(nextRoot/);
-  assert.match(usageSource, /attributes: true,\s*attributeFilter: \['data-row-id', 'data-field'\],\s*characterData: true/);
+  assert.match(mainObserverSource, /this\.disconnectUsageDetailObserver\(\);\s*this\.observer\.disconnect\(\);\s*this\.observer\.takeRecords\?\.\(\);\s*this\.observedRoot = null;\s*this\.observer\.observe\(nextRoot/);
+  assert.match(mainObserverSource, /attributes: true,\s*attributeFilter: \['data-row-id', 'data-field'\]/);
+  assert.doesNotMatch(mainObserverSource, /characterData:/);
+  assert.match(detailObserverSource, /attributes: true,\s*attributeFilter: \['data-row-id', 'data-field'\],\s*characterData: true/);
+  assert.match(usageSource, /this\.disconnectUsageDetailObserver\(\);\s*this\.detailObserver = null;/);
   assert.match(usageSource, /record\.type === 'attributes' && target\?\.matches\?\.\('tr\[data-row-id\]'\)/);
   assert.match(usageSource, /target\?\.closest\?\.\('\[data-field\]'\)/);
   assert.match(usageSource, /record\.target === currentRoot \|\| currentRoot\.contains\(record\.target\)/);
   assert.match(userscriptSource, /else if \(features\.usage && this\.usage\) \{\s*this\.usage\.syncObserverRoot\(\);\s*this\.usage\.syncUsageQueryPath\(\);/);
+});
+
+test('observes usage text only inside the current detail tables and mobile lists', () => {
+  const enhancer = new core.UsageMultiplierEnhancer();
+  const observations = [];
+  let disconnects = 0;
+  let drains = 0;
+  enhancer.active = true;
+  enhancer.detailObserver = {
+    disconnect: () => { disconnects += 1; },
+    takeRecords: () => { drains += 1; },
+    observe: (root, options) => observations.push({ root, options }),
+  };
+  const table = { isConnected: true };
+  const firstList = { isConnected: true };
+  const secondList = { isConnected: true };
+
+  assert.equal(enhancer.syncUsageDetailObserver([table], [
+    { container: firstList },
+    { container: firstList },
+  ]), true);
+  assert.equal(disconnects, 1);
+  assert.equal(drains, 1);
+  assert.deepEqual(observations.map(({ root }) => root), [table, firstList]);
+  for (const { options } of observations) {
+    assert.deepEqual(options, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['data-row-id', 'data-field'],
+      characterData: true,
+    });
+  }
+
+  assert.equal(enhancer.syncUsageDetailObserver([table], [{ container: firstList }]), false);
+  assert.equal(disconnects, 1);
+  assert.equal(observations.length, 2);
+
+  observations.length = 0;
+  assert.equal(enhancer.syncUsageDetailObserver([table], [{ container: secondList }]), true);
+  assert.equal(disconnects, 2);
+  assert.deepEqual(observations.map(({ root }) => root), [table, secondList]);
+
+  observations.length = 0;
+  assert.equal(enhancer.syncUsageDetailObserver([], []), true);
+  assert.equal(disconnects, 3);
+  assert.equal(enhancer.observedDetailRoots.size, 0);
+  assert.equal(observations.length, 0);
 });
 
 test('re-arms provider sorting only when the provider sort root is replaced', () => {

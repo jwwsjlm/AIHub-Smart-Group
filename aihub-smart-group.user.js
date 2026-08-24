@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.24
+// @version      0.14.25
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.24';
+  const SCRIPT_VERSION = '0.14.25';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -4602,6 +4602,8 @@
       this.summaryByTable = new Map();
       this.observer = null;
       this.observedRoot = null;
+      this.detailObserver = null;
+      this.observedDetailRoots = new Set();
       this.renderQueued = false;
       this.active = false;
       this.refreshTimer = null;
@@ -4631,6 +4633,14 @@
           : [];
         if (this.mutationsNeedRender(currentRecords)) this.queueRender();
       });
+      this.detailObserver = new MutationObserver((records) => {
+        const currentRoots = [...this.observedDetailRoots];
+        const currentRecords = currentRoots.length
+          ? [...records].filter((record) => currentRoots
+            .some((root) => record.target === root || root.contains(record.target)))
+          : [];
+        if (this.mutationsNeedRender(currentRecords)) this.queueRender();
+      });
       this.syncObserverRoot();
       this.refresh(true);
       this.refreshTimer = window.setInterval(() => {
@@ -4644,6 +4654,8 @@
       this.observer?.takeRecords?.();
       this.observer = null;
       this.observedRoot = null;
+      this.disconnectUsageDetailObserver();
+      this.detailObserver = null;
       if (this.refreshTimer) window.clearInterval(this.refreshTimer);
       if (this.renderTimer) window.clearTimeout(this.renderTimer);
       if (this.usageRetryTimer !== null) window.clearTimeout(this.usageRetryTimer);
@@ -4672,6 +4684,7 @@
       const nextRoot = document.querySelector('main') || document.body;
       if (!nextRoot) return false;
       if (nextRoot === this.observedRoot && nextRoot.isConnected) return false;
+      this.disconnectUsageDetailObserver();
       this.observer.disconnect();
       this.observer.takeRecords?.();
       this.observedRoot = null;
@@ -4680,10 +4693,41 @@
         subtree: true,
         attributes: true,
         attributeFilter: ['data-row-id', 'data-field'],
-        characterData: true,
       });
       this.observedRoot = nextRoot;
       this.queueRender();
+      return true;
+    }
+
+    disconnectUsageDetailObserver() {
+      const hadRoots = this.observedDetailRoots.size > 0;
+      this.detailObserver?.disconnect();
+      this.detailObserver?.takeRecords?.();
+      this.observedDetailRoots.clear();
+      return hadRoots;
+    }
+
+    syncUsageDetailObserver(detailTables = [], mobileContexts = []) {
+      if (!this.active || !this.detailObserver) return false;
+      const nextRoots = new Set([
+        ...(detailTables || []),
+        ...(mobileContexts || []).map((context) => context.container || context.record),
+      ].filter((root) => root?.isConnected));
+      const rootsUnchanged = nextRoots.size === this.observedDetailRoots.size
+        && [...nextRoots].every((root) => this.observedDetailRoots.has(root));
+      if (rootsUnchanged) return false;
+
+      this.disconnectUsageDetailObserver();
+      this.observedDetailRoots = nextRoots;
+      for (const root of nextRoots) {
+        this.detailObserver.observe(root, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['data-row-id', 'data-field'],
+          characterData: true,
+        });
+      }
       return true;
     }
 
@@ -4748,11 +4792,12 @@
       this.config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
       const tables = [...document.querySelectorAll('table')];
       const tableContexts = tables.map((table) => ({ table, indexes: this.getTableColumnIndexes(table) }));
-      for (const { table, indexes } of tableContexts) this.renderMultipliers(table, indexes);
       const mobileContexts = findUsageMobileRecordContexts(document);
-      this.renderMobileMultipliers(mobileContexts);
       const detailContexts = tableContexts.filter(({ table, indexes }) => this.isUsageDetailTable(table, indexes));
       const detailTables = detailContexts.map(({ table }) => table);
+      this.syncUsageDetailObserver(detailTables, mobileContexts);
+      for (const { table, indexes } of tableContexts) this.renderMultipliers(table, indexes);
+      this.renderMobileMultipliers(mobileContexts);
       this.syncUsageAuditView(detailTables, mobileContexts);
       const activeAnchors = new Set([
         ...detailTables,
