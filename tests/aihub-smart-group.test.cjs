@@ -772,6 +772,7 @@ test('does not retain the raw provider rows beside normalized history', () => {
 
   assert.equal(Object.hasOwn(normalized, 'items'), false);
   assert.equal(normalized.apis[0].history.length, 40);
+  assert.deepEqual(normalized.apis[0].history[0], [1_700_000_000_000, 0, 2]);
   assert.equal(normalized.apis[0].planType, 'A001');
   assert.equal(normalized.apis[0].priceMultiplier, 0.08);
   for (const rawKey of ['code', 'rate_multiplier', 'avg_ping_ms', 'debug_payload']) {
@@ -1308,19 +1309,12 @@ test('builds a weighted conservative provider series fallback from summary histo
   const degradedAt = Date.parse('2026-08-24T02:11:00Z');
   const failedAt = Date.parse('2026-08-24T02:13:00Z');
 
-  assert.deepEqual(summary.apis[0].history[0], {
-    timestamp: operationalAt,
-    status: 'operational',
-    sampleCount: 3,
-  });
-  assert.equal(Object.hasOwn(summary.apis[0].history[0], 'probed_at'), false);
-  assert.equal(Object.hasOwn(summary.apis[0].history[0], 'avg_ttft_ms'), false);
-
-  assert.deepEqual(fallback.seriesByApiId['7'], [
+  assert.deepEqual(summary.apis[0].history, [
     [operationalAt, 1, 3],
     [degradedAt, 0, 2],
     [failedAt, 0, 1],
   ]);
+  assert.strictEqual(fallback.seriesByApiId['7'], summary.apis[0].history);
   assert.equal(fallback.range, 'summary-history');
   assert.equal(core.hasMonitorSeriesData(fallback), true);
   assert.equal(core.monitorHistoryStatusToAvailability('degraded'), 0);
@@ -1847,7 +1841,7 @@ test('uses reliability and latency as deterministic tie breakers', () => {
 test('computes availability from valid monitor samples in the latest 10 minutes', () => {
   const now = Date.parse('2026-07-22T05:10:00Z');
   const rows = [
-    { id: 'api-1', successRates: { '24h': 0.5 } },
+    { id: 'api-1', successRates: { '24h': 0.5 }, history: [[now - 9 * 60_000, 1, 1]] },
     { id: 'api-2', successRates: { '24h': 1 } },
   ];
   const series = {
@@ -1867,6 +1861,7 @@ test('computes availability from valid monitor samples in the latest 10 minutes'
   assert.equal(enriched[0].recentSampleCount, 2);
   assert.equal(enriched[0].recentSuccessCount, 1);
   assert.equal(enriched[0].recentConsecutiveSuccessCount, 0);
+  assert.equal(Object.hasOwn(enriched[0], 'history'), false);
   assert.equal(Number.isNaN(enriched[1].successRates['10m']), true);
   assert.equal(enriched[1].recentSampleCount, 0);
 });

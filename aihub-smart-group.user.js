@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.15
+// @version      0.14.16
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.15';
+  const SCRIPT_VERSION = '0.14.16';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -1108,34 +1108,44 @@
     return `首 Token ${valueText}`;
   }
 
+  function normalizeMonitorHistoryPoint(item) {
+    let timestampValue;
+    let availability;
+    let sampleCountValue;
+    if (Array.isArray(item)) {
+      [timestampValue, availability, sampleCountValue] = item;
+      if (availability !== 0 && availability !== 1) availability = monitorHistoryStatusToAvailability(availability);
+    } else if (item && typeof item === 'object') {
+      timestampValue = item.probedAt ?? item.probed_at ?? item.at ?? item.timestamp;
+      availability = monitorHistoryStatusToAvailability(item.status);
+      sampleCountValue = item.sampleCount ?? item.sample_count;
+    } else {
+      return null;
+    }
+    const timestamp = typeof timestampValue === 'number' ? timestampValue : Date.parse(timestampValue);
+    if (!Number.isFinite(timestamp) || availability === null) return null;
+    const rawSampleCount = nonNegativeNumberOrNull(sampleCountValue);
+    if (rawSampleCount === 0) return null;
+    const sampleCount = Math.floor(clamp(rawSampleCount ?? 1, 1, MONITOR_HISTORY_SAMPLE_COUNT_CAP));
+    return [timestamp, availability, sampleCount];
+  }
+
   function normalizeMonitorHistory(value) {
     const byTimestamp = new Map();
     for (const item of Array.isArray(value) ? value : []) {
-      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
-      const probedAt = item.probedAt ?? item.probed_at ?? item.at ?? item.timestamp;
-      const timestamp = typeof probedAt === 'number' ? probedAt : Date.parse(probedAt);
-      if (!Number.isFinite(timestamp)) continue;
-      const normalized = {
-        timestamp,
-        status: String(item.status ?? '').trim().toLocaleLowerCase(),
-        sampleCount: nonNegativeNumberOrNull(item.sampleCount ?? item.sample_count),
-      };
-      const existing = byTimestamp.get(timestamp);
+      const normalized = normalizeMonitorHistoryPoint(item);
+      if (!normalized) continue;
+      const existing = byTimestamp.get(normalized[0]);
       if (!existing) {
-        byTimestamp.set(timestamp, normalized);
+        byTimestamp.set(normalized[0], normalized);
         continue;
       }
-      const existingAvailability = monitorHistoryStatusToAvailability(existing.status);
-      const nextAvailability = monitorHistoryStatusToAvailability(normalized.status);
-      const existingCount = numberOr(existing.sampleCount, 0);
-      const nextCount = numberOr(normalized.sampleCount, 0);
-      if ((nextAvailability === 0 && existingAvailability !== 0)
-        || (existingAvailability === null && nextAvailability === 1)
-        || (existingAvailability === nextAvailability && nextCount > existingCount)) {
-        byTimestamp.set(timestamp, normalized);
+      if ((normalized[1] === 0 && existing[1] !== 0)
+        || (normalized[1] === existing[1] && normalized[2] > existing[2])) {
+        byTimestamp.set(normalized[0], normalized);
       }
     }
-    return [...byTimestamp.values()].sort((left, right) => left.timestamp - right.timestamp);
+    return [...byTimestamp.values()].sort((left, right) => left[0] - right[0]);
   }
 
   function normalizeMonitorRow(row) {
@@ -1286,17 +1296,22 @@
       const groupId = String(row?.id ?? row?.group_id ?? '');
       if (!groupId) continue;
       const samples = [];
+      let canReuseHistory = true;
       for (const item of Array.isArray(row?.history) ? row.history : []) {
-        const timestamp = Number(item?.timestamp);
-        if (!Number.isFinite(timestamp)) continue;
-        const availability = monitorHistoryStatusToAvailability(item.status);
-        if (availability === null) continue;
-        const rawSampleCount = nonNegativeNumberOrNull(item.sampleCount);
-        if (rawSampleCount === 0) continue;
-        const sampleCount = Math.floor(clamp(rawSampleCount ?? 1, 1, MONITOR_HISTORY_SAMPLE_COUNT_CAP));
-        samples.push([timestamp, availability, sampleCount]);
+        const normalized = normalizeMonitorHistoryPoint(item);
+        if (!normalized) {
+          canReuseHistory = false;
+          continue;
+        }
+        const reusable = Array.isArray(item)
+          && item.length === 3
+          && item[0] === normalized[0]
+          && item[1] === normalized[1]
+          && item[2] === normalized[2];
+        if (!reusable) canReuseHistory = false;
+        samples.push(reusable ? item : normalized);
       }
-      if (samples.length) seriesByApiId[groupId] = samples;
+      if (samples.length) seriesByApiId[groupId] = canReuseHistory ? row.history : samples;
     }
     return {
       generatedAt: summary?.generatedAt ?? null,
@@ -1644,7 +1659,7 @@
       for (let index = recent.length - 1; index >= 0 && recent[index].status === 1; index -= 1) {
         trailingSuccesses += recent[index].weight;
       }
-      return {
+      const normalizedRow = {
         ...row,
         successRates: {
           ...(row?.successRates || {}),
@@ -1654,6 +1669,8 @@
         recentSuccessCount: successes,
         recentConsecutiveSuccessCount: trailingSuccesses,
       };
+      delete normalizedRow.history;
+      return normalizedRow;
     });
   }
 
