@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.11.3
+// @version      0.11.4
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.11.3';
+  const SCRIPT_VERSION = '0.11.4';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const API_REQUEST_TIMEOUT_MS = 15_000;
@@ -36,18 +36,13 @@
   const ENHANCER_RENDER_DEBOUNCE_MS = 50;
   const ROUTER_SYNC_INTERVAL_MS = 2_000;
   const USAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
-  const USAGE_DETAIL_HEADERS = Object.freeze([
+  const USAGE_DETAIL_REQUIRED_HEADERS = Object.freeze([
     'API 密钥',
     '模型',
-    '推理强度',
-    '端点',
-    'IP',
     '分组',
-    '类型',
     '计费模式',
     'Token',
     '费用',
-    '延迟',
     '时间',
   ]);
   const GROUP_MODE_LABELS = Object.freeze({
@@ -113,6 +108,11 @@
 
   function clamp(value, min, max) {
     return Math.min(max, Math.max(min, value));
+  }
+
+  function hasUsageDetailColumns(headers) {
+    const labels = new Set((headers || []).map((header) => String(header || '').trim()));
+    return USAGE_DETAIL_REQUIRED_HEADERS.every((header) => labels.has(header));
   }
 
   function isRefreshDue(now, lastCompletedAt, intervalMs) {
@@ -2603,7 +2603,7 @@
       this.observer = new MutationObserver((records) => {
         if (this.mutationsNeedRender(records)) this.queueRender();
       });
-      this.observer.observe(document.querySelector('main') || document.body, { childList: true, subtree: true, characterData: true });
+      this.observer.observe(document.querySelector('main') || document.body, { childList: true, subtree: true });
       this.refresh(true);
       this.refreshTimer = window.setInterval(() => {
         if (isPageVisible() && isRefreshDue(Date.now(), this.lastRefreshCompletedAt, USAGE_REFRESH_INTERVAL_MS)) this.refresh();
@@ -2627,9 +2627,9 @@
       return [...(records || [])].some((record) => {
         const target = record.target?.nodeType === 1 ? record.target : record.target?.parentElement;
         if (target?.closest?.('.asg-usage-multiplier,.asg-usage-cost-audit,.asg-usage-cost-summary')) return false;
-        if (target?.closest?.('table')) return true;
+        if (target?.closest?.('thead') || target?.matches?.('tbody')) return true;
         return [...record.addedNodes, ...record.removedNodes].some((node) => node.nodeType === 1
-          && (node.matches?.('table') || node.querySelector?.('table')));
+          && (node.matches?.('table,thead,tbody,tr') || node.querySelector?.('table,thead,tbody,tr')));
       });
     }
 
@@ -2703,9 +2703,7 @@
     }
 
     isUsageDetailTable(table) {
-      const labels = this.getHeaderLabels(table);
-      return labels.length === USAGE_DETAIL_HEADERS.length
-        && labels.every((label, index) => label === USAGE_DETAIL_HEADERS[index]);
+      return hasUsageDetailColumns(this.getHeaderLabels(table));
     }
 
     getGroupName(cell) {
@@ -3146,6 +3144,7 @@
     getGroupDropdownToneClass,
     formatKeyOptionLabel,
     formatMultiplier,
+    hasUsageDetailColumns,
     getPageFeatures,
     createStabilityState,
     advanceStability,

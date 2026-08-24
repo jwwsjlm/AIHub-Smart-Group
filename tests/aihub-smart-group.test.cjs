@@ -1349,6 +1349,15 @@ test('skips disabled, non-metered, incomplete, and historical-rate-mismatched us
   });
 });
 
+test('recognizes the usage detail table after optional columns are hidden or reordered', () => {
+  const required = ['API 密钥', '模型', '分组', '计费模式', 'Token', '费用', '时间'];
+  assert.equal(core.hasUsageDetailColumns(required), true);
+  assert.equal(core.hasUsageDetailColumns(['时间', '费用', 'Token', '计费模式', '分组', '模型', 'API 密钥']), true);
+  assert.equal(core.hasUsageDetailColumns([...required, '推理强度', '端点', 'IP', '类型', '延迟']), true);
+  assert.equal(core.hasUsageDetailColumns(['模型', '分组', 'Token', '费用', '时间']), false);
+  assert.equal(core.hasUsageDetailColumns(['分组', '请求', 'Token', '实际', '标准']), false);
+});
+
 test('enables the panel on every AIHub page only while logged in', () => {
   assert.deepEqual(core.getPageFeatures('/providers', true), { panel: true, usage: false, keyGroups: false, providerSort: true });
   assert.deepEqual(core.getPageFeatures('/keys?page=1', true), { panel: true, usage: false, keyGroups: true, providerSort: false });
