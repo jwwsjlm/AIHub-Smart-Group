@@ -2374,6 +2374,73 @@ test('formats readable model detection reasons without changing warning semantic
   assert.equal(core.formatModelDetectionTitle(passed), '');
 });
 
+test('rejects expired or explicitly incomplete passed model detections', () => {
+  const common = {
+    planType: 'passed-check',
+    group_id: 1,
+    priceMultiplier: 0.01,
+    available: true,
+    successRates: { '10m': 1 },
+  };
+  const legacyPassed = { ...common, model_detection: { status: 'passed', applicable: true } };
+  const validPassed = {
+    ...common,
+    model_detection: {
+      status: 'passed',
+      applicable: true,
+      expires_at: '2999-01-01T00:00:00Z',
+      execution_complete: true,
+      all_targets_passed: true,
+      required_targets: 1,
+      passed_targets: 1,
+    },
+  };
+  const expired = {
+    ...common,
+    model_detection: {
+      status: 'passed',
+      applicable: true,
+      expires_at: '2000-01-01T00:00:00Z',
+      reason_codes: ['JUICE_PASSED'],
+    },
+  };
+  const executionIncomplete = {
+    ...common,
+    model_detection: { status: 'passed', applicable: true, execution_complete: false },
+  };
+  const targetsIncomplete = {
+    ...common,
+    model_detection: {
+      status: 'passed',
+      applicable: true,
+      all_targets_passed: false,
+      required_targets: 2,
+      passed_targets: 1,
+    },
+  };
+
+  assert.equal(core.getModelDetectionExpiryAt(validPassed.model_detection), Date.parse('2999-01-01T00:00:00Z'));
+  assert.equal(core.isModelDetectionExpired(validPassed.model_detection), false);
+  assert.equal(core.isPassedModelDetectionIncomplete(validPassed.model_detection), false);
+  assert.equal(core.hasModelDetectionWarning(legacyPassed), false);
+  assert.equal(core.hasModelDetectionWarning(validPassed), false);
+  assert.equal(core.rankCandidates([legacyPassed, validPassed], core.DEFAULT_CONFIG).length, 2);
+
+  assert.equal(core.getModelDetectionLabel(expired), '检测已过期');
+  assert.equal(core.formatModelDetectionSummary(expired), '检测已过期');
+  assert.equal(core.formatModelDetectionTitle(expired), '检测已过期：Juice 指纹检测通过');
+  assert.equal(core.hasModelDetectionWarning(expired), true);
+  assert.equal(core.normalizeMonitorRow(expired).warningReasons.includes('model_detection_expired'), true);
+
+  for (const row of [executionIncomplete, targetsIncomplete]) {
+    assert.equal(core.getModelDetectionLabel(row), '检测未完成');
+    assert.equal(core.formatModelDetectionTitle(row), '检测未完成');
+    assert.equal(core.hasModelDetectionWarning(row), true);
+    assert.equal(core.normalizeMonitorRow(row).warningReasons.includes('model_detection_incomplete'), true);
+    assert.deepEqual(core.rankCandidates([row], core.DEFAULT_CONFIG), []);
+  }
+});
+
 test('fails closed for incomplete applicable detections while preserving missing-field compatibility', () => {
   const incomplete = {
     planType: 'incomplete', group_id: 1, priceMultiplier: 0.01, available: true,

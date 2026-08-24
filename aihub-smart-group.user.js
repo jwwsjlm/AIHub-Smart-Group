@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.21
+// @version      0.14.22
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.21';
+  const SCRIPT_VERSION = '0.14.22';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -986,6 +986,27 @@
     return { ...value, status, reasonCodes, reason_codes: reasonCodes };
   }
 
+  function getModelDetectionExpiryAt(detection) {
+    const value = detection?.expiresAt ?? detection?.expires_at;
+    const timestamp = Date.parse(String(value ?? '').trim());
+    return Number.isFinite(timestamp) ? timestamp : null;
+  }
+
+  function isModelDetectionExpired(detection, now = Date.now()) {
+    const expiresAt = getModelDetectionExpiryAt(detection);
+    const current = Number(now);
+    return expiresAt !== null && expiresAt <= (Number.isFinite(current) ? current : Date.now());
+  }
+
+  function isPassedModelDetectionIncomplete(detection) {
+    if (detection?.status !== 'passed') return false;
+    if (booleanOrNull(detection.executionComplete ?? detection.execution_complete) === false) return true;
+    if (booleanOrNull(detection.allTargetsPassed ?? detection.all_targets_passed) === false) return true;
+    const requiredTargets = nonNegativeNumberOrNull(detection.requiredTargets ?? detection.required_targets);
+    const passedTargets = nonNegativeNumberOrNull(detection.passedTargets ?? detection.passed_targets);
+    return requiredTargets !== null && passedTargets !== null && passedTargets < requiredTargets;
+  }
+
   function getModelDetection(row) {
     return normalizeModelDetection(row?.modelDetection ?? row?.model_detection);
   }
@@ -1009,6 +1030,8 @@
     const detection = resolveModelDetection(rowOrDetection);
     if (!detection) return '';
     if (detection.applicable === false) return '不适用';
+    if (isPassedModelDetectionIncomplete(detection)) return '检测未完成';
+    if (detection.status === 'passed' && isModelDetectionExpired(detection)) return '检测已过期';
     if (detection.status === 'passed') return '检测通过';
     if (detection.status === 'insufficient_evidence') return '证据不足';
     if (detection.status === 'failed') return '检测失败';
@@ -1034,7 +1057,10 @@
 
   function getModelDetectionReasonLabels(rowOrDetection, includeInformational = true) {
     const detection = resolveModelDetection(rowOrDetection);
-    if (!detection || detection.applicable === false || detection.status === 'passed' || detection.status === 'not_applicable') return [];
+    if (!detection
+      || detection.applicable === false
+      || detection.status === 'not_applicable'
+      || (detection.status === 'passed' && !isModelDetectionWarning(detection))) return [];
     return detection.reasonCodes
       .filter((code) => includeInformational
         || !MODEL_DETECTION_INFORMATIONAL_REASON_CODES.includes(String(code).toLocaleUpperCase()))
@@ -1057,12 +1083,17 @@
   function formatModelDetectionTitle(rowOrDetection) {
     const label = getModelDetectionLabel(rowOrDetection);
     const reasons = getModelDetectionReasonLabels(rowOrDetection, true);
-    return label && reasons.length ? `${label}：${reasons.join('；')}` : '';
+    if (label && reasons.length) return `${label}：${reasons.join('；')}`;
+    const detection = resolveModelDetection(rowOrDetection);
+    return detection?.status === 'passed' && isModelDetectionWarning(detection) ? label : '';
   }
 
   function isModelDetectionWarning(detection) {
     if (!detection || detection.applicable === false) return false;
     if (!detection.status) return detection.applicable === true;
+    if (detection.status === 'passed') {
+      return isPassedModelDetectionIncomplete(detection) || isModelDetectionExpired(detection);
+    }
     return !['passed', 'not_applicable'].includes(detection.status);
   }
 
@@ -1210,7 +1241,10 @@
     if ((source.response_valid ?? source.responseValid) === false && !warningReasons.includes('response_invalid')) warningReasons.push('response_invalid');
     const modelDetection = normalizeModelDetection(source.modelDetection ?? source.model_detection);
     if (isModelDetectionWarning(modelDetection)) {
-      const reason = `model_detection_${modelDetection.status || 'unknown'}`;
+      const warningStatus = modelDetection.status === 'passed'
+        ? (isPassedModelDetectionIncomplete(modelDetection) ? 'incomplete' : 'expired')
+        : (modelDetection.status || 'unknown');
+      const reason = `model_detection_${warningStatus}`;
       if (!warningReasons.includes(reason)) warningReasons.push(reason);
     }
     const modelHealth = normalizeModelHealth(source.modelHealth ?? source.model_health);
@@ -5473,6 +5507,9 @@
     formatModelHealthSummary,
     normalizeModelDetectionReasonCodes,
     normalizeModelDetection,
+    getModelDetectionExpiryAt,
+    isModelDetectionExpired,
+    isPassedModelDetectionIncomplete,
     getModelDetection,
     getModelDetectionLabel,
     getModelDetectionReasonLabel,

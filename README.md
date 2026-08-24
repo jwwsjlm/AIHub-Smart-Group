@@ -99,6 +99,7 @@
 
 - `model_detection.status` 兼容 `passed`、`insufficient_evidence`、`detection_failed`、`suspected`、`not_tested` 等新版状态。除通过和明确不适用外，所有显式检测状态都会归入监控警告；默认“排除监控警告”会避免把失败、疑似、未检测或未来新增的未知状态线路作为推荐。
 - `model_detection.status` 为 `passed` 时在推荐卡片、目标密钥和原生分组下拉中显示“检测通过”。
+- `model_detection.expires_at` 会用于校验检测有效期；已经过期的“通过”结果会显示“检测已过期”并按监控警告处理。新版 `execution_complete`、`all_targets_passed`、`required_targets` 和 `passed_targets` 若明确表明执行或目标未完成，即使状态错误地标成 `passed` 也会显示“检测未完成”。旧接口未返回这些新字段时仍保持原行为。
 - `model_detection.reason_codes` 与 `reasonCodes` 会合并去重并转换为可读原因。推荐、候选和目标密钥详情最多内联显示两个告警原因，悬停可查看完整原因；纯通过信息不会挤占内联告警摘要，未知的新原因代码也会安全降级为可读文本。
 - `model_health` 会分别汇总 Sol、Terra、Luna 的健康、证据不足、失败和未知数量，避免把 `insufficient` 错误显示为“健康 0/3”；单个模型失败只作为提示，不会直接隐藏整个供应商。
 - `model_prices` 会按设置显示 Sol、Terra 或 Luna 的输入、缓存输入和输出价格，单位为美元 / 每 1M Token。价格仅用于展示和费用核验，不改变推荐、排序或自动切换目标。
@@ -304,4 +305,4 @@ node --test tests/*.test.cjs
 npx --yes eslint@9.39.2 aihub-smart-group.user.js scripts/check-repository.cjs tests/*.test.cjs
 ```
 
-当前版本：`0.14.21`
+当前版本：`0.14.22`
