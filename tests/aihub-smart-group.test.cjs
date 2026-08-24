@@ -131,8 +131,9 @@ test('rebinds the usage observer when the SPA replaces its main element', () => 
   assert.match(usageSource, /this\.observedRoot = null;/);
   assert.match(usageSource, /if \(nextRoot === this\.observedRoot && nextRoot\.isConnected\) return false;/);
   assert.match(usageSource, /this\.observer\.disconnect\(\);\s*this\.observer\.takeRecords\?\.\(\);\s*this\.observedRoot = null;\s*this\.observer\.observe\(nextRoot/);
-  assert.match(usageSource, /attributes: true,\s*attributeFilter: \['data-row-id'\]/);
+  assert.match(usageSource, /attributes: true,\s*attributeFilter: \['data-row-id', 'data-field'\],\s*characterData: true/);
   assert.match(usageSource, /record\.type === 'attributes' && target\?\.matches\?\.\('tr\[data-row-id\]'\)/);
+  assert.match(usageSource, /target\?\.closest\?\.\('\[data-field\]'\)/);
   assert.match(usageSource, /record\.target === currentRoot \|\| currentRoot\.contains\(record\.target\)/);
   assert.match(userscriptSource, /else if \(features\.usage && this\.usage\) \{\s*this\.usage\.syncObserverRoot\(\);\s*this\.usage\.syncUsageQueryPath\(\);/);
 });
@@ -194,7 +195,7 @@ test('refreshes usage prices without repeatedly reloading exact usage rows', () 
 
   assert.match(refreshSource, /fetchMonitorSummary\(\{ maxAgeMs: PASSIVE_MONITOR_SUMMARY_CACHE_TTL_MS \}\)/);
   assert.doesNotMatch(refreshSource, /fetchCurrentUsageAuditItems\(/);
-  assert.match(usageSource, /this\.syncUsageAuditView\(detailTables\);/);
+  assert.match(usageSource, /this\.syncUsageAuditView\(detailTables, mobileContexts\);/);
 });
 
 test('lets passive provider displays share the longer monitor summary cache', () => {
@@ -3913,6 +3914,57 @@ test('formats usage multipliers without unnecessary zeroes', () => {
   assert.equal(core.formatMultiplier(Number.NaN), '');
 });
 
+function createUsageMobileTestTree(overrides = {}) {
+  const values = {
+    api_key: 'main-key',
+    model: 'gpt-5.6-sol',
+    group: 'A003-Plus',
+    billing_mode: '按量',
+    tokens: '1,000 2,000 300',
+    cost: '$0.008',
+    created_at: '2026-08-24 12:00:00',
+    ...overrides,
+  };
+  const pluginText = { group: '×999', cost: '预计 $999 · 偏高' };
+  const fields = Object.entries(values).map(([dataField, textContent]) => {
+    const extra = pluginText[dataField] || '';
+    const valueRoot = {
+      textContent: `${textContent}${extra}`,
+      cloneNode: () => {
+        const clone = {
+          textContent: `${textContent}${extra}`,
+          querySelectorAll: () => (extra ? [{ remove: () => { clone.textContent = textContent; } }] : []),
+        };
+        return clone;
+      },
+    };
+    return {
+      textContent,
+      lastElementChild: valueRoot,
+      parentElement: null,
+      getAttribute: (name) => (name === 'data-field' ? dataField : null),
+      closest: () => null,
+    };
+  });
+  const fieldRoot = {
+    parentElement: null,
+    closest: () => null,
+    querySelectorAll: (selector) => (selector === '[data-field]' ? fields : []),
+  };
+  fields.forEach((field) => { field.parentElement = fieldRoot; });
+  const container = { parentElement: null, isConnected: true };
+  const record = { parentElement: container, dataset: {} };
+  fieldRoot.parentElement = record;
+  const tableApiField = {
+    getAttribute: (name) => (name === 'data-field' ? 'api_key' : null),
+    closest: (selector) => (selector === 'table' ? {} : null),
+  };
+  const root = {
+    querySelectorAll: (selector) => (selector === '[data-field]' ? [tableApiField, ...fields] : []),
+  };
+  return { root, record, container, fieldRoot, fields, values };
+}
+
 test('parses exact and compact token counts', () => {
   assert.equal(core.parseCompactTokenCount('14,735'), 14735);
   assert.equal(core.parseCompactTokenCount('181.6K'), 181600);
@@ -4113,12 +4165,36 @@ test('uses exact usage API tokens and accepts the API token billing mode', () =>
     groupName: 'a003-plus',
     rateMultiplier: 0.11,
     tokens: { inputTokens: 1_000_000, outputTokens: 1_000_000, cacheInputTokens: 1_000_000 },
+    cacheCreationTokens: 0,
+    cacheCreationCost: 0,
     actualCost: 4.615,
     billingMode: 'token',
   });
   assert.equal(JSON.stringify(item).includes('sk-must-not-appear'), false);
   assert.equal(JSON.stringify(item).includes('192.0.2.1'), false);
   assert.equal(JSON.stringify(item).includes('must-not-appear'), false);
+});
+
+test('skips exact usage records with cache creation charges that cannot be priced safely', () => {
+  const item = core.projectUsageAuditItems([{
+    id: 43,
+    model: 'gpt-5.6-sol',
+    group_name: 'A003-Plus',
+    rate_multiplier: 0.11,
+    input_tokens: 1_000,
+    output_tokens: 2_000,
+    cache_read_tokens: 300,
+    cache_creation_tokens: 400,
+    cache_creation_cost: 0.0004,
+    actual_cost: 0.01,
+    billing_mode: 'token',
+  }])[0];
+
+  assert.equal(item.cacheCreationTokens, 400);
+  assert.equal(item.cacheCreationCost, 0.0004);
+  assert.deepEqual(core.auditUsageCostRecord(core.buildUsageAuditRecordFromApiItem(item), new Map()), {
+    status: 'skipped', reason: 'cache_creation_pricing',
+  });
 });
 
 test('selects only the current exact usage resource request', () => {
@@ -4211,6 +4287,8 @@ test('reuses the visible usage query when loading exact audit records', async ()
       groupName: 'a003-plus',
       rateMultiplier: 0.11,
       tokens: { inputTokens: 1, outputTokens: 2, cacheInputTokens: 3 },
+      cacheCreationTokens: 0,
+      cacheCreationCost: 0,
       actualCost: 0.00001,
       billingMode: 'token',
     }]);
@@ -4511,6 +4589,100 @@ test('maps semantic usage headers to stable canonical column indexes', () => {
     time: 6,
   });
   assert.equal(core.hasUsageDetailColumns(headers), true);
+});
+
+test('recognizes current mobile usage cards and keeps their signatures plugin-independent', () => {
+  const firstTree = createUsageMobileTestTree();
+  const fields = core.getUsageMobileFieldMap(firstTree.fieldRoot);
+  const contexts = core.findUsageMobileRecordContexts(firstTree.root);
+
+  assert.equal(fields.apiKey.getAttribute('data-field'), 'api_key');
+  assert.equal(fields.billing.getAttribute('data-field'), 'billing_mode');
+  assert.equal(fields.time.getAttribute('data-field'), 'created_at');
+  assert.equal(contexts.length, 1);
+  assert.equal(contexts[0].record, firstTree.record);
+  assert.equal(contexts[0].container, firstTree.container);
+  assert.equal(core.getUsageMobileRecordSignature(contexts[0]), [
+    firstTree.values.api_key,
+    firstTree.values.model,
+    firstTree.values.group,
+    firstTree.values.billing_mode,
+    firstTree.values.tokens,
+    firstTree.values.cost,
+    firstTree.values.created_at,
+  ].join('\u001f'));
+  assert.equal(core.getUsageMobileRecordSignature(contexts[0]).includes('999'), false);
+});
+
+test('changes the mobile usage view key when a visible card changes', () => {
+  const originalWindow = globalThis.window;
+  globalThis.window = {
+    URL: globalThis.URL,
+    location: { origin: 'https://aihub.top', href: 'https://aihub.top/usage' },
+    performance: { getEntriesByType: () => [{ name: 'https://aihub.top/api/v1/usage?page=1&page_size=20' }] },
+  };
+
+  try {
+    const enhancer = new core.UsageMultiplierEnhancer();
+    const first = enhancer.getUsageAuditView([], core.findUsageMobileRecordContexts(createUsageMobileTestTree().root));
+    const changed = enhancer.getUsageAuditView([], core.findUsageMobileRecordContexts(createUsageMobileTestTree({ cost: '$0.009' }).root));
+
+    assert.deepEqual(first.rowIds, []);
+    assert.match(first.key, /^\/usage\?page=1&page_size=20#mobile:0:/);
+    assert.notEqual(first.key, changed.key);
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  }
+});
+
+test('maps exact mobile usage items by index only when record counts agree', () => {
+  const enhancer = new core.UsageMultiplierEnhancer();
+  const items = [
+    {
+      id: '10', groupName: 'first', rateMultiplier: 0.1, model: 'gpt-5.6-sol', billingMode: 'token',
+      tokens: { inputTokens: 1, outputTokens: 2, cacheInputTokens: 3 }, cacheCreationTokens: 0, cacheCreationCost: 0, actualCost: 0.1,
+    },
+    {
+      id: '11', groupName: 'second', rateMultiplier: 0.2, model: 'gpt-5.6-terra', billingMode: 'token',
+      tokens: { inputTokens: 4, outputTokens: 5, cacheInputTokens: 6 }, cacheCreationTokens: 0, cacheCreationCost: 0, actualCost: 0.2,
+    },
+  ];
+  enhancer.usageItems = items;
+  enhancer.usageItemsById = new Map(items.map((item) => [item.id, item]));
+
+  assert.equal(enhancer.getUsageApiAuditRecord({ dataset: {} }, 1, 2).groupName, 'second');
+  assert.equal(enhancer.getUsageApiAuditRecord({ dataset: {} }, 1, 3), null);
+  assert.equal(enhancer.getUsageApiAuditRecord({ dataset: { rowId: '10' } }, 1, 99).groupName, 'first');
+});
+
+test('observes mobile usage card changes without looping on plugin nodes', () => {
+  const enhancer = new core.UsageMultiplierEnhancer();
+  const fieldTarget = {
+    nodeType: 1,
+    matches: () => false,
+    closest: (selector) => (selector.includes('[data-field]') ? fieldTarget : null),
+  };
+  const pluginNode = {
+    nodeType: 1,
+    matches: (selector) => selector.includes('.asg-usage-'),
+  };
+  const cardNode = {
+    nodeType: 1,
+    matches: (selector) => selector.includes('[data-field]'),
+    querySelector: () => null,
+  };
+  const plainTarget = { nodeType: 1, closest: () => null, matches: () => false };
+
+  assert.equal(enhancer.mutationsNeedRender([{
+    type: 'childList', target: fieldTarget, addedNodes: [pluginNode], removedNodes: [],
+  }]), false);
+  assert.equal(enhancer.mutationsNeedRender([{
+    type: 'characterData', target: { nodeType: 3, parentElement: fieldTarget }, addedNodes: [], removedNodes: [],
+  }]), true);
+  assert.equal(enhancer.mutationsNeedRender([{
+    type: 'childList', target: plainTarget, addedNodes: [cardNode], removedNodes: [],
+  }]), true);
 });
 
 test('parses each usage table header once per render and reuses the indexes', () => {

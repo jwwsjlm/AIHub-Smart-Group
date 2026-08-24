@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.22
+// @version      0.14.23
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.22';
+  const SCRIPT_VERSION = '0.14.23';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -323,6 +323,68 @@
 
   function hasUsageDetailColumns(headers) {
     return hasUsageDetailColumnIndexes(getUsageColumnIndexes(headers));
+  }
+
+  function getUsageMobileFieldMap(recordRoot) {
+    const fields = {};
+    for (const node of recordRoot?.querySelectorAll?.('[data-field]') || []) {
+      if (node?.closest?.('table')) continue;
+      const key = getUsageColumnKey(node?.getAttribute?.('data-field'));
+      if (key && !fields[key]) fields[key] = node;
+    }
+    return fields;
+  }
+
+  function hasUsageMobileFields(fields) {
+    return USAGE_DETAIL_REQUIRED_COLUMNS.every((key) => fields?.[key]);
+  }
+
+  function findUsageMobileRecordContexts(root = typeof document !== 'undefined' ? document : null) {
+    if (!root?.querySelectorAll) return [];
+    const contexts = [];
+    const seen = new Set();
+    const apiKeyFields = [...root.querySelectorAll('[data-field]')]
+      .filter((node) => !node?.closest?.('table') && getUsageColumnKey(node?.getAttribute?.('data-field')) === 'apiKey');
+    for (const apiKeyField of apiKeyFields) {
+      let fieldRoot = apiKeyField.parentElement;
+      while (fieldRoot) {
+        if (fieldRoot.closest?.('table')) break;
+        const fields = getUsageMobileFieldMap(fieldRoot);
+        if (fields.apiKey === apiKeyField && hasUsageMobileFields(fields)) {
+          const record = fieldRoot.parentElement || fieldRoot;
+          if (!seen.has(record)) {
+            seen.add(record);
+            contexts.push({
+              record,
+              fieldRoot,
+              container: record.parentElement || record,
+              fields,
+            });
+          }
+          break;
+        }
+        if (fieldRoot === root) break;
+        fieldRoot = fieldRoot.parentElement;
+      }
+    }
+    return contexts;
+  }
+
+  function getUsageMobileFieldValueRoot(field) {
+    return field?.lastElementChild || field || null;
+  }
+
+  function getUsageMobileRecordSignature(context) {
+    const getFieldText = (key) => {
+      const valueRoot = getUsageMobileFieldValueRoot(context?.fields?.[key]);
+      if (!valueRoot) return '';
+      const clone = valueRoot.cloneNode?.(true);
+      if (clone?.querySelectorAll) {
+        clone.querySelectorAll('.asg-usage-multiplier,.asg-usage-cost-audit').forEach((node) => node.remove());
+      }
+      return String(clone?.textContent ?? valueRoot.textContent ?? '').replace(/\s+/g, ' ').trim();
+    };
+    return USAGE_DETAIL_REQUIRED_COLUMNS.map(getFieldText).join('\u001f');
   }
 
   function isRefreshDue(now, lastCompletedAt, intervalMs) {
@@ -2167,6 +2229,10 @@
     const normalizedConfig = normalizeConfig(config);
     if (!normalizedConfig.usageCostAuditEnabled) return { status: 'skipped', reason: 'disabled' };
     if (!isMeteredUsageBillingMode(record?.billingMode)) return { status: 'skipped', reason: 'billing_mode' };
+    const cacheCreationTokens = nonNegativeNumberOrNull(record?.cacheCreationTokens ?? record?.cache_creation_tokens ?? 0);
+    const cacheCreationCost = nonNegativeNumberOrNull(record?.cacheCreationCost ?? record?.cache_creation_cost ?? 0);
+    if (cacheCreationTokens === null || cacheCreationCost === null) return { status: 'skipped', reason: 'missing_data' };
+    if (cacheCreationTokens > 0 || cacheCreationCost > 0) return { status: 'skipped', reason: 'cache_creation_pricing' };
     const model = getUsageModelVariant(record?.model);
     const multiplier = parseUsageGroupMultiplier(record?.groupMultiplier ?? record?.groupText);
     const exactTokens = normalizeUsageTokenBreakdown(record?.tokens);
@@ -2791,13 +2857,18 @@
       });
       const actualCost = nonNegativeNumberOrNull(item?.actual_cost);
       const rateMultiplier = nonNegativeNumberOrNull(item?.rate_multiplier);
-      if (!id || !tokens || actualCost === null || rateMultiplier === null) continue;
+      const cacheCreationTokens = nonNegativeNumberOrNull(item?.cache_creation_tokens ?? 0);
+      const cacheCreationCost = nonNegativeNumberOrNull(item?.cache_creation_cost ?? 0);
+      if (!id || !tokens || actualCost === null || rateMultiplier === null
+        || cacheCreationTokens === null || cacheCreationCost === null) continue;
       projected.push({
         id,
         model: String(item?.model ?? ''),
         groupName: normalizeGroupName(item?.group?.name ?? item?.group_name),
         rateMultiplier,
         tokens,
+        cacheCreationTokens,
+        cacheCreationCost,
         actualCost,
         billingMode: String(item?.billing_mode ?? item?.billingMode ?? item?.billing_type ?? ''),
       });
@@ -2813,6 +2884,8 @@
       model: item.model,
       billingMode: item.billingMode,
       tokens: item.tokens,
+      cacheCreationTokens: item.cacheCreationTokens,
+      cacheCreationCost: item.cacheCreationCost,
       actualCost: item.actualCost,
     };
   }
@@ -4378,6 +4451,7 @@
       this.multiplierByGroup = new Map();
       this.modelPriceIndex = buildUsageModelPriceIndex([]);
       this.usageItemsById = new Map();
+      this.usageItems = [];
       this.usageAuditCache = new Map();
       this.pendingUsageLoads = new Map();
       this.usageViewKey = '';
@@ -4442,6 +4516,7 @@
       document.querySelectorAll('.asg-usage-multiplier,.asg-usage-cost-audit,.asg-usage-cost-summary').forEach((node) => node.remove());
       this.summaryByTable.clear();
       this.usageItemsById.clear();
+      this.usageItems = [];
       this.usageAuditCache.clear();
       this.pendingUsageLoads.clear();
       this.usageViewKey = '';
@@ -4466,7 +4541,8 @@
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ['data-row-id'],
+        attributeFilter: ['data-row-id', 'data-field'],
+        characterData: true,
       });
       this.observedRoot = nextRoot;
       this.queueRender();
@@ -4477,10 +4553,15 @@
       return [...(records || [])].some((record) => {
         const target = record.target?.nodeType === 1 ? record.target : record.target?.parentElement;
         if (target?.closest?.('.asg-usage-multiplier,.asg-usage-cost-audit,.asg-usage-cost-summary')) return false;
+        const changedElements = [...(record.addedNodes || []), ...(record.removedNodes || [])]
+          .filter((node) => node.nodeType === 1);
+        if (changedElements.length && changedElements.every((node) => node.matches?.('.asg-usage-multiplier,.asg-usage-cost-audit,.asg-usage-cost-summary'))) return false;
+        if (record.type === 'characterData' && target?.closest?.('[data-field],thead,tbody')) return true;
         if (record.type === 'attributes' && target?.matches?.('tr[data-row-id]')) return true;
+        if (target?.closest?.('[data-field]')) return true;
         if (target?.closest?.('thead') || target?.matches?.('tbody')) return true;
-        return [...(record.addedNodes || []), ...(record.removedNodes || [])].some((node) => node.nodeType === 1
-          && (node.matches?.('table,thead,tbody,tr') || node.querySelector?.('table,thead,tbody,tr')));
+        return changedElements.some((node) => node.matches?.('table,thead,tbody,tr,[data-field]')
+          || node.querySelector?.('table,thead,tbody,tr,[data-field]'));
       });
     }
 
@@ -4530,29 +4611,38 @@
       const tables = [...document.querySelectorAll('table')];
       const tableContexts = tables.map((table) => ({ table, indexes: this.getTableColumnIndexes(table) }));
       for (const { table, indexes } of tableContexts) this.renderMultipliers(table, indexes);
+      const mobileContexts = findUsageMobileRecordContexts(document);
+      this.renderMobileMultipliers(mobileContexts);
       const detailContexts = tableContexts.filter(({ table, indexes }) => this.isUsageDetailTable(table, indexes));
       const detailTables = detailContexts.map(({ table }) => table);
-      this.syncUsageAuditView(detailTables);
-      const activeTables = new Set(detailTables);
-      for (const [table, summary] of this.summaryByTable) {
-        if (table.isConnected && activeTables.has(table)) continue;
+      this.syncUsageAuditView(detailTables, mobileContexts);
+      const activeAnchors = new Set([
+        ...detailTables,
+        ...mobileContexts.map((context) => context.container || context.record),
+      ]);
+      for (const [anchor, summary] of this.summaryByTable) {
+        if (anchor.isConnected && activeAnchors.has(anchor)) continue;
         summary.remove();
-        this.summaryByTable.delete(table);
+        this.summaryByTable.delete(anchor);
       }
       for (const { table, indexes } of detailContexts) this.renderCostAudit(table, indexes);
+      this.renderMobileCostAudit(mobileContexts);
     }
 
-    getUsageAuditView(detailTables) {
+    getUsageAuditView(detailTables, mobileContexts = []) {
       const path = getCurrentUsageRequestPath();
       const rowIds = [...new Set([...(detailTables || [])]
         .flatMap((table) => [...table.querySelectorAll('tbody tr[data-row-id]')])
         .map((row) => String(row.dataset.rowId || '').trim())
         .filter(Boolean))]
         .sort();
+      const viewRecords = rowIds.length
+        ? rowIds
+        : [...(mobileContexts || [])].map((context, index) => `mobile:${index}:${encodeURIComponent(getUsageMobileRecordSignature(context))}`);
       return {
         path: String(path || '').trim(),
         rowIds,
-        key: buildUsageAuditViewKey(path, rowIds),
+        key: buildUsageAuditViewKey(path, viewRecords),
       };
     }
 
@@ -4600,11 +4690,12 @@
       if (typeof document === 'undefined') return true;
       const tables = [...document.querySelectorAll('table')];
       const detailTables = tables.filter((table) => this.isUsageDetailTable(table, this.getTableColumnIndexes(table)));
-      return this.getUsageAuditView(detailTables).key === view.key;
+      const mobileContexts = findUsageMobileRecordContexts(document);
+      return this.getUsageAuditView(detailTables, mobileContexts).key === view.key;
     }
 
-    syncUsageAuditView(detailTables) {
-      const view = this.getUsageAuditView(detailTables);
+    syncUsageAuditView(detailTables, mobileContexts = []) {
+      const view = this.getUsageAuditView(detailTables, mobileContexts);
       if (!view.key) {
         this.clearUsageAuditRetry();
         this.usageViewKey = '';
@@ -4612,6 +4703,7 @@
         this.loadedUsageViewKey = '';
         this.pendingUsageViewKey = '';
         this.usageItemsById.clear();
+        this.usageItems = [];
         this.usageDataAvailable = false;
         return false;
       }
@@ -4626,6 +4718,7 @@
         this.usageRequestPath = view.path;
         this.loadedUsageViewKey = '';
         this.usageItemsById.clear();
+        this.usageItems = [];
         this.usageDataAvailable = false;
         this.usageLoadFailed = false;
       }
@@ -4656,6 +4749,7 @@
     applyUsageAuditItems(key, itemsById) {
       if (!key || key !== this.usageViewKey) return false;
       this.usageItemsById = new Map(itemsById || []);
+      this.usageItems = [...this.usageItemsById.values()];
       this.loadedUsageViewKey = key;
       this.usageDataAvailable = true;
       this.usageLoadFailed = false;
@@ -4728,6 +4822,32 @@
       return normalizeGroupName(clone.textContent);
     }
 
+    renderMultiplierCell(cell) {
+      if (!cell) return;
+      const existing = cell.querySelector('.asg-usage-multiplier');
+      if (cell.querySelector('[data-testid="usage-group-rate-multiplier"]')) {
+        existing?.remove();
+        return;
+      }
+      const name = this.getGroupName(cell);
+      const multiplier = this.multiplierByGroup.get(name);
+      if (multiplier == null) {
+        existing?.remove();
+        return;
+      }
+      const text = formatMultiplier(multiplier);
+      if (existing) {
+        existing.dataset.groupName = name;
+        if (existing.textContent !== text) existing.textContent = text;
+      } else {
+        const badge = document.createElement('span');
+        badge.className = 'asg-usage-multiplier';
+        badge.dataset.groupName = name;
+        badge.textContent = text;
+        cell.appendChild(badge);
+      }
+    }
+
     renderMultipliers(table, indexes = this.getTableColumnIndexes(table)) {
       if (!this.multiplierByGroup.size) return;
       const groupColumnIndex = indexes.group;
@@ -4736,28 +4856,14 @@
         const cells = row.querySelectorAll('td');
         const cell = cells[groupColumnIndex];
         if (!cell) continue;
-        const existing = cell.querySelector('.asg-usage-multiplier');
-        if (cell.querySelector('[data-testid="usage-group-rate-multiplier"]')) {
-          existing?.remove();
-          continue;
-        }
-        const name = this.getGroupName(cell);
-        const multiplier = this.multiplierByGroup.get(name);
-        if (multiplier == null) {
-          existing?.remove();
-          continue;
-        }
-        const text = formatMultiplier(multiplier);
-        if (existing) {
-          existing.dataset.groupName = name;
-          if (existing.textContent !== text) existing.textContent = text;
-        } else {
-          const badge = document.createElement('span');
-          badge.className = 'asg-usage-multiplier';
-          badge.dataset.groupName = name;
-          badge.textContent = text;
-          cell.appendChild(badge);
-        }
+        this.renderMultiplierCell(cell);
+      }
+    }
+
+    renderMobileMultipliers(contexts) {
+      if (!this.multiplierByGroup.size) return;
+      for (const context of contexts || []) {
+        this.renderMultiplierCell(getUsageMobileFieldValueRoot(context?.fields?.group));
       }
     }
 
@@ -4767,8 +4873,27 @@
       const tokenCell = cells[indexes.tokens];
       const costCell = cells[indexes.cost];
       if (!groupCell || !tokenCell || !costCell) return null;
-      const modelCell = cells[indexes.model];
-      const billingCell = cells[indexes.billing];
+      return this.getCostAuditRecordFromFields({
+        groupCell,
+        tokenCell,
+        costCell,
+        modelCell: cells[indexes.model],
+        billingCell: cells[indexes.billing],
+      });
+    }
+
+    getMobileCostAuditRecord(context) {
+      return this.getCostAuditRecordFromFields({
+        groupCell: getUsageMobileFieldValueRoot(context?.fields?.group),
+        tokenCell: getUsageMobileFieldValueRoot(context?.fields?.tokens),
+        costCell: getUsageMobileFieldValueRoot(context?.fields?.cost),
+        modelCell: getUsageMobileFieldValueRoot(context?.fields?.model),
+        billingCell: getUsageMobileFieldValueRoot(context?.fields?.billing),
+      });
+    }
+
+    getCostAuditRecordFromFields({ groupCell, tokenCell, costCell, modelCell, billingCell }) {
+      if (!groupCell || !tokenCell || !costCell) return null;
       const modelNode = modelCell?.querySelector('span.font-medium');
       const tokenValues = [...tokenCell.querySelectorAll('span.font-medium')]
         .filter((node) => !node.closest('.asg-usage-cost-audit'))
@@ -4788,20 +4913,23 @@
       };
     }
 
-    getUsageApiAuditRecord(row) {
-      const item = this.usageItemsById.get(String(row?.dataset?.rowId || '').trim());
+    getUsageApiAuditRecord(record, index = -1, totalRecords = 0) {
+      const rowId = String(record?.dataset?.rowId || '').trim();
+      const item = rowId
+        ? this.usageItemsById.get(rowId)
+        : (this.usageItems.length === totalRecords && index >= 0 ? this.usageItems[index] : null);
       return item ? buildUsageAuditRecordFromApiItem(item) : null;
     }
 
-    ensureCostSummary(table) {
-      let summary = this.summaryByTable.get(table);
+    ensureCostSummary(anchor) {
+      let summary = this.summaryByTable.get(anchor);
       if (summary?.isConnected) return summary;
       summary = document.createElement('div');
       summary.className = 'asg-usage-cost-summary';
       summary.setAttribute('role', 'status');
       summary.setAttribute('aria-live', 'polite');
-      table.parentElement?.insertBefore(summary, table);
-      this.summaryByTable.set(table, summary);
+      anchor.parentElement?.insertBefore(summary, anchor);
+      this.summaryByTable.set(anchor, summary);
       return summary;
     }
 
@@ -4822,13 +4950,13 @@
       }
       const counts = { ok: 0, anomaly: 0, skipped: 0 };
       let estimatedFromPage = 0;
-      for (const row of rows) {
+      for (const [index, row] of rows.entries()) {
         const extracted = this.getCostAuditRecord(row, indexes);
         if (!extracted) {
           counts.skipped += 1;
           continue;
         }
-        const apiRecord = this.getUsageApiAuditRecord(row);
+        const apiRecord = this.getUsageApiAuditRecord(row, index, rows.length);
         const result = auditUsageCostRecord(apiRecord || extracted.record, this.modelPriceIndex, this.config);
         if (!apiRecord) estimatedFromPage += 1;
         counts[result.status] = (counts[result.status] || 0) + 1;
@@ -4837,6 +4965,50 @@
       const sourceSuffix = estimatedFromPage > 0 ? ` · ${estimatedFromPage} 条按页面显示值估算` : '';
       summary.textContent = `费用校验：${counts.ok} 条正常 · ${counts.anomaly} 条异常 · ${counts.skipped} 条跳过${sourceSuffix}`;
       summary.classList.toggle('asg-usage-cost-summary-warning', counts.anomaly > 0);
+    }
+
+    renderMobileCostAudit(contexts) {
+      const allContexts = [...(contexts || [])];
+      const groups = new Map();
+      allContexts.forEach((context, index) => {
+        const anchor = context.container || context.record;
+        if (!anchor) return;
+        const entries = groups.get(anchor) || [];
+        entries.push({ context, index });
+        groups.set(anchor, entries);
+      });
+      for (const [anchor, entries] of groups) {
+        const summary = this.ensureCostSummary(anchor);
+        if (!this.config.usageCostAuditEnabled) {
+          entries.forEach(({ context }) => context.fields?.cost?.querySelector?.('.asg-usage-cost-audit')?.remove());
+          summary.textContent = '费用校验：已关闭';
+          summary.classList.remove('asg-usage-cost-summary-warning');
+          continue;
+        }
+        if (!this.hasMonitorData) {
+          entries.forEach(({ context }) => context.fields?.cost?.querySelector?.('.asg-usage-cost-audit')?.remove());
+          summary.textContent = this.loadFailed ? '费用校验：模型价格读取失败' : '费用校验：正在读取模型价格…';
+          summary.classList.toggle('asg-usage-cost-summary-warning', this.loadFailed);
+          continue;
+        }
+        const counts = { ok: 0, anomaly: 0, skipped: 0 };
+        let estimatedFromPage = 0;
+        for (const { context, index } of entries) {
+          const extracted = this.getMobileCostAuditRecord(context);
+          if (!extracted) {
+            counts.skipped += 1;
+            continue;
+          }
+          const apiRecord = this.getUsageApiAuditRecord(context.record, index, allContexts.length);
+          const result = auditUsageCostRecord(apiRecord || extracted.record, this.modelPriceIndex, this.config);
+          if (!apiRecord) estimatedFromPage += 1;
+          counts[result.status] = (counts[result.status] || 0) + 1;
+          this.renderCostAuditResult(extracted.costCell, result);
+        }
+        const sourceSuffix = estimatedFromPage > 0 ? ` · ${estimatedFromPage} 条按页面显示值估算` : '';
+        summary.textContent = `费用校验：${counts.ok} 条正常 · ${counts.anomaly} 条异常 · ${counts.skipped} 条跳过${sourceSuffix}`;
+        summary.classList.toggle('asg-usage-cost-summary-warning', counts.anomaly > 0);
+      }
     }
 
     renderCostAuditResult(costCell, result) {
@@ -5580,6 +5752,9 @@
     getUsageColumnKey,
     getUsageColumnIndexes,
     hasUsageDetailColumns,
+    getUsageMobileFieldMap,
+    findUsageMobileRecordContexts,
+    getUsageMobileRecordSignature,
     getPageFeatures,
     createStabilityState,
     getRecommendationStrategySignature,
