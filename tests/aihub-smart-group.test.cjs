@@ -531,6 +531,56 @@ test('uses the provider update marker before falling back to visible data rows',
   assert.equal(core.getProviderRefreshDataSignature(rowRoot), 'provider-a001:A001 0.1x 可用|1:A002 0.2x 异常');
 });
 
+test('falls back to provider rows when the update marker is unchanged', () => {
+  let generatedText = '更新于 2026/08/24 18:00:01';
+  let rowText = 'A001 0.1x 可用';
+  let rowScans = 0;
+  const root = {
+    querySelector: () => ({ get textContent() { return generatedText; } }),
+    querySelectorAll: () => {
+      rowScans += 1;
+      return [{
+        get textContent() { return rowText; },
+        getAttribute: (name) => (name === 'data-testid' ? 'provider-a001' : null),
+      }];
+    },
+  };
+
+  const baseline = core.getProviderRefreshDataSnapshot(root);
+  assert.deepEqual(baseline, {
+    generated: 'generated:更新于 2026/08/24 18:00:01',
+    rows: 'provider-a001:A001 0.1x 可用',
+  });
+  assert.equal(rowScans, 1);
+  assert.equal(core.hasProviderRefreshDataChanged(baseline, root), false);
+  assert.equal(rowScans, 2);
+
+  rowText = 'A001 0.2x 可用';
+  assert.equal(core.hasProviderRefreshDataChanged(baseline, root), true);
+  assert.equal(rowScans, 3);
+
+  generatedText = '更新于 2026/08/24 18:00:02';
+  assert.equal(core.hasProviderRefreshDataChanged(baseline, root), true);
+  assert.equal(rowScans, 3);
+});
+
+test('scopes provider refresh tracking to the monitor panel when available', () => {
+  const selector = '[data-testid="llm-monitor-panel"]';
+  const panel = {
+    matches: (value) => value === selector,
+    getAttribute: (name) => (name === 'data-testid' ? 'llm-monitor-panel' : null),
+  };
+  const main = {
+    matches: () => false,
+  };
+  const button = { closest: () => null };
+
+  assert.equal(core.findProviderRefreshTrackingRoot({ closest: () => panel }, main), panel);
+  assert.equal(core.findProviderRefreshTrackingRoot(button, panel), panel);
+  assert.equal(core.findProviderRefreshTrackingRoot(button, main), main);
+  assert.equal(core.findProviderRefreshTrackingRoot(button, null), null);
+});
+
 test('normalizes provider notices and only accepts HTTP report links', () => {
   assert.equal(core.normalizeProviderPublicDetail('  倍率可能调整，请设置上限  '), '倍率可能调整，请设置上限');
   assert.equal(core.normalizeProviderPublicDetail('   '), null);
@@ -2299,8 +2349,9 @@ test('keeps provider auto refresh anchored to the last refresh time', () => {
   assert.match(providerEnhancerSource, /this\.refreshObserver = new MutationObserver\(\(\) => this\.queueRefreshCompletionCheck\(\)\);/);
   assert.match(providerEnhancerSource, /this\.refreshCheckTimer = window\.setTimeout\(\(\) => \{[\s\S]*this\.checkProviderRefreshCompletion\(\);[\s\S]*PROVIDER_REFRESH_COMPLETION_CHECK_DEBOUNCE_MS/);
   assert.match(providerEnhancerSource, /this\.refreshCompletionTimer = window\.setTimeout\(\(\) => \{[\s\S]*if \(!this\.checkProviderRefreshCompletion\(\)\) this\.completeRefreshTracking\(false\);[\s\S]*PROVIDER_REFRESH_COMPLETION_TIMEOUT_MS/);
-  assert.match(providerEnhancerSource, /this\.refreshDataSignature = getProviderRefreshDataSignature\(observedRoot\);/);
-  assert.match(providerEnhancerSource, /if \(dataSignature && dataSignature !== this\.refreshDataSignature\) this\.refreshSawDataChange = true;/);
+  assert.match(providerEnhancerSource, /const observedRoot = findProviderRefreshTrackingRoot\(button, root \|\| document\.querySelector\('main'\)\);/);
+  assert.match(providerEnhancerSource, /this\.refreshDataSnapshot = getProviderRefreshDataSnapshot\(observedRoot\);/);
+  assert.match(providerEnhancerSource, /if \(hasProviderRefreshDataChanged\(this\.refreshDataSnapshot, root\)\) this\.refreshSawDataChange = true;/);
   assert.match(providerEnhancerSource, /if \(this\.refreshSawDataChange && !busy\) \{\s*this\.completeRefreshTracking\(true\);/);
   assert.match(providerEnhancerSource, /this\.syncRefreshTimer\(false, !succeeded\);/);
   assert.match(providerEnhancerSource, /if \(!isPageVisible\(\)\) \{\s*if \(this\.refreshTimer\) window\.clearTimeout\(this\.refreshTimer\);/);
