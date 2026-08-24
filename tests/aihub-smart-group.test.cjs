@@ -2102,6 +2102,121 @@ test('deduplicates and caches provider series requests independently', async () 
   }
 });
 
+test('reuses provider series until the summary reports a new probe cycle', async () => {
+  const originalWindow = globalThis.window;
+  const originalLocalStorage = globalThis.localStorage;
+  const originalDateNow = Date.now;
+  let requestCount = 0;
+  let now = 1_000_000;
+  const storage = { getItem: () => '' };
+  globalThis.localStorage = storage;
+  globalThis.window = {
+    localStorage: storage,
+    fetch: async () => {
+      requestCount += 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: {
+          generated_at: now,
+          items: [{ group_id: 1, probe: [[now, 1]], user_ttft: [] }],
+        } }),
+      };
+    },
+  };
+  Date.now = () => now;
+  core.clearMonitorSeriesCache();
+
+  try {
+    const initial = await core.fetchMonitorSeries();
+    assert.equal(requestCount, 1);
+    assert.equal(core.getLatestMonitorSummaryProbeAt({ apis: [{ checkedAt: new Date(now).toISOString() }] }), now);
+
+    now += 60_001;
+    const unchangedSummary = { apis: [{ checkedAt: new Date(1_000_000).toISOString() }] };
+    const reused = await core.fetchMonitorSeriesForSummary(unchangedSummary, {
+      config: core.DEFAULT_CONFIG,
+      now,
+    });
+    assert.equal(requestCount, 1);
+    assert.equal(reused, initial);
+    assert.equal(core.shouldRefreshMonitorSeriesForSummary(unchangedSummary, initial, 1_000_000, { now }), false);
+
+    const advancedSummary = { apis: [{ checkedAt: new Date(1_300_000).toISOString() }] };
+    const refreshed = await core.fetchMonitorSeriesForSummary(advancedSummary, {
+      config: core.DEFAULT_CONFIG,
+      now,
+    });
+    assert.equal(requestCount, 2);
+    assert.notEqual(refreshed, initial);
+
+    now += 60_001;
+    await core.fetchMonitorSeriesForSummary(advancedSummary, {
+      config: { ...core.DEFAULT_CONFIG, latencySource: 'user', userTtftWindow: '10m' },
+      now,
+    });
+    assert.equal(requestCount, 3);
+    assert.equal(core.shouldRefreshMonitorSeriesForSummary(unchangedSummary, initial, 1_000_000, {
+      now: 1_600_000,
+      maxReuseMs: 600_000,
+    }), true);
+  } finally {
+    Date.now = originalDateNow;
+    core.clearMonitorSeriesCache();
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = originalLocalStorage;
+  }
+});
+
+test('joins an in-flight provider series refresh before reusing the cache', async () => {
+  const originalWindow = globalThis.window;
+  const originalLocalStorage = globalThis.localStorage;
+  let requestCount = 0;
+  let resolveRefresh;
+  const storage = { getItem: () => '' };
+  globalThis.localStorage = storage;
+  globalThis.window = {
+    localStorage: storage,
+    fetch: async () => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        return { ok: true, status: 200, json: async () => ({ data: {
+          generated_at: 1_000,
+          items: [{ group_id: 1, probe: [[1_000, 1]], user_ttft: [] }],
+        } }) };
+      }
+      return new Promise((resolve) => { resolveRefresh = resolve; });
+    },
+  };
+  core.clearMonitorSeriesCache();
+
+  try {
+    await core.fetchMonitorSeries();
+    const forced = core.fetchMonitorSeries({ force: true });
+    await Promise.resolve();
+    const joined = core.fetchMonitorSeriesForSummary({
+      apis: [{ checkedAt: new Date(1_000).toISOString() }],
+    }, { config: core.DEFAULT_CONFIG });
+    assert.equal(requestCount, 2);
+
+    resolveRefresh({ ok: true, status: 200, json: async () => ({ data: {
+      generated_at: 2_000,
+      items: [{ group_id: 1, probe: [[2_000, 1]], user_ttft: [] }],
+    } }) });
+    const [fresh, shared] = await Promise.all([forced, joined]);
+    assert.equal(fresh, shared);
+    assert.deepEqual(shared.seriesByApiId['1'], [[2_000, 1]]);
+  } finally {
+    core.clearMonitorSeriesCache();
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = originalLocalStorage;
+  }
+});
+
 test('clears a failed provider series request so a later call can retry', async () => {
   const originalWindow = globalThis.window;
   const originalLocalStorage = globalThis.localStorage;

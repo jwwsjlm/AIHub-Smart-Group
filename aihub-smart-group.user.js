@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.42
+// @version      0.14.43
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.42';
+  const SCRIPT_VERSION = '0.14.43';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -38,6 +38,8 @@
   const MONITOR_SUMMARY_CACHE_TTL_MS = 2_000;
   const PASSIVE_MONITOR_SUMMARY_CACHE_TTL_MS = 60_000;
   const MONITOR_SERIES_CACHE_TTL_MS = 60_000;
+  const MONITOR_SERIES_MAX_REUSE_MS = 10 * 60 * 1000;
+  const MONITOR_SERIES_PROBE_ADVANCE_TOLERANCE_MS = 5_000;
   const ACCOUNT_BALANCE_CACHE_TTL_MS = 60_000;
   const MONITOR_SAMPLE_CLOCK_SKEW_MS = 60_000;
   const MONITOR_AVAILABILITY_WINDOW_MS = 10 * 60 * 1000;
@@ -3025,6 +3027,29 @@
     monitorSeriesCache.fetchedAt = 0;
   }
 
+  function getLatestMonitorSummaryProbeAt(summary) {
+    let latest = null;
+    for (const row of Array.isArray(summary?.apis) ? summary.apis : []) {
+      const timestamp = parseMonitorSampleTimestamp(row?.checkedAt ?? row?.lastProbedAt ?? row?.last_probed_at);
+      if (Number.isFinite(timestamp) && (latest === null || timestamp > latest)) latest = timestamp;
+    }
+    return latest;
+  }
+
+  function shouldRefreshMonitorSeriesForSummary(summary, series, fetchedAt, options = {}) {
+    if (options?.force === true || !series) return true;
+    const now = Number(options?.now ?? Date.now());
+    const cachedAt = Number(fetchedAt);
+    const maxReuseMs = Math.max(0, Number(options?.maxReuseMs ?? MONITOR_SERIES_MAX_REUSE_MS) || 0);
+    if (!Number.isFinite(cachedAt) || cachedAt <= 0 || !Number.isFinite(now) || now - cachedAt >= maxReuseMs) return true;
+    const summaryLatest = getLatestMonitorSummaryProbeAt(summary);
+    if (summaryLatest === null) return false;
+    const seriesLatest = getLatestMonitorSampleAt(series);
+    if (seriesLatest === null) return true;
+    const toleranceMs = Math.max(0, Number(options?.toleranceMs ?? MONITOR_SERIES_PROBE_ADVANCE_TOLERANCE_MS) || 0);
+    return summaryLatest > seriesLatest + toleranceMs;
+  }
+
   async function requestMonitorSummary(options = {}) {
     try {
       const payload = await apiRequest('/public/providers?timezone=Asia%2FShanghai', options);
@@ -3098,6 +3123,21 @@
       });
     monitorSeriesCache.pending = pending;
     return pending;
+  }
+
+  function fetchMonitorSeriesForSummary(summary, options = {}) {
+    const force = options?.force === true;
+    if (monitorSeriesCache.pending) return monitorSeriesCache.pending;
+    if (shouldUseUserTtftSeries(options?.config)) {
+      return fetchMonitorSeries({ force, timeoutMs: options?.timeoutMs });
+    }
+    if (!shouldRefreshMonitorSeriesForSummary(
+      summary,
+      monitorSeriesCache.value,
+      monitorSeriesCache.fetchedAt,
+      { force, now: options?.now },
+    )) return Promise.resolve(monitorSeriesCache.value);
+    return fetchMonitorSeries({ force: true, timeoutMs: options?.timeoutMs });
   }
 
   function clearCurrentBalanceCache() {
@@ -4012,9 +4052,13 @@
       this.setStatus('检测中...');
       this.renderActionState();
       try {
+        const summaryPromise = fetchMonitorSummary({ force: forceLog });
+        const seriesPromise = forceLog || shouldUseUserTtftSeries(this.config) || !monitorSeriesCache.value
+          ? fetchMonitorSeries({ force: forceLog })
+          : summaryPromise.then((summary) => fetchMonitorSeriesForSummary(summary, { config: this.config }));
         const [summary, seriesResult, balanceResult] = await Promise.all([
-          fetchMonitorSummary({ force: forceLog }),
-          fetchMonitorSeries({ force: forceLog })
+          summaryPromise,
+          seriesPromise
             .then((value) => ({ value }))
             .catch((error) => ({ error })),
           fetchCurrentBalance({ force: forceLog }).then((payload) => ({ payload })).catch((error) => ({ error })),
@@ -6336,6 +6380,9 @@
     fetchMonitorSummary,
     clearMonitorSummaryCache,
     fetchMonitorSeries,
+    fetchMonitorSeriesForSummary,
+    getLatestMonitorSummaryProbeAt,
+    shouldRefreshMonitorSeriesForSummary,
     clearMonitorSeriesCache,
     fetchCurrentBalance,
     clearCurrentBalanceCache,
