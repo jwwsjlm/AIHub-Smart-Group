@@ -718,6 +718,8 @@ test('normalizes the new provider summary response and keeps both TTFT metrics',
   const summary = core.normalizeMonitorSummaryPayload({
     data: {
       generated_at: '2026-08-05T20:00:00Z',
+      total: 1,
+      schema_version: 3,
       items: [{
         code: 'A001-Plus',
         group_id: 34,
@@ -736,6 +738,10 @@ test('normalizes the new provider summary response and keeps both TTFT metrics',
   });
 
   assert.equal(summary.generatedAt, '2026-08-05T20:00:00Z');
+  assert.equal(summary.total, 1);
+  assert.equal(summary.schema_version, 3);
+  assert.equal(Object.hasOwn(summary, 'items'), false);
+  assert.equal(Object.hasOwn(summary, 'generated_at'), false);
   assert.deepEqual(summary.apis.map((row) => ({
     id: row.id,
     planType: row.planType,
@@ -745,6 +751,25 @@ test('normalizes the new provider summary response and keeps both TTFT metrics',
     user: row.userAvgTtftMs,
     samples: row.userSampleCount,
   })), [{ id: 34, planType: 'A001-Plus', priceMultiplier: 0.06, probe: 4373, e2e: 4500, user: 6085.5, samples: 16 }]);
+});
+
+test('does not retain the raw provider rows beside normalized history', () => {
+  const items = [{
+    code: 'A001',
+    group_id: 1,
+    history: Array.from({ length: 40 }, (_, index) => ({
+      probed_at: new Date(1_700_000_000_000 + (index * 60_000)).toISOString(),
+      status: index % 2 ? 'operational' : 'failed',
+      sample_count: 2,
+    })),
+  }];
+  const data = { generated_at: '2026-08-24T10:59:00Z', total: 1, items };
+  const normalized = core.normalizeMonitorSummaryPayload({ data });
+  const legacyShape = { ...data, generatedAt: data.generated_at, apis: items.map(core.normalizeMonitorRow) };
+
+  assert.equal(Object.hasOwn(normalized, 'items'), false);
+  assert.equal(normalized.apis[0].history.length, 40);
+  assert.ok(JSON.stringify(normalized).length < JSON.stringify(legacyShape).length);
 });
 
 test('normalizes the new cache, model health, and model detection fields', () => {
@@ -1219,9 +1244,15 @@ test('normalizes the new provider series response for availability and user fres
   const at = Date.parse('2026-08-05T19:59:00Z');
   const series = core.normalizeMonitorSeriesPayload({ data: {
     generated_at: '2026-08-05T20:00:00Z',
+    range: '6h',
+    schema_version: 2,
     items: [{ group_id: 34, probe: [[at, 1]], user_ttft: [{ at: '2026-08-05T19:58:00Z', avg_ttft_ms: 6000, sample_count: 3, has_data: true }] }],
   } });
 
+  assert.equal(series.range, '6h');
+  assert.equal(series.schema_version, 2);
+  assert.equal(Object.hasOwn(series, 'items'), false);
+  assert.equal(Object.hasOwn(series, 'generated_at'), false);
   assert.deepEqual(series.seriesByApiId['34'], [[at, 1]]);
   assert.equal(series.userTtftByGroupId['34'][0].sample_count, 3);
   assert.equal(core.getLatestMonitorSampleAt(series), at);
@@ -1243,6 +1274,9 @@ test('normalizes provider series aliases and fills empty direct maps from items'
   assert.equal(series.userTtftByGroupId['3'][0].probedAt, '2026-08-24T02:18:00Z');
   assert.equal(series.userTtftByGroupId['4'][0].at, '2026-08-24T02:19:00Z');
   assert.equal(core.getLatestMonitorSampleAt(series), Date.parse('2026-08-24T02:19:00Z'));
+  assert.equal(Object.hasOwn(series, 'items'), false);
+  assert.equal(Object.hasOwn(series, 'series_by_api_id'), false);
+  assert.equal(Object.hasOwn(series, 'userTTFTByApiId'), false);
 });
 
 test('builds a weighted conservative provider series fallback from summary history', () => {
