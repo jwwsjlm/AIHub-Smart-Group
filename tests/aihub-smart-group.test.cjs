@@ -783,6 +783,28 @@ test('scopes provider refresh tracking to the monitor panel when available', () 
   assert.equal(core.findProviderRefreshTrackingRoot(button, null), null);
 });
 
+test('observes only the provider refresh signal area when the new layout exposes it', () => {
+  const selector = '.monitor-refresh-group,[data-testid="monitor-refresh-group"]';
+  const signalRoot = { querySelector: () => null };
+  const panel = {
+    querySelector: (value) => (value.includes('monitor-generated-at') ? { textContent: '更新' } : null),
+  };
+  const button = {
+    closest: (value) => (value === selector ? signalRoot : null),
+    parentElement: null,
+  };
+  assert.equal(core.findProviderRefreshSignalRoot(button, panel), signalRoot);
+
+  const parent = {
+    querySelector: (value) => (value.includes('monitor-generated-at') ? { textContent: '更新' } : null),
+  };
+  assert.equal(core.findProviderRefreshSignalRoot({ closest: () => null, parentElement: parent }, panel), parent);
+  const standaloneButton = { closest: () => null, parentElement: null };
+  assert.equal(core.findProviderRefreshSignalRoot(standaloneButton, panel), standaloneButton);
+
+  assert.equal(core.findProviderRefreshSignalRoot(null, panel), panel);
+});
+
 test('normalizes provider notices and only accepts HTTP report links', () => {
   assert.equal(core.normalizeProviderPublicDetail('  倍率可能调整，请设置上限  '), '倍率可能调整，请设置上限');
   assert.equal(core.normalizeProviderPublicDetail('   '), null);
@@ -2734,6 +2756,8 @@ test('keeps provider auto refresh anchored to the last refresh time', () => {
   assert.match(providerEnhancerSource, /this\.refreshCheckTimer = window\.setTimeout\(\(\) => \{[\s\S]*this\.checkProviderRefreshCompletion\(\);[\s\S]*PROVIDER_REFRESH_COMPLETION_CHECK_DEBOUNCE_MS/);
   assert.match(providerEnhancerSource, /this\.refreshCompletionTimer = window\.setTimeout\(\(\) => \{[\s\S]*if \(!this\.checkProviderRefreshCompletion\(\)\) this\.completeRefreshTracking\(false\);[\s\S]*PROVIDER_REFRESH_COMPLETION_TIMEOUT_MS/);
   assert.match(providerEnhancerSource, /const observedRoot = findProviderRefreshTrackingRoot\(button, root \|\| document\.querySelector\('main'\)\);/);
+  assert.match(providerEnhancerSource, /const signalRoot = findProviderRefreshSignalRoot\(button, observedRoot\);/);
+  assert.match(providerEnhancerSource, /this\.refreshObserver\.observe\(signalRoot, \{/);
   assert.match(providerEnhancerSource, /this\.refreshDataSnapshot = getProviderRefreshDataSnapshot\(observedRoot\);/);
   assert.match(providerEnhancerSource, /if \(hasProviderRefreshDataChanged\(this\.refreshDataSnapshot, root\)\) this\.refreshSawDataChange = true;/);
   assert.match(providerEnhancerSource, /if \(this\.refreshSawDataChange && !busy\) \{\s*this\.completeRefreshTracking\(true\);/);

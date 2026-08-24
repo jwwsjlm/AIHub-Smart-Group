@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.20
+// @version      0.14.21
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.20';
+  const SCRIPT_VERSION = '0.14.21';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -60,6 +60,8 @@
     'button.monitor-icon-button[title="刷新监测数据"]',
     'button.monitor-icon-button[title="Refresh monitoring data"]',
   ].join(',');
+  const PROVIDER_REFRESH_SIGNAL_ROOT_SELECTOR = '.monitor-refresh-group,[data-testid="monitor-refresh-group"]';
+  const PROVIDER_REFRESH_GENERATED_SELECTOR = '.monitor-generated-at,[data-testid="monitor-generated-at"]';
   const PROVIDER_SORT_BUTTON_SELECTOR = [
     'button.monitor-sort-head',
     'button[data-testid^="monitor-sort-"]',
@@ -631,6 +633,14 @@
     return root || button?.parentElement || null;
   }
 
+  function findProviderRefreshSignalRoot(button, trackingRoot) {
+    const closestGroup = button?.closest?.(PROVIDER_REFRESH_SIGNAL_ROOT_SELECTOR);
+    if (closestGroup) return closestGroup;
+    const parent = button?.parentElement;
+    if (parent?.querySelector?.(PROVIDER_REFRESH_GENERATED_SELECTOR)) return parent;
+    return button || trackingRoot || null;
+  }
+
   function isProviderRefreshButtonDisabled(button) {
     return button?.disabled === true
       || String(button?.getAttribute?.('aria-disabled') || '').trim().toLocaleLowerCase() === 'true';
@@ -643,7 +653,7 @@
   }
 
   function getProviderRefreshGeneratedSignature(root) {
-    const generatedNode = root?.querySelector?.('.monitor-generated-at,[data-testid="monitor-generated-at"]');
+    const generatedNode = root?.querySelector?.(PROVIDER_REFRESH_GENERATED_SELECTOR);
     const generatedText = String(generatedNode?.textContent || '').replace(/\s+/g, ' ').trim();
     return generatedText ? `generated:${generatedText}` : '';
   }
@@ -4831,6 +4841,7 @@
       this.refreshObserver = null;
       this.refreshButton = null;
       this.refreshRoot = null;
+      this.refreshSignalRoot = null;
       this.refreshDataSnapshot = null;
       this.lastRefreshAt = 0;
       this.refreshing = false;
@@ -5201,13 +5212,16 @@
       if (!this.active || this.refreshing || typeof MutationObserver !== 'function') return false;
       const observedRoot = findProviderRefreshTrackingRoot(button, root || document.querySelector('main'));
       if (!observedRoot) return false;
+      const signalRoot = findProviderRefreshSignalRoot(button, observedRoot);
+      if (!signalRoot) return false;
       this.refreshing = true;
       this.refreshButton = button;
       this.refreshRoot = observedRoot;
+      this.refreshSignalRoot = signalRoot;
       this.refreshDataSnapshot = getProviderRefreshDataSnapshot(observedRoot);
       this.refreshSawDataChange = false;
       this.refreshObserver = new MutationObserver(() => this.queueRefreshCompletionCheck());
-      this.refreshObserver.observe(observedRoot, {
+      this.refreshObserver.observe(signalRoot, {
         attributes: true,
         attributeFilter: ['disabled', 'aria-disabled', 'aria-busy', 'class'],
         characterData: true,
@@ -5264,6 +5278,7 @@
       this.refreshCompletionTimer = null;
       this.refreshButton = null;
       this.refreshRoot = null;
+      this.refreshSignalRoot = null;
       this.refreshDataSnapshot = null;
       this.refreshing = false;
       this.refreshSawDataChange = false;
@@ -5431,6 +5446,7 @@
     findProviderRefreshButton,
     findProviderRefreshButtonInRoot,
     findProviderRefreshTrackingRoot,
+    findProviderRefreshSignalRoot,
     isProviderRefreshButtonDisabled,
     isProviderRefreshButtonBusy,
     getProviderRefreshDataSignature,
