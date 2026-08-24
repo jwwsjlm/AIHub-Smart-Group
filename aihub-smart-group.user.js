@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.11.1
+// @version      0.11.2
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,12 +28,13 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.11.1';
+  const SCRIPT_VERSION = '0.11.2';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const API_REQUEST_TIMEOUT_MS = 15_000;
   const MONITOR_SUMMARY_CACHE_TTL_MS = 2_000;
   const ENHANCER_RENDER_DEBOUNCE_MS = 50;
+  const ROUTER_SYNC_INTERVAL_MS = 2_000;
   const USAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
   const USAGE_DETAIL_HEADERS = Object.freeze([
     'API 密钥',
@@ -3003,6 +3004,7 @@
       this.providerSort = null;
       this.rejectedToken = '';
       this.timer = null;
+      this.onRouteChange = () => this.sync();
       this.onVisibilityChange = () => {
         if (!isPageVisible()) return;
         this.sync();
@@ -3022,7 +3024,9 @@
       this.sync();
       this.timer = window.setInterval(() => {
         if (isPageVisible()) this.sync();
-      }, 1000);
+      }, ROUTER_SYNC_INTERVAL_MS);
+      window.addEventListener('popstate', this.onRouteChange);
+      window.addEventListener('hashchange', this.onRouteChange);
       document.addEventListener('visibilitychange', this.onVisibilityChange);
     }
 

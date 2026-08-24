@@ -32,6 +32,13 @@ test('wires the native key group dropdown enhancer through the app router', () =
   assert.match(userscriptSource, /input\[placeholder="搜索分组\.\.\."\]/);
 });
 
+test('reduces idle router polling while syncing browser history navigation immediately', () => {
+  assert.match(userscriptSource, /const ROUTER_SYNC_INTERVAL_MS = 2_000;/);
+  assert.match(userscriptSource, /\}, ROUTER_SYNC_INTERVAL_MS\);/);
+  assert.match(userscriptSource, /window\.addEventListener\('popstate', this\.onRouteChange\);/);
+  assert.match(userscriptSource, /window\.addEventListener\('hashchange', this\.onRouteChange\);/);
+});
+
 test('maps dropdown monitor tones to native group badge classes', () => {
   assert.equal(core.getGroupDropdownToneClass('available'), 'asg-key-group-badge-available');
   assert.equal(core.getGroupDropdownToneClass('warning'), 'asg-key-group-badge-warning');
