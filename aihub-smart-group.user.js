@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.2
+// @version      0.14.3
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.2';
+  const SCRIPT_VERSION = '0.14.3';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -49,7 +49,6 @@
   const PROVIDER_REFRESH_RETRY_MS = 1_000;
   const PROVIDER_REFRESH_UNAVAILABLE_RETRY_MS = 5_000;
   const PROVIDER_REFRESH_COMPLETION_TIMEOUT_MS = 15_000;
-  const PROVIDER_REFRESH_DATA_SETTLE_MS = 500;
   const PROVIDER_REFRESH_BUTTON_SELECTOR = [
     'button.monitor-icon-button[title="刷新监测数据"]',
     'button.monitor-icon-button[title="Refresh monitoring data"]',
@@ -450,6 +449,19 @@
     if (isProviderRefreshButtonDisabled(button)) return true;
     if (String(button?.getAttribute?.('aria-busy') || '').trim().toLocaleLowerCase() === 'true') return true;
     return /(?:^|[\s_-])(?:loading|is-loading|animate-spin|spinning)(?:$|[\s_-])/.test(String(button?.className || ''));
+  }
+
+  function getProviderRefreshDataSignature(root) {
+    const generatedNode = root?.querySelector?.('.monitor-generated-at,[data-testid="monitor-generated-at"]');
+    const generatedText = String(generatedNode?.textContent || '').replace(/\s+/g, ' ').trim();
+    if (generatedText) return `generated:${generatedText}`;
+    const entries = [...(root?.querySelectorAll?.('.decision-entry,[data-testid^="monitor-provider-"],table tbody tr') || [])];
+    if (!entries.length) return '';
+    return entries.slice(0, 100).map((entry, index) => {
+      const identity = String(entry?.getAttribute?.('data-testid') || entry?.getAttribute?.('data-provider-id') || index);
+      const text = String(entry?.textContent || '').replace(/\s+/g, ' ').trim();
+      return `${identity}:${text}`;
+    }).join('|');
   }
 
   function normalizeCacheHitRate(value) {
@@ -4116,13 +4128,12 @@
       this.sortVerifyTimer = null;
       this.refreshTimer = null;
       this.refreshCompletionTimer = null;
-      this.refreshSettleTimer = null;
       this.refreshObserver = null;
       this.refreshButton = null;
       this.refreshRoot = null;
+      this.refreshDataSignature = '';
       this.lastRefreshAt = 0;
       this.refreshing = false;
-      this.refreshSawBusy = false;
       this.refreshSawDataChange = false;
       this.sortClickCount = 0;
       this.sortConvergenceExhausted = false;
@@ -4404,7 +4415,7 @@
       this.refreshing = true;
       this.refreshButton = button;
       this.refreshRoot = observedRoot;
-      this.refreshSawBusy = isProviderRefreshButtonBusy(button);
+      this.refreshDataSignature = getProviderRefreshDataSignature(observedRoot);
       this.refreshSawDataChange = false;
       this.refreshObserver = new MutationObserver((records) => this.handleRefreshMutations(records));
       this.refreshObserver.observe(observedRoot, {
@@ -4418,24 +4429,16 @@
       return true;
     }
 
-    handleRefreshMutations(records) {
+    handleRefreshMutations() {
       if (!this.refreshing) return;
-      const button = this.refreshButton;
-      if (!button) return this.completeRefreshTracking(false);
-      const busy = isProviderRefreshButtonBusy(button);
-      if (busy) {
-        this.refreshSawBusy = true;
-        return;
-      }
-      if (this.refreshSawBusy) return this.completeRefreshTracking(true);
       const root = this.refreshRoot;
-      if ([...(records || [])].some((record) => record.target !== button && (record.target === root || root?.contains?.(record.target)))) {
-        this.refreshSawDataChange = true;
-        if (this.refreshSettleTimer) window.clearTimeout(this.refreshSettleTimer);
-        this.refreshSettleTimer = window.setTimeout(() => {
-          if (this.refreshing && this.refreshSawDataChange && !isProviderRefreshButtonBusy(this.refreshButton)) this.completeRefreshTracking(true);
-        }, PROVIDER_REFRESH_DATA_SETTLE_MS);
-      }
+      const button = findProviderRefreshButtonInRoot(root) || this.refreshButton;
+      if (!button) return this.completeRefreshTracking(false);
+      this.refreshButton = button;
+      const busy = isProviderRefreshButtonBusy(button);
+      const dataSignature = getProviderRefreshDataSignature(root);
+      if (dataSignature && dataSignature !== this.refreshDataSignature) this.refreshSawDataChange = true;
+      if (this.refreshSawDataChange && !busy) this.completeRefreshTracking(true);
     }
 
     completeRefreshTracking(succeeded) {
@@ -4448,14 +4451,12 @@
     stopRefreshTracking() {
       this.refreshObserver?.disconnect();
       if (this.refreshCompletionTimer) window.clearTimeout(this.refreshCompletionTimer);
-      if (this.refreshSettleTimer) window.clearTimeout(this.refreshSettleTimer);
       this.refreshObserver = null;
       this.refreshCompletionTimer = null;
-      this.refreshSettleTimer = null;
       this.refreshButton = null;
       this.refreshRoot = null;
+      this.refreshDataSignature = '';
       this.refreshing = false;
-      this.refreshSawBusy = false;
       this.refreshSawDataChange = false;
     }
   }
@@ -4604,6 +4605,7 @@
     findProviderRefreshButtonInRoot,
     isProviderRefreshButtonDisabled,
     isProviderRefreshButtonBusy,
+    getProviderRefreshDataSignature,
     normalizeCacheHitRate,
     formatCacheHitRate,
     normalizeRuntimeCache1h,

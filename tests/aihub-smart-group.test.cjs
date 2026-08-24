@@ -470,6 +470,23 @@ test('recognizes native provider refresh loading signals', () => {
   assert.equal(core.isProviderRefreshButtonBusy({ className: 'monitor-icon-button', getAttribute: () => null }), false);
 });
 
+test('uses the provider update marker before falling back to visible data rows', () => {
+  const markerRoot = {
+    querySelector: () => ({ textContent: '更新于 2026/08/24 18:00:01' }),
+    querySelectorAll: () => assert.fail('the update marker should avoid scanning provider rows'),
+  };
+  assert.equal(core.getProviderRefreshDataSignature(markerRoot), 'generated:更新于 2026/08/24 18:00:01');
+
+  const rowRoot = {
+    querySelector: () => null,
+    querySelectorAll: () => [
+      { textContent: 'A001 0.1x 可用', getAttribute: (name) => (name === 'data-testid' ? 'provider-a001' : null) },
+      { textContent: 'A002 0.2x 异常', getAttribute: () => null },
+    ],
+  };
+  assert.equal(core.getProviderRefreshDataSignature(rowRoot), 'provider-a001:A001 0.1x 可用|1:A002 0.2x 异常');
+});
+
 test('normalizes the new provider summary response and keeps both TTFT metrics', () => {
   const summary = core.normalizeMonitorSummaryPayload({
     data: {
@@ -2106,7 +2123,9 @@ test('keeps provider auto refresh anchored to the last refresh time', () => {
   assert.match(providerEnhancerSource, /const refreshUnavailable = forceBackoff \|\| \(refreshDue && !refreshStarted\);/);
   assert.match(providerEnhancerSource, /getProviderRefreshTimerDelay\(Date\.now\(\), this\.lastRefreshAt, intervalMs, refreshUnavailable\)/);
   assert.match(providerEnhancerSource, /this\.refreshCompletionTimer = window\.setTimeout\(\(\) => this\.completeRefreshTracking\(false\), PROVIDER_REFRESH_COMPLETION_TIMEOUT_MS\);/);
-  assert.match(providerEnhancerSource, /if \(this\.refreshSawBusy\) return this\.completeRefreshTracking\(true\);/);
+  assert.match(providerEnhancerSource, /this\.refreshDataSignature = getProviderRefreshDataSignature\(observedRoot\);/);
+  assert.match(providerEnhancerSource, /if \(dataSignature && dataSignature !== this\.refreshDataSignature\) this\.refreshSawDataChange = true;/);
+  assert.match(providerEnhancerSource, /if \(this\.refreshSawDataChange && !busy\) this\.completeRefreshTracking\(true\);/);
   assert.match(providerEnhancerSource, /this\.syncRefreshTimer\(false, !succeeded\);/);
   assert.match(providerEnhancerSource, /if \(!isPageVisible\(\)\) \{\s*if \(this\.refreshTimer\) window\.clearTimeout\(this\.refreshTimer\);/);
   assert.doesNotMatch(providerEnhancerSource, /this\.refreshTimer = window\.setInterval/);
@@ -2256,17 +2275,22 @@ test('backs off provider DOM scans only while the native refresh button is unava
   }
 });
 
-test('confirms provider auto refresh only after native loading completes, then backs off on timeout', () => {
+test('confirms provider auto refresh only after data changes, then backs off when loading ends without data', () => {
   const originalWindow = globalThis.window;
   const originalDocument = globalThis.document;
   const originalMutationObserver = globalThis.MutationObserver;
   const originalDateNow = Date.now;
   let now = 60_000;
   let observer = null;
+  let generatedText = '更新于 2026/08/24 17:00:00';
   const timers = [];
+  const generatedNode = {
+    get textContent() { return generatedText; },
+  };
   const root = {
     contains: () => true,
-    querySelector: () => button,
+    querySelector: (selector) => (selector.includes('monitor-generated-at') ? generatedNode : button),
+    querySelectorAll: () => [],
   };
   const button = {
     disabled: false,
@@ -2308,6 +2332,10 @@ test('confirms provider auto refresh only after native loading completes, then b
     button.disabled = false;
     now = 61_000;
     observer.callback([{ target: button }]);
+    assert.equal(enhancer.refreshing, true);
+    assert.equal(enhancer.lastRefreshAt, 0);
+    generatedText = '更新于 2026/08/24 17:00:01';
+    observer.callback([{ target: generatedNode }]);
     assert.equal(enhancer.refreshing, false);
     assert.equal(enhancer.lastRefreshAt, 61_000);
     assert.deepEqual(schedules, [[false, false]]);
@@ -2317,6 +2345,11 @@ test('confirms provider auto refresh only after native loading completes, then b
     timers.length = 0;
     button.disabled = false;
     assert.equal(enhancer.refresh(undefined, now), true);
+    observer.callback([{ target: button }]);
+    button.disabled = false;
+    observer.callback([{ target: button }]);
+    assert.equal(enhancer.refreshing, true);
+    assert.equal(enhancer.lastRefreshAt, 61_000);
     const timeout = timers.find((timer) => timer.delay === 15_000);
     timeout.callback();
     assert.equal(enhancer.lastRefreshAt, 61_000);
