@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.0
+// @version      0.14.1
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.0';
+  const SCRIPT_VERSION = '0.14.1';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -38,6 +38,7 @@
   const MONITOR_SERIES_CACHE_TTL_MS = 60_000;
   const MONITOR_SAMPLE_CLOCK_SKEW_MS = 60_000;
   const MONITOR_HISTORY_SAMPLE_COUNT_CAP = 60;
+  const USER_TTFT_SAMPLE_COUNT_MAX = 1_000_000;
   const ENHANCER_RENDER_DEBOUNCE_MS = 50;
   const ROUTER_SYNC_INTERVAL_MS = 2_000;
   const USAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
@@ -181,6 +182,7 @@
     minSuccessPoints10m: 1,
     minConsecutiveSuccesses10m: 2,
     latencySource: 'probe',
+    minUserTtftSamples: 1,
     modelPriceModel: 'sol',
     usageCostAuditEnabled: true,
     usageCostAuditDisplay: 'anomalies',
@@ -277,6 +279,7 @@
       minSuccessPoints10m: Math.round(clamp(numberOr(source.minSuccessPoints10m, DEFAULT_CONFIG.minSuccessPoints10m), 1, 60)),
       minConsecutiveSuccesses10m: Math.round(clamp(numberOr(source.minConsecutiveSuccesses10m, DEFAULT_CONFIG.minConsecutiveSuccesses10m), 1, 60)),
       latencySource: normalizeLatencySource(source.latencySource),
+      minUserTtftSamples: normalizeUserTtftSampleCount(source.minUserTtftSamples),
       modelPriceModel: normalizeModelPriceModel(source.modelPriceModel),
       usageCostAuditEnabled: source.usageCostAuditEnabled !== false,
       usageCostAuditDisplay: source.usageCostAuditDisplay === 'all' ? 'all' : 'anomalies',
@@ -294,7 +297,7 @@
     const candidateFilterChanged = CANDIDATE_FILTER_SETTING_KEYS.includes(key);
     return {
       recommendation: renderAll || candidateFilterChanged || key === 'recommendationPriceBasis',
-      balance: renderAll || candidateFilterChanged || key === 'balanceMaxPrice' || key === 'latencySource',
+      balance: renderAll || candidateFilterChanged || key === 'balanceMaxPrice' || key === 'latencySource' || key === 'minUserTtftSamples',
       excluded: renderAll || key === 'excludedGroupKeywords',
       cooldown: renderAll || key === 'cooldownMinutes',
     };
@@ -327,6 +330,10 @@
 
   function normalizeLatencySource(value) {
     return value === 'user' ? 'user' : 'probe';
+  }
+
+  function normalizeUserTtftSampleCount(value) {
+    return Math.round(clamp(numberOr(value, DEFAULT_CONFIG.minUserTtftSamples), 1, USER_TTFT_SAMPLE_COUNT_MAX));
   }
 
   function normalizeModelPriceModel(value) {
@@ -798,7 +805,8 @@
     return isModelDetectionWarning(getModelDetection(row));
   }
 
-  function getLatencyMetric(row, source = 'probe') {
+  function getLatencyMetric(row, source = 'probe', minUserTtftSamples = DEFAULT_CONFIG.minUserTtftSamples) {
+    const latencySource = normalizeLatencySource(source);
     const probe = nonNegativeNumberOrNull(
       row?.probeFirstTokenLatencyMs
       ?? row?.probe_ttft_ms
@@ -806,13 +814,27 @@
       ?? row?.avg_ttft_ms,
     );
     const userValue = nonNegativeNumberOrNull(row?.userAvgTtftMs ?? row?.user_avg_ttft_ms);
-    const userSampleCount = Number(row?.userSampleCount ?? row?.user_sample_count);
+    const userSampleCount = getUserLatencySampleCount(row);
+    const minimumSamples = normalizeUserTtftSampleCount(minUserTtftSamples);
     const userHasData = row?.userHasData === true
       || row?.user_has_data === true
-      || (Number.isFinite(userSampleCount) && userSampleCount > 0);
+      || userSampleCount !== null;
     const user = userHasData && userValue !== null && userValue > 0 ? userValue : null;
-    if (source === 'user' && user !== null) return { value: user, source: 'user', fallback: false };
-    return { value: probe, source: 'probe', fallback: source === 'user' && probe !== null };
+    if (latencySource === 'user' && user !== null && userSampleCount !== null && userSampleCount >= minimumSamples) {
+      return { value: user, source: 'user', fallback: false };
+    }
+    const fallback = latencySource === 'user' && probe !== null;
+    if (latencySource === 'user' && user !== null) {
+      return {
+        value: probe,
+        source: 'probe',
+        fallback,
+        userSampleInsufficient: true,
+        userSampleCount: userSampleCount ?? 0,
+        minUserTtftSamples: minimumSamples,
+      };
+    }
+    return { value: probe, source: 'probe', fallback };
   }
 
   function getUserLatencySampleCount(row) {
@@ -820,13 +842,31 @@
     return Number.isFinite(sampleCount) && sampleCount > 0 ? Math.floor(sampleCount) : null;
   }
 
-  function formatLatencyMetric(row, source = 'probe') {
-    const metric = getLatencyMetric(row, source);
+  function getUserTtftFallbackText(metric) {
+    if (metric?.userSampleInsufficient === true) {
+      const sampleCount = Math.max(0, Math.floor(Number(metric.userSampleCount) || 0));
+      const minimumSamples = normalizeUserTtftSampleCount(metric.minUserTtftSamples);
+      return `样本不足 ${sampleCount}/${minimumSamples}，回退探测`;
+    }
+    return metric?.fallback ? '回退探测' : '';
+  }
+
+  function getLatencyMetricLabel(source = 'probe', metric = null) {
+    if (normalizeLatencySource(source) !== 'user') return '首 Token';
+    const fallbackText = getUserTtftFallbackText(metric);
+    return fallbackText ? `运行时 P50 TTFT（${fallbackText}）` : '运行时 P50 TTFT';
+  }
+
+  function formatLatencyMetric(row, source = 'probe', minUserTtftSamples = DEFAULT_CONFIG.minUserTtftSamples) {
+    const metric = getLatencyMetric(row, source, minUserTtftSamples);
     const valueText = metric.value === null ? '暂无数据' : formatLatency(metric.value);
-    if (source === 'user') {
+    if (normalizeLatencySource(source) === 'user') {
       const sampleCount = metric.source === 'user' ? getUserLatencySampleCount(row) : null;
       const sampleText = sampleCount === null ? '' : `（${sampleCount} 条）`;
-      return metric.fallback ? `运行时 P50 TTFT ${valueText}（回退探测）` : `运行时 P50 TTFT ${valueText}${sampleText}`;
+      const fallbackText = getUserTtftFallbackText(metric);
+      return fallbackText
+        ? `运行时 P50 TTFT ${valueText}（${fallbackText}）`
+        : `运行时 P50 TTFT ${valueText}${sampleText}`;
     }
     return `首 Token ${valueText}`;
   }
@@ -1104,6 +1144,7 @@
       requireNoWarnings: normalizedConfig.requireNoWarnings,
       excludedGroupKeywords: normalizedConfig.excludedGroupKeywords,
       latencySource: normalizedConfig.latencySource,
+      minUserTtftSamples: normalizedConfig.latencySource === 'user' ? normalizedConfig.minUserTtftSamples : null,
     });
   }
 
@@ -1119,9 +1160,11 @@
       unavailable: 0,
       lowSuccess: 0,
       warnings: 0,
+      modelDetectionWarnings: 0,
       keywords: 0,
       priceMetricUnavailable: 0,
       priceMetricUnavailableReasons: { notReady: 0, stale: 0, missing: 0 },
+      userLatencySampleFallbacks: 0,
       eligible: 0,
     };
     const candidates = [];
@@ -1151,6 +1194,7 @@
       if (normalizedConfig.requireNoWarnings
         && ((Array.isArray(row.warningReasons) && row.warningReasons.length > 0) || hasModelDetectionWarning(row))) {
         counts.warnings += 1;
+        if (hasModelDetectionWarning(row)) counts.modelDetectionWarnings += 1;
         continue;
       }
       const name = String(row.planType || row.name || `Group ${row.group_id}`);
@@ -1164,7 +1208,8 @@
         counts.priceMetricUnavailableReasons[rankingPrice.reason] += 1;
         continue;
       }
-      const latencyMetric = getLatencyMetric(row, normalizedConfig.latencySource);
+      const latencyMetric = getLatencyMetric(row, normalizedConfig.latencySource, normalizedConfig.minUserTtftSamples);
+      if (latencyMetric.userSampleInsufficient) counts.userLatencySampleFallbacks += 1;
       candidates.push({
         ...row,
         groupId,
@@ -1378,17 +1423,29 @@
 
   function buildGroupMetricMap(rows, config = DEFAULT_CONFIG) {
     const result = new Map();
-    const latencySource = normalizeLatencySource(config?.latencySource);
+    const normalizedConfig = normalizeConfig(config);
+    const latencySource = normalizedConfig.latencySource;
     for (const row of Array.isArray(rows) ? rows : []) {
       const groupId = Number(row?.group_id);
       if (!Number.isInteger(groupId) || groupId <= 0) continue;
-      const latencyMetric = getLatencyMetric(row, latencySource);
+      const latencyMetric = getLatencyMetric(row, latencySource, normalizedConfig.minUserTtftSamples);
       const metric = {
         multiplier: nonNegativeNumberOrNull(row?.priceMultiplier),
         latencyMs: latencyMetric.value,
       };
-      const latencySampleCount = latencyMetric.source === 'user' ? getUserLatencySampleCount(row) : null;
-      if (latencySampleCount !== null) metric.latencySampleCount = latencySampleCount;
+      if (latencySource === 'user') {
+        const latencySampleCount = latencyMetric.source === 'user' ? getUserLatencySampleCount(row) : null;
+        if (latencySampleCount !== null) metric.latencySampleCount = latencySampleCount;
+        if (latencyMetric.source !== 'user' || latencyMetric.userSampleInsufficient) {
+          metric.latencyMetricSource = latencyMetric.source;
+          metric.latencyFallback = latencyMetric.fallback;
+        }
+        if (latencyMetric.userSampleInsufficient) {
+          metric.userSampleInsufficient = true;
+          metric.userSampleCount = latencyMetric.userSampleCount;
+          metric.minUserTtftSamples = latencyMetric.minUserTtftSamples;
+        }
+      }
       const detection = getModelDetection(row);
       const cacheHitRate = normalizeCacheHitRate(row?.cacheHitRate ?? row?.cache_hit_rate);
       if (detection) {
@@ -1620,13 +1677,12 @@
     return amount === null ? '' : USAGE_COST_CURRENCY_FORMATTER.format(amount);
   }
 
-  function formatGroupDropdownMonitor(row, latencySource = 'probe') {
-    const metric = getLatencyMetric(row, latencySource);
+  function formatGroupDropdownMonitor(row, latencySource = 'probe', minUserTtftSamples = DEFAULT_CONFIG.minUserTtftSamples) {
+    const normalizedLatencySource = normalizeLatencySource(latencySource);
+    const metric = getLatencyMetric(row, normalizedLatencySource, minUserTtftSamples);
     const latency = metric.value;
-    const label = latencySource === 'user'
-      ? (metric.fallback ? '运行时 P50 TTFT（回退探测）' : '运行时 P50 TTFT')
-      : '首 Token';
-    const sampleCount = latencySource === 'user' && metric.source === 'user' ? getUserLatencySampleCount(row) : null;
+    const label = getLatencyMetricLabel(normalizedLatencySource, metric);
+    const sampleCount = normalizedLatencySource === 'user' && metric.source === 'user' ? getUserLatencySampleCount(row) : null;
     const sampleText = sampleCount === null ? '' : `（${sampleCount} 条）`;
     const latencyValueText = row && latency !== null ? `${Math.round(latency)} ms${sampleText}` : '';
     const latencyText = row && latency !== null
@@ -1660,8 +1716,11 @@
     const multiplier = nonNegativeNumberOrNull(metric?.multiplier);
     const latencyMs = nonNegativeNumberOrNull(metric?.latencyMs);
     const multiplierText = multiplier === null ? '倍率暂无数据' : formatMultiplier(multiplier);
-    const latencyLabel = latencySource === 'user' ? '运行时 P50 TTFT' : '首 Token';
-    const latencySampleCount = latencySource === 'user' ? nonNegativeNumberOrNull(metric?.latencySampleCount) : null;
+    const normalizedLatencySource = normalizeLatencySource(latencySource);
+    const latencyLabel = getLatencyMetricLabel(normalizedLatencySource, metric);
+    const latencySampleCount = normalizedLatencySource === 'user' && metric?.latencyMetricSource !== 'probe'
+      ? nonNegativeNumberOrNull(metric?.latencySampleCount)
+      : null;
     const latencySampleText = latencySampleCount !== null && latencySampleCount > 0 ? `（${Math.floor(latencySampleCount)} 条）` : '';
     const latencyText = latencyMs === null ? `${latencyLabel} 暂无数据` : `${latencyLabel} ${formatLatency(latencyMs)}${latencySampleText}`;
     const detection = metric?.modelDetection ?? (metric?.detectionStatus ? { status: metric.detectionStatus } : null);
@@ -1699,6 +1758,7 @@
       recommendationPriceBasis: normalized.mode === 'price' ? normalized.recommendationPriceBasis : 'nominal',
       balanceMaxPrice: normalized.mode === 'balance' ? normalized.balanceMaxPrice : null,
       latencySource: normalized.latencySource,
+      minUserTtftSamples: normalized.latencySource === 'user' ? normalized.minUserTtftSamples : null,
       availabilityMode: normalized.availabilityMode,
       minSuccess10m: normalized.minSuccess10m,
       minSuccessPoints10m: normalized.minSuccessPoints10m,
@@ -2185,6 +2245,7 @@
     #${ROOT_ID} .asg-monitor-age.asg-stale{color:#b42318;font-weight:600}
     #${ROOT_ID} label{display:block;color:#475467;font-size:12px;margin:8px 0 4px}
     #${ROOT_ID} [data-availability-setting][hidden]{display:none !important}
+    #${ROOT_ID} [data-latency-setting][hidden]{display:none !important}
     #${ROOT_ID} select,#${ROOT_ID} input[type=number],#${ROOT_ID} input[type=text]{width:100%;border:1px solid #cfd5df;border-radius:6px;padding:6px;background:#fff;color:#172033;font:inherit}
     #${ROOT_ID} .asg-key-details[hidden]{display:none}
     #${ROOT_ID} .asg-key-details{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px 10px;margin-top:5px;padding:6px 0 2px;border-bottom:1px solid #eef0f3}
@@ -2487,6 +2548,7 @@
                 <div class="asg-settings-head"><div class="asg-settings-title">TTFT 采集</div><label class="asg-settings-inline-label" for="asg-latency-source-setting">推荐、密钥详情和分组下拉使用的延迟指标</label></div>
                 <div class="asg-settings-grid">
                   <label class="asg-setting-wide">采集指标<select id="asg-latency-source-setting" data-setting="latencySource"><option value="probe">主动探测首 Token</option><option value="user">运行时 P50 TTFT（无样本时回退探测）</option></select></label>
+                  <label class="asg-setting-wide" data-latency-setting="user" title="运行时 P50 样本不足时改用主动探测，避免少量真实请求影响推荐">运行时 P50 最低有效样本数<input type="number" min="1" max="1000000" step="1" data-setting="minUserTtftSamples"></label>
                 </div>
               </section>
               <section class="asg-settings-section">
@@ -2616,6 +2678,10 @@
           this.syncAvailabilityInputs();
           this.renderSettingsPreviews('availabilityMode');
         }
+        if (event.target.matches('[data-setting="latencySource"]')) {
+          this.syncLatencyInputs();
+          this.renderSettingsPreviews('latencySource');
+        }
       });
     }
 
@@ -2657,6 +2723,7 @@
       this.panel.querySelector('[data-field="auto"]').checked = this.config.autoSwitch;
       this.panel.querySelector('[data-field="mode"]').value = this.config.mode;
       this.syncAvailabilityInputs();
+      this.syncLatencyInputs();
       this.renderSettingsPreviews();
     }
 
@@ -2664,6 +2731,13 @@
       const mode = normalizeAvailabilityMode(this.panel?.querySelector('[data-setting="availabilityMode"]')?.value);
       for (const field of this.panel?.querySelectorAll('[data-availability-setting]') || []) {
         field.hidden = field.dataset.availabilitySetting !== mode;
+      }
+    }
+
+    syncLatencyInputs() {
+      const source = normalizeLatencySource(this.panel?.querySelector('[data-setting="latencySource"]')?.value);
+      for (const field of this.panel?.querySelectorAll('[data-latency-setting]') || []) {
+        field.hidden = field.dataset.latencySetting !== source;
       }
     }
 
@@ -2724,7 +2798,9 @@
         || normalizedDraft.minConsecutiveSuccesses10m !== this.config.minConsecutiveSuccesses10m
         || normalizedDraft.requireNoWarnings !== this.config.requireNoWarnings
         || normalizedDraft.excludedGroupKeywords !== this.config.excludedGroupKeywords
-        || normalizedDraft.latencySource !== this.config.latencySource;
+        || normalizedDraft.latencySource !== this.config.latencySource
+        || (normalizedDraft.latencySource === 'user'
+          && normalizedDraft.minUserTtftSamples !== this.config.minUserTtftSamples);
       const suffix = hasUnsavedFilter ? ' · 未保存' : '';
       const limit = formatMultiplier(normalizedDraft.balanceMaxPrice);
       if (!this.lastUpdated) {
@@ -3118,7 +3194,7 @@
         const cacheText = normalizeCacheHitRate(winner.cacheHitRate ?? winner.cache_hit_rate) === null
           ? ''
           : ` · ${formatCacheHitRate(winner.cacheHitRate ?? winner.cache_hit_rate)}`;
-        metrics.textContent = `10m ${availabilityText} · ${winner.recentSampleCount}次探测 · ${formatLatencyMetric(winner, this.config.latencySource)}${detectionText ? ` · 模型${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${modelPriceText ? ` · ${modelPriceText}` : ''}${effectivePriceText ? ` · ${effectivePriceText}` : ''}${outputTpsText ? ` · ${outputTpsText}` : ''}${cacheText}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
+        metrics.textContent = `10m ${availabilityText} · ${winner.recentSampleCount}次探测 · ${formatLatencyMetric(winner, this.config.latencySource, this.config.minUserTtftSamples)}${detectionText ? ` · 模型${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${modelPriceText ? ` · ${modelPriceText}` : ''}${effectivePriceText ? ` · ${effectivePriceText}` : ''}${outputTpsText ? ` · ${outputTpsText}` : ''}${cacheText}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
         if (detectionTitle) metrics.title = detectionTitle;
         recommend.append(title, metrics);
         if (this.config.mode === 'balance') {
@@ -3132,10 +3208,13 @@
       const diagnostic = document.createElement('div');
       diagnostic.className = 'asg-recommend-meta';
       const overLimit = this.config.mode === 'balance' ? Math.max(0, Number(diagnostics.eligible || 0) - this.ranked.length) : 0;
-      const detectionWarnings = this.rows.filter(hasModelDetectionWarning).length;
+      const detectionWarnings = Number(diagnostics.modelDetectionWarnings) || 0;
       const priceUnavailable = Number(diagnostics.priceMetricUnavailable) || 0;
       const priceUnavailableReasons = formatRecommendationPriceUnavailableReasons(diagnostics.priceMetricUnavailableReasons);
-      diagnostic.textContent = `参与比较 ${this.ranked.length} · 排除关键词 ${diagnostics.keywords || 0} · 不可用 ${diagnostics.unavailable || 0} · 可用率不足 ${diagnostics.lowSuccess || 0} · 监控警告 ${diagnostics.warnings || 0}${detectionWarnings ? `（模型检测异常 ${detectionWarnings}）` : ''}${priceUnavailable ? ` · 价格数据不可用 ${priceUnavailable}${priceUnavailableReasons ? `（${priceUnavailableReasons}）` : ''}` : ''}${overLimit ? ` · 超过倍率上限 ${overLimit}` : ''}`;
+      const userLatencySampleFallbacks = this.config.latencySource === 'user'
+        ? Number(diagnostics.userLatencySampleFallbacks) || 0
+        : 0;
+      diagnostic.textContent = `参与比较 ${this.ranked.length} · 排除关键词 ${diagnostics.keywords || 0} · 不可用 ${diagnostics.unavailable || 0} · 可用率不足 ${diagnostics.lowSuccess || 0} · 监控警告 ${diagnostics.warnings || 0}${detectionWarnings ? `（模型检测异常 ${detectionWarnings}）` : ''}${userLatencySampleFallbacks ? ` · 运行时样本不足回退 ${userLatencySampleFallbacks}` : ''}${priceUnavailable ? ` · 价格数据不可用 ${priceUnavailable}${priceUnavailableReasons ? `（${priceUnavailableReasons}）` : ''}` : ''}${overLimit ? ` · 超过倍率上限 ${overLimit}` : ''}`;
       recommend.appendChild(diagnostic);
       const freshness = document.createElement('div');
       freshness.className = `asg-monitor-age${this.monitorFreshness.stale ? ' asg-stale' : ''}`;
@@ -3205,7 +3284,7 @@
       const detection = metric?.modelDetection ?? (metric?.detectionStatus ? { status: metric.detectionStatus } : null);
       const detectionText = detection ? formatModelDetectionSummary(detection) : '暂无数据';
       const detectionTitle = detection ? formatModelDetectionTitle(detection) : '';
-      const latencySampleCount = this.config.latencySource === 'user'
+      const latencySampleCount = this.config.latencySource === 'user' && metric?.latencyMetricSource !== 'probe'
         ? nonNegativeNumberOrNull(metric?.latencySampleCount)
         : null;
       const latencySampleText = latencySampleCount !== null && latencySampleCount > 0 ? `（${Math.floor(latencySampleCount)} 条）` : '';
@@ -3216,13 +3295,18 @@
       const latencyLabel = details.querySelector('[data-key-detail-label="latency"]');
       const modelPriceRow = details.querySelector('[data-key-detail-row="model-price"]');
       const modelPriceLabel = details.querySelector('[data-key-detail-label="model-price"]');
-      if (latencyLabel) latencyLabel.textContent = this.config.latencySource === 'user' ? '运行时 P50 TTFT' : '最新首 Token';
+      if (latencyLabel) latencyLabel.textContent = this.config.latencySource === 'user'
+        ? getLatencyMetricLabel('user', metric)
+        : '最新首 Token';
       if (modelPriceRow) modelPriceRow.hidden = this.config.modelPriceModel === 'none';
       if (modelPriceLabel) modelPriceLabel.textContent = `${MODEL_PRICE_MODEL_LABELS[this.config.modelPriceModel]} 价格 / 1M`;
       details.querySelector('[data-key-detail="name"]').textContent = key.name;
       details.querySelector('[data-key-detail="group"]').textContent = key.groupName;
       details.querySelector('[data-key-detail="multiplier"]').textContent = multiplier === null ? '暂无数据' : formatMultiplier(multiplier);
-      details.querySelector('[data-key-detail="latency"]').textContent = latencyMs === null ? '暂无数据' : `${formatLatency(latencyMs)}${latencySampleText}`;
+      const userLatencyFallbackText = this.config.latencySource === 'user' ? getUserTtftFallbackText(metric) : '';
+      details.querySelector('[data-key-detail="latency"]').textContent = latencyMs === null
+        ? `暂无数据${userLatencyFallbackText ? `（${userLatencyFallbackText}）` : ''}`
+        : `${formatLatency(latencyMs)}${latencySampleText}`;
       const detectionNode = details.querySelector('[data-key-detail="detection"]');
       detectionNode.textContent = detectionText;
       detectionNode.title = detectionTitle;
@@ -3247,7 +3331,7 @@
         const modelPriceText = formatModelPriceSummary(candidate, this.config.modelPriceModel, true);
         const effectivePriceText = formatEffectivePricingSummary(candidate, true);
         const outputTpsText = formatOutputThroughput(candidate, true);
-        metrics.textContent = `${formatRecommendationPriceCriterion(candidate)} · 10m ${formatPercent(candidate.success10m)}${detectionText ? ` · ${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${modelPriceText ? ` · ${modelPriceText}` : ''}${effectivePriceText ? ` · ${effectivePriceText}` : ''}${outputTpsText ? ` · ${outputTpsText}` : ''}${cacheHitRate === null ? '' : ` · 缓存 ${(cacheHitRate * 100).toFixed(1)}%`}`;
+        metrics.textContent = `${formatRecommendationPriceCriterion(candidate)} · ${formatLatencyMetric(candidate, this.config.latencySource, this.config.minUserTtftSamples)} · 10m ${formatPercent(candidate.success10m)}${detectionText ? ` · ${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${modelPriceText ? ` · ${modelPriceText}` : ''}${effectivePriceText ? ` · ${effectivePriceText}` : ''}${outputTpsText ? ` · ${outputTpsText}` : ''}${cacheHitRate === null ? '' : ` · 缓存 ${(cacheHitRate * 100).toFixed(1)}%`}`;
         if (detectionTitle) metrics.title = detectionTitle;
         item.append(name, metrics);
         list.appendChild(item);
@@ -3289,7 +3373,9 @@
       this.loadFailed = false;
       this.lastAttemptAt = 0;
       this.lastErrorSignature = '';
-      this.latencySource = normalizeConfig(storageGet('config', DEFAULT_CONFIG)).latencySource;
+      const config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
+      this.latencySource = config.latencySource;
+      this.minUserTtftSamples = config.minUserTtftSamples;
     }
 
     start() {
@@ -3430,7 +3516,9 @@
 
     render() {
       if (!this.active) return;
-      this.latencySource = normalizeConfig(storageGet('config', DEFAULT_CONFIG)).latencySource;
+      const config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
+      this.latencySource = config.latencySource;
+      this.minUserTtftSamples = config.minUserTtftSamples;
       const menus = this.findMenus();
       this.syncMenuObservers(menus);
       if (!menus.length) return;
@@ -3465,7 +3553,11 @@
         info = { statusText: '监控读取中', statusTone: 'unknown', latencyText: `${latencyLabel} --`, latencyValueText: '' };
       } else {
         const multiplier = parseGroupOptionMultiplier(multiplierNode.textContent);
-        info = formatGroupDropdownMonitor(findGroupDropdownMonitor(this.monitorIndex, name, multiplier), this.latencySource);
+        info = formatGroupDropdownMonitor(
+          findGroupDropdownMonitor(this.monitorIndex, name, multiplier),
+          this.latencySource,
+          this.minUserTtftSamples,
+        );
       }
 
       const badgeToneClass = getGroupDropdownToneClass(info.statusTone);
@@ -4021,6 +4113,7 @@
       this.sortConvergenceExhausted = false;
       this.sortClickPending = false;
       this.sortPendingStateSignature = '';
+      this.sortRoot = null;
       this.providerConfigLoaded = false;
       this.providerSortPreference = DEFAULT_CONFIG.providerSortPreference;
       this.providerAutoRefresh = DEFAULT_CONFIG.providerAutoRefresh;
@@ -4065,6 +4158,7 @@
       this.lastRefreshAt = Date.now();
       document.addEventListener('click', this.onPageClick, true);
       window.addEventListener(CONFIG_CHANGE_EVENT, this.onConfigChanged);
+      this.syncSortRoot();
       this.observeUntilApplied();
       this.queueApply();
       this.syncRefreshTimer();
@@ -4086,6 +4180,30 @@
         providerAutoRefresh: this.providerAutoRefresh,
         providerRefreshIntervalSeconds: this.providerRefreshIntervalSeconds,
       };
+    }
+
+    getSortRoot() {
+      const panel = document.querySelector('[data-testid="llm-monitor-panel"]');
+      return panel?.querySelector?.('.monitor-sort-controls') || document.querySelector('.monitor-sort-controls') || null;
+    }
+
+    syncSortRoot() {
+      const nextRoot = this.getSortRoot();
+      const currentRoot = this.sortRoot;
+      const rootChanged = nextRoot !== currentRoot || currentRoot?.isConnected === false;
+      if (!rootChanged) return false;
+      this.stopSortRetries();
+      this.sortRoot = nextRoot;
+      this.applied = false;
+      this.sortClickCount = 0;
+      this.sortConvergenceExhausted = false;
+      this.sortClickPending = false;
+      this.sortPendingStateSignature = '';
+      if (this.active) {
+        this.observeUntilApplied();
+        this.queueApply();
+      }
+      return true;
     }
 
     observeUntilApplied() {
@@ -4138,6 +4256,7 @@
       this.retryTimer = null;
       this.sortVerifyTimer = null;
       this.refreshTimer = null;
+      this.sortRoot = null;
       document.removeEventListener('click', this.onPageClick, true);
       window.removeEventListener(CONFIG_CHANGE_EVENT, this.onConfigChanged);
     }
@@ -4356,6 +4475,8 @@
       if (features.providerSort && !this.providerSort) {
         this.providerSort = new ProviderSortEnhancer();
         this.providerSort.start();
+      } else if (features.providerSort && this.providerSort) {
+        this.providerSort.syncSortRoot();
       } else if (!features.providerSort && this.providerSort) {
         this.providerSort.stop();
         this.providerSort = null;
@@ -4377,6 +4498,7 @@
     normalizeGroupMode,
     normalizeAvailabilityMode,
     normalizeLatencySource,
+    normalizeUserTtftSampleCount,
     normalizeModelPriceModel,
     normalizeRecommendationPriceBasis,
     normalizeProviderSortPreference,
@@ -4420,6 +4542,8 @@
     normalizePanelTab,
     getLatencyMetric,
     getUserLatencySampleCount,
+    getUserTtftFallbackText,
+    getLatencyMetricLabel,
     formatLatencyMetric,
     normalizeMonitorRow,
     normalizeMonitorSummaryPayload,

@@ -8,6 +8,7 @@ const userscriptSource = fs.readFileSync(path.join(__dirname, '..', 'aihub-smart
 
 test('hides inactive availability settings despite the shared label display rule', () => {
   assert.match(userscriptSource, /\[data-availability-setting\]\[hidden\]\{display:none !important\}/);
+  assert.match(userscriptSource, /\[data-latency-setting\]\[hidden\]\{display:none !important\}/);
 });
 
 test('stacks narrow-screen panel sections without unbounding the candidate list', () => {
@@ -80,6 +81,55 @@ test('rebinds the usage observer when the SPA replaces its main element', () => 
   assert.match(userscriptSource, /else if \(features\.usage && this\.usage\) \{\s*this\.usage\.syncObserverRoot\(\);\s*this\.usage\.syncUsageQueryPath\(\);/);
 });
 
+test('re-arms provider sorting only when the provider sort root is replaced', () => {
+  const providerSource = userscriptSource.slice(
+    userscriptSource.indexOf('class ProviderSortEnhancer'),
+    userscriptSource.indexOf('class AppRouter'),
+  );
+  const routerSource = userscriptSource.slice(userscriptSource.indexOf('class AppRouter'), userscriptSource.indexOf('\n  return {'));
+  assert.match(providerSource, /this\.sortRoot = null;/);
+  assert.match(providerSource, /getSortRoot\(\) \{[\s\S]*monitor-sort-controls/);
+  assert.match(providerSource, /syncSortRoot\(\) \{[\s\S]*nextRoot !== currentRoot/);
+  assert.match(providerSource, /this\.sortRoot = nextRoot;[\s\S]*this\.applied = false;/);
+  assert.match(routerSource, /else if \(features\.providerSort && this\.providerSort\) \{\s*this\.providerSort\.syncSortRoot\(\);/);
+});
+
+test('does not re-arm applied provider sorting while the same sort root remains mounted', () => {
+  const originalDocument = globalThis.document;
+  const firstRoot = { isConnected: true };
+  const replacementRoot = { isConnected: true };
+  let currentRoot = firstRoot;
+  globalThis.document = {
+    querySelector: (selector) => (selector === '.monitor-sort-controls' ? currentRoot : null),
+  };
+
+  try {
+    const enhancer = new core.ProviderSortEnhancer();
+    enhancer.active = true;
+    enhancer.sortRoot = firstRoot;
+    enhancer.applied = true;
+    let observerStarts = 0;
+    let applyQueues = 0;
+    enhancer.observeUntilApplied = () => { observerStarts += 1; };
+    enhancer.queueApply = () => { applyQueues += 1; };
+
+    assert.equal(enhancer.syncSortRoot(), false);
+    assert.equal(enhancer.applied, true);
+    assert.equal(observerStarts, 0);
+    assert.equal(applyQueues, 0);
+
+    currentRoot = replacementRoot;
+    assert.equal(enhancer.syncSortRoot(), true);
+    assert.equal(enhancer.sortRoot, replacementRoot);
+    assert.equal(enhancer.applied, false);
+    assert.equal(observerStarts, 1);
+    assert.equal(applyQueues, 1);
+  } finally {
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+});
+
 test('refreshes usage prices without repeatedly reloading exact usage rows', () => {
   const usageSource = userscriptSource.slice(userscriptSource.indexOf('class UsageMultiplierEnhancer'), userscriptSource.indexOf('class ProviderSortEnhancer'));
   const refreshSource = usageSource.slice(usageSource.indexOf('async refresh(force = false)'), usageSource.indexOf('handleVisibilityChange()'));
@@ -134,9 +184,13 @@ test('normalizes selectable availability criteria', () => {
 
 test('normalizes the selectable TTFT source and preserves the legacy default', () => {
   assert.equal(core.DEFAULT_CONFIG.latencySource, 'probe');
+  assert.equal(core.DEFAULT_CONFIG.minUserTtftSamples, 1);
   assert.equal(core.LATENCY_SOURCE_LABELS.user, '运行时 P50 TTFT');
   assert.equal(core.normalizeConfig({}).latencySource, 'probe');
   assert.equal(core.normalizeConfig({ latencySource: 'user' }).latencySource, 'user');
+  assert.equal(core.normalizeConfig({ minUserTtftSamples: '12' }).minUserTtftSamples, 12);
+  assert.equal(core.normalizeConfig({ minUserTtftSamples: 0 }).minUserTtftSamples, 1);
+  assert.equal(core.normalizeConfig({ minUserTtftSamples: 9_999_999 }).minUserTtftSamples, 1_000_000);
   assert.equal(core.normalizeConfig({ latencySource: 'unexpected' }).latencySource, 'probe');
 });
 
@@ -206,6 +260,12 @@ test('updates only settings previews affected by the edited field', () => {
     cooldown: false,
   });
   assert.deepEqual(core.getSettingsPreviewTargets('latencySource'), {
+    recommendation: false,
+    balance: true,
+    excluded: false,
+    cooldown: false,
+  });
+  assert.deepEqual(core.getSettingsPreviewTargets('minUserTtftSamples'), {
     recommendation: false,
     balance: true,
     excluded: false,
@@ -1252,6 +1312,23 @@ test('selects real-user TTFT when sampled and falls back to probe TTFT without s
   assert.equal(core.formatLatencyMetric(empty, 'user'), '运行时 P50 TTFT 900 ms（回退探测）');
 });
 
+test('falls back from low-sample real-user TTFT with an explicit confidence reason', () => {
+  const lowSample = { firstTokenLatencyMs: 900, userAvgTtftMs: 250, userSampleCount: 3, userHasData: true };
+  const lowSampleWithoutProbe = { userAvgTtftMs: 250, userSampleCount: 3, userHasData: true };
+
+  assert.deepEqual(core.getLatencyMetric(lowSample, 'user', 3), { value: 250, source: 'user', fallback: false });
+  assert.deepEqual(core.getLatencyMetric(lowSample, 'user', 5), {
+    value: 900,
+    source: 'probe',
+    fallback: true,
+    userSampleInsufficient: true,
+    userSampleCount: 3,
+    minUserTtftSamples: 5,
+  });
+  assert.equal(core.formatLatencyMetric(lowSample, 'user', 5), '运行时 P50 TTFT 900 ms（样本不足 3/5，回退探测）');
+  assert.equal(core.formatLatencyMetric(lowSampleWithoutProbe, 'user', 5), '运行时 P50 TTFT 暂无数据（样本不足 3/5，回退探测）');
+});
+
 test('normalizes the monitor freshness limit', () => {
   assert.equal(core.DEFAULT_CONFIG.maxMonitorAgeSeconds, 600);
   assert.equal(core.normalizeConfig({ maxMonitorAgeSeconds: '240' }).maxMonitorAgeSeconds, 600);
@@ -1331,9 +1408,11 @@ test('reports mutually exclusive candidate diagnostics', () => {
     unavailable: 2,
     lowSuccess: 1,
     warnings: 1,
+    modelDetectionWarnings: 0,
     keywords: 1,
     priceMetricUnavailable: 0,
     priceMetricUnavailableReasons: { notReady: 0, stale: 0, missing: 0 },
+    userLatencySampleFallbacks: 0,
     eligible: 1,
   });
   assert.deepEqual(result.candidates.map((row) => row.name), ['eligible']);
@@ -1715,6 +1794,42 @@ test('changes speed ranking when real-user TTFT collection is selected', () => {
 
   assert.equal(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'speed', latencySource: 'probe' })[0].planType, 'probe-fast');
   assert.equal(core.rankCandidates(rows, { ...core.DEFAULT_CONFIG, mode: 'speed', latencySource: 'user' })[0].planType, 'user-fast');
+});
+
+test('requires the configured real-user TTFT sample floor before ranking by user latency', () => {
+  const rows = [
+    { planType: 'low-sample-fast', group_id: 1, priceMultiplier: 0.05, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 2000, userAvgTtftMs: 100, userSampleCount: 3, userHasData: true, warningReasons: [] },
+    { planType: 'well-sampled', group_id: 2, priceMultiplier: 0.05, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 500, userAvgTtftMs: 400, userSampleCount: 30, userHasData: true, warningReasons: [] },
+  ];
+  const relaxed = { ...core.DEFAULT_CONFIG, mode: 'speed', latencySource: 'user', minUserTtftSamples: 1 };
+  const strict = { ...relaxed, minUserTtftSamples: 10 };
+  const strictAnalysis = core.analyzeCandidates(rows, strict);
+
+  assert.equal(core.rankCandidates(rows, relaxed)[0].planType, 'low-sample-fast');
+  assert.equal(core.rankCandidates(rows, strict, strictAnalysis)[0].planType, 'well-sampled');
+  assert.equal(strictAnalysis.counts.userLatencySampleFallbacks, 1);
+  assert.notEqual(core.getCandidateAnalysisSignature(relaxed), core.getCandidateAnalysisSignature(strict));
+  assert.notEqual(core.getRecommendationStrategySignature(relaxed), core.getRecommendationStrategySignature(strict));
+  assert.equal(
+    core.getRecommendationStrategySignature({ ...core.DEFAULT_CONFIG, latencySource: 'probe', minUserTtftSamples: 1 }),
+    core.getRecommendationStrategySignature({ ...core.DEFAULT_CONFIG, latencySource: 'probe', minUserTtftSamples: 10 }),
+  );
+});
+
+test('counts only eligible-stage model warnings and real-user sample fallbacks in diagnostics', () => {
+  const rows = [
+    { planType: 'hidden-detection', group_id: 1, priceMultiplier: 0.05, visibleInHall: false, available: true, successRates: { '10m': 1 }, modelDetection: { status: 'suspected' }, warningReasons: [] },
+    { planType: 'unavailable-detection', group_id: 2, priceMultiplier: 0.05, available: false, successRates: { '10m': 1 }, modelDetection: { status: 'suspected' }, warningReasons: [] },
+    { planType: 'candidate-detection', group_id: 3, priceMultiplier: 0.05, available: true, successRates: { '10m': 1 }, modelDetection: { status: 'suspected' }, warningReasons: [] },
+    { planType: 'low-sample-candidate', group_id: 4, priceMultiplier: 0.05, available: true, successRates: { '10m': 1 }, firstTokenLatencyMs: 900, userAvgTtftMs: 100, userSampleCount: 3, userHasData: true, warningReasons: [] },
+  ];
+  const analysis = core.analyzeCandidates(rows, { ...core.DEFAULT_CONFIG, latencySource: 'user', minUserTtftSamples: 10 });
+
+  assert.equal(analysis.counts.unavailable, 2);
+  assert.equal(analysis.counts.warnings, 1);
+  assert.equal(analysis.counts.modelDetectionWarnings, 1);
+  assert.equal(analysis.counts.userLatencySampleFallbacks, 1);
+  assert.deepEqual(analysis.candidates.map((candidate) => candidate.name), ['low-sample-candidate']);
 });
 
 test('normalizes adjustable AIHub mode settings', () => {
@@ -2500,6 +2615,24 @@ test('maps current group metrics by group id without filtering unavailable rows'
     userHasData: true,
   }], { ...core.DEFAULT_CONFIG, latencySource: 'user' });
   assert.deepEqual(userMetrics.get(22), { multiplier: 0.1, latencyMs: 1200, latencySampleCount: 3 });
+
+  const lowSampleMetrics = core.buildGroupMetricMap([{
+    group_id: 23,
+    priceMultiplier: 0.1,
+    firstTokenLatencyMs: 900,
+    userAvgTtftMs: 300,
+    userSampleCount: 3,
+    userHasData: true,
+  }], { ...core.DEFAULT_CONFIG, latencySource: 'user', minUserTtftSamples: 10 });
+  assert.deepEqual(lowSampleMetrics.get(23), {
+    multiplier: 0.1,
+    latencyMs: 900,
+    latencyMetricSource: 'probe',
+    latencyFallback: true,
+    userSampleInsufficient: true,
+    userSampleCount: 3,
+    minUserTtftSamples: 10,
+  });
 });
 
 test('indexes dropdown monitor rows by normalized name and multiplier', () => {
@@ -2608,6 +2741,27 @@ test('formats dropdown and key labels with the real-user TTFT source', () => {
     { multiplier: 0.05, latencyMs: 1384.6, latencySampleCount: 12 },
     'user',
   ), 'main · A001 · ×0.05 · 运行时 P50 TTFT 1385 ms（12 条）');
+
+  const lowSample = { available: true, firstTokenLatencyMs: 900, userAvgTtftMs: 300, userSampleCount: 3, userHasData: true };
+  assert.deepEqual(core.formatGroupDropdownMonitor(lowSample, 'user', 10), {
+    statusText: '可用',
+    statusTone: 'available',
+    latencyText: '运行时 P50 TTFT（样本不足 3/10，回退探测） 900 ms',
+    latencyValueText: '900 ms',
+  });
+  assert.equal(core.formatKeyOptionLabel(
+    { name: 'main', groupName: 'A001' },
+    {
+      multiplier: 0.05,
+      latencyMs: 900,
+      latencyMetricSource: 'probe',
+      latencyFallback: true,
+      userSampleInsufficient: true,
+      userSampleCount: 3,
+      minUserTtftSamples: 10,
+    },
+    'user',
+  ), 'main · A001 · ×0.05 · 运行时 P50 TTFT（样本不足 3/10，回退探测） 900 ms');
 });
 
 test('formats target key options with current group metrics and safe placeholders', () => {
