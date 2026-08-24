@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.10
+// @version      0.14.11
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.10';
+  const SCRIPT_VERSION = '0.14.11';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -89,15 +89,16 @@
     'data-direction',
     'data-order',
   ]);
-  const USAGE_DETAIL_REQUIRED_HEADERS = Object.freeze([
-    'API 密钥',
-    '模型',
-    '分组',
-    '计费模式',
-    'Token',
-    '费用',
-    '时间',
-  ]);
+  const USAGE_COLUMN_ALIASES = Object.freeze({
+    apiKey: Object.freeze(['api 密钥', 'api key', 'apikey', '密钥']),
+    model: Object.freeze(['模型', 'model']),
+    group: Object.freeze(['分组', 'group']),
+    billing: Object.freeze(['计费模式', 'billing mode', 'billing', 'billing type']),
+    tokens: Object.freeze(['token', 'tokens', 'token usage', 'token 用量', '令牌']),
+    cost: Object.freeze(['费用', '花费', '消费金额', 'cost', 'amount', 'charge']),
+    time: Object.freeze(['时间', 'time', 'created at', 'created time', 'request time']),
+  });
+  const USAGE_DETAIL_REQUIRED_COLUMNS = Object.freeze(['apiKey', 'model', 'group', 'billing', 'tokens', 'cost', 'time']);
   const GROUP_MODE_LABELS = Object.freeze({
     price: '价格',
     balance: '平衡',
@@ -257,9 +258,56 @@
     return Math.min(max, Math.max(min, value));
   }
 
+  function normalizeUsageColumnLabel(value) {
+    return String(value ?? '')
+      .trim()
+      .replace(/([a-z\d])([A-Z])/g, '$1 $2')
+      .replace(/[_-]+/g, ' ')
+      .replace(/[：:↑↓↕]+$/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLocaleLowerCase();
+  }
+
+  function getUsageColumnKey(headerOrLabel) {
+    const isHeader = headerOrLabel && typeof headerOrLabel === 'object';
+    const candidates = isHeader
+      ? [
+        headerOrLabel.getAttribute?.('data-column'),
+        headerOrLabel.getAttribute?.('data-key'),
+        headerOrLabel.getAttribute?.('data-testid'),
+        headerOrLabel.getAttribute?.('aria-label'),
+        headerOrLabel.textContent,
+      ]
+      : [headerOrLabel];
+    for (const candidate of candidates) {
+      const normalized = normalizeUsageColumnLabel(candidate);
+      if (!normalized) continue;
+      const label = normalized
+        .replace(/^usage(?: table)? (?:column|header) /, '')
+        .replace(/ (?:column|header)$/, '');
+      const match = Object.entries(USAGE_COLUMN_ALIASES)
+        .find(([, aliases]) => aliases.includes(label) || aliases.includes(normalized));
+      if (match) return match[0];
+    }
+    return '';
+  }
+
+  function getUsageColumnIndexes(headers) {
+    const indexes = Object.fromEntries(USAGE_DETAIL_REQUIRED_COLUMNS.map((key) => [key, -1]));
+    [...(headers || [])].forEach((header, index) => {
+      const key = getUsageColumnKey(header);
+      if (key && indexes[key] < 0) indexes[key] = index;
+    });
+    return indexes;
+  }
+
+  function hasUsageDetailColumnIndexes(indexes) {
+    return USAGE_DETAIL_REQUIRED_COLUMNS.every((key) => Number.isInteger(indexes?.[key]) && indexes[key] >= 0);
+  }
+
   function hasUsageDetailColumns(headers) {
-    const labels = new Set((headers || []).map((header) => String(header || '').trim()));
-    return USAGE_DETAIL_REQUIRED_HEADERS.every((header) => labels.has(header));
+    return hasUsageDetailColumnIndexes(getUsageColumnIndexes(headers));
   }
 
   function isRefreshDue(now, lastCompletedAt, intervalMs) {
@@ -1799,7 +1847,12 @@
   }
 
   function isMeteredUsageBillingMode(value) {
-    return ['按量', 'token', 'metered'].includes(String(value ?? '').trim().toLocaleLowerCase());
+    const normalized = String(value ?? '')
+      .trim()
+      .replace(/[_-]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .toLocaleLowerCase();
+    return ['按量', '按 token', '按token', 'token', 'metered', 'pay as you go', 'usage based', 'per token'].includes(normalized);
   }
 
   function calculateUsageCost(tokens, price) {
@@ -4025,8 +4078,10 @@
       if (!this.active) return;
       this.config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
       const tables = [...document.querySelectorAll('table')];
-      for (const table of tables) this.renderMultipliers(table);
-      const detailTables = tables.filter((table) => this.isUsageDetailTable(table));
+      const tableContexts = tables.map((table) => ({ table, indexes: this.getTableColumnIndexes(table) }));
+      for (const { table, indexes } of tableContexts) this.renderMultipliers(table, indexes);
+      const detailContexts = tableContexts.filter(({ table, indexes }) => this.isUsageDetailTable(table, indexes));
+      const detailTables = detailContexts.map(({ table }) => table);
       this.syncUsageAuditView(detailTables);
       const activeTables = new Set(detailTables);
       for (const [table, summary] of this.summaryByTable) {
@@ -4034,7 +4089,7 @@
         summary.remove();
         this.summaryByTable.delete(table);
       }
-      for (const table of detailTables) this.renderCostAudit(table);
+      for (const { table, indexes } of detailContexts) this.renderCostAudit(table, indexes);
     }
 
     getUsageAuditView(detailTables) {
@@ -4094,7 +4149,7 @@
       if (!view?.key || this.usageViewKey !== view.key) return false;
       if (typeof document === 'undefined') return true;
       const tables = [...document.querySelectorAll('table')];
-      const detailTables = tables.filter((table) => this.isUsageDetailTable(table));
+      const detailTables = tables.filter((table) => this.isUsageDetailTable(table, this.getTableColumnIndexes(table)));
       return this.getUsageAuditView(detailTables).key === view.key;
     }
 
@@ -4201,12 +4256,12 @@
       return load;
     }
 
-    getHeaderLabels(table) {
-      return [...table.querySelectorAll('thead th')].map((header) => header.textContent.trim());
+    getTableColumnIndexes(table) {
+      return getUsageColumnIndexes(table?.querySelectorAll?.('thead th'));
     }
 
-    isUsageDetailTable(table) {
-      return hasUsageDetailColumns(this.getHeaderLabels(table));
+    isUsageDetailTable(table, indexes = this.getTableColumnIndexes(table)) {
+      return Boolean(table && hasUsageDetailColumnIndexes(indexes));
     }
 
     getGroupName(cell) {
@@ -4223,10 +4278,9 @@
       return normalizeGroupName(clone.textContent);
     }
 
-    renderMultipliers(table) {
+    renderMultipliers(table, indexes = this.getTableColumnIndexes(table)) {
       if (!this.multiplierByGroup.size) return;
-      const headers = [...table.querySelectorAll('thead th')];
-      const groupColumnIndex = headers.findIndex((header) => header.textContent.trim() === '分组');
+      const groupColumnIndex = indexes.group;
       if (groupColumnIndex < 0) return;
       for (const row of table.querySelectorAll('tbody tr')) {
         const cells = row.querySelectorAll('td');
@@ -4301,7 +4355,7 @@
       return summary;
     }
 
-    renderCostAudit(table) {
+    renderCostAudit(table, indexes = this.getTableColumnIndexes(table)) {
       const summary = this.ensureCostSummary(table);
       const rows = [...table.querySelectorAll('tbody tr')];
       if (!this.config.usageCostAuditEnabled) {
@@ -4316,14 +4370,6 @@
         summary.classList.toggle('asg-usage-cost-summary-warning', this.loadFailed);
         return;
       }
-      const headers = this.getHeaderLabels(table);
-      const indexes = {
-        model: headers.indexOf('模型'),
-        group: headers.indexOf('分组'),
-        billing: headers.indexOf('计费模式'),
-        tokens: headers.indexOf('Token'),
-        cost: headers.indexOf('费用'),
-      };
       const counts = { ok: 0, anomaly: 0, skipped: 0 };
       let estimatedFromPage = 0;
       for (const row of rows) {
@@ -5054,6 +5100,9 @@
     getGroupDropdownToneClass,
     formatKeyOptionLabel,
     formatMultiplier,
+    normalizeUsageColumnLabel,
+    getUsageColumnKey,
+    getUsageColumnIndexes,
     hasUsageDetailColumns,
     getPageFeatures,
     createStabilityState,

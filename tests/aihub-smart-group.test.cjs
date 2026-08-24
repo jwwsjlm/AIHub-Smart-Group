@@ -3731,6 +3731,10 @@ test('uses exact usage API tokens and accepts the API token billing mode', () =>
   assert.equal(result.exactTokens, true);
   assert.equal(result.roundingTolerance, 0);
   assert.equal(core.isMeteredUsageBillingMode('token'), true);
+  assert.equal(core.isMeteredUsageBillingMode('Pay-as-you-go'), true);
+  assert.equal(core.isMeteredUsageBillingMode('Usage Based'), true);
+  assert.equal(core.isMeteredUsageBillingMode('Per_Token'), true);
+  assert.equal(core.isMeteredUsageBillingMode('按 Token'), true);
   assert.equal(core.isMeteredUsageBillingMode('包月'), false);
   assert.deepEqual(item, {
     id: '42',
@@ -4103,8 +4107,84 @@ test('recognizes the usage detail table after optional columns are hidden or reo
   assert.equal(core.hasUsageDetailColumns(required), true);
   assert.equal(core.hasUsageDetailColumns(['时间', '费用', 'Token', '计费模式', '分组', '模型', 'API 密钥']), true);
   assert.equal(core.hasUsageDetailColumns([...required, '推理强度', '端点', 'IP', '类型', '延迟']), true);
+  assert.equal(core.hasUsageDetailColumns(['API Key', 'Model', 'Group', 'Billing Mode', 'Tokens', 'Cost', 'Created At']), true);
+  assert.equal(core.hasUsageDetailColumns(['密钥', '模型', '分组', '计费模式', '令牌', '花费', '时间']), true);
   assert.equal(core.hasUsageDetailColumns(['模型', '分组', 'Token', '费用', '时间']), false);
   assert.equal(core.hasUsageDetailColumns(['分组', '请求', 'Token', '实际', '标准']), false);
+});
+
+test('maps semantic usage headers to stable canonical column indexes', () => {
+  const header = (textContent, attributes = {}) => ({
+    textContent,
+    getAttribute: (name) => attributes[name] || null,
+  });
+  const headers = [
+    header('', { 'data-testid': 'usage-column-api-key' }),
+    header('MODEL'),
+    header('', { 'data-column': 'group' }),
+    header('', { 'data-key': 'billingMode' }),
+    header('', { 'data-column': 'tokenUsage' }),
+    header('', { 'aria-label': 'Amount' }),
+    header('', { 'data-key': 'createdAt' }),
+  ];
+
+  assert.equal(core.getUsageColumnKey(' API Key ↓ '), 'apiKey');
+  assert.equal(core.getUsageColumnKey(headers[0]), 'apiKey');
+  assert.deepEqual(core.getUsageColumnIndexes(headers), {
+    apiKey: 0,
+    model: 1,
+    group: 2,
+    billing: 3,
+    tokens: 4,
+    cost: 5,
+    time: 6,
+  });
+  assert.equal(core.hasUsageDetailColumns(headers), true);
+});
+
+test('parses each usage table header once per render and reuses the indexes', () => {
+  const originalDocument = globalThis.document;
+  const headers = ['API Key', 'Model', 'Group', 'Billing Mode', 'Tokens', 'Cost', 'Created At']
+    .map((textContent) => ({ textContent, getAttribute: () => null }));
+  let headerScans = 0;
+  const table = {
+    isConnected: true,
+    querySelectorAll: (selector) => {
+      if (selector === 'thead th') {
+        headerScans += 1;
+        return headers;
+      }
+      return [];
+    },
+  };
+  globalThis.document = {
+    querySelectorAll: (selector) => (selector === 'table' ? [table] : []),
+  };
+
+  try {
+    const enhancer = new core.UsageMultiplierEnhancer();
+    enhancer.active = true;
+    let multiplierIndexes = null;
+    let auditIndexes = null;
+    enhancer.renderMultipliers = (currentTable, indexes) => {
+      assert.equal(currentTable, table);
+      multiplierIndexes = indexes;
+    };
+    enhancer.syncUsageAuditView = (tables) => assert.deepEqual(tables, [table]);
+    enhancer.renderCostAudit = (currentTable, indexes) => {
+      assert.equal(currentTable, table);
+      auditIndexes = indexes;
+    };
+
+    enhancer.render();
+    assert.equal(headerScans, 1);
+    assert.equal(multiplierIndexes, auditIndexes);
+    assert.equal(multiplierIndexes.group, 2);
+    assert.equal(multiplierIndexes.cost, 5);
+  } finally {
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
 });
 
 test('keeps the public provider controls active while gating account features by login', () => {
