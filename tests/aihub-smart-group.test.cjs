@@ -1194,6 +1194,113 @@ test('audits metered usage against the matching model and multiplier', () => {
   assert.ok(compactRounding.roundingTolerance > 0.03);
 });
 
+test('uses exact usage API tokens and accepts the API token billing mode', () => {
+  const index = core.buildUsageModelPriceIndex([{
+    planType: 'A003-Plus',
+    priceMultiplier: 0.11,
+    model_prices: {
+      sol: { input_per_million: 0.65, cache_input_per_million: 0.065, output_per_million: 3.9 },
+    },
+  }]);
+  const item = core.projectUsageAuditItems([{
+    id: 42,
+    model: 'gpt-5.6-sol',
+    group: { name: 'A003-Plus' },
+    rate_multiplier: 0.11,
+    input_tokens: 1_000_000,
+    output_tokens: 1_000_000,
+    cache_read_tokens: 1_000_000,
+    actual_cost: 4.615,
+    billing_mode: 'token',
+    api_key: { key: 'sk-must-not-appear' },
+    ip_address: '192.0.2.1',
+    user_agent: 'must-not-appear',
+  }])[0];
+  const result = core.auditUsageCostRecord(core.buildUsageAuditRecordFromApiItem(item), index);
+
+  assert.equal(result.status, 'ok');
+  assert.equal(result.exactTokens, true);
+  assert.equal(result.roundingTolerance, 0);
+  assert.equal(core.isMeteredUsageBillingMode('token'), true);
+  assert.equal(core.isMeteredUsageBillingMode('包月'), false);
+  assert.deepEqual(item, {
+    id: '42',
+    model: 'gpt-5.6-sol',
+    groupName: 'a003-plus',
+    rateMultiplier: 0.11,
+    tokens: { inputTokens: 1_000_000, outputTokens: 1_000_000, cacheInputTokens: 1_000_000 },
+    actualCost: 4.615,
+    billingMode: 'token',
+  });
+  assert.equal(JSON.stringify(item).includes('sk-must-not-appear'), false);
+  assert.equal(JSON.stringify(item).includes('192.0.2.1'), false);
+  assert.equal(JSON.stringify(item).includes('must-not-appear'), false);
+});
+
+test('selects only the current exact usage resource request', () => {
+  const pageWindow = { URL: globalThis.URL, location: { origin: 'https://aihub.top', href: 'https://aihub.top/usage' } };
+  const path = core.getCurrentUsageRequestPath([
+    { name: 'https://aihub.top/api/v1/usage?page=1&page_size=20' },
+    { name: 'https://aihub.top/api/v1/usage/stats?start_date=2026-08-01' },
+    { name: 'https://example.test/api/v1/usage?page=2' },
+    { name: '/api/v1/usage?page=3&page_size=50&sort_by=created_at&sort_order=desc' },
+  ], pageWindow);
+
+  assert.equal(path, '/usage?page=3&page_size=50&sort_by=created_at&sort_order=desc');
+});
+
+test('reuses the visible usage query when loading exact audit records', async () => {
+  const originalWindow = globalThis.window;
+  const originalLocalStorage = globalThis.localStorage;
+  const storage = { getItem: () => '' };
+  let requestedUrl = '';
+  globalThis.localStorage = storage;
+  globalThis.window = {
+    URL: globalThis.URL,
+    localStorage: storage,
+    location: { origin: 'https://aihub.top', href: 'https://aihub.top/usage?page=2' },
+    performance: { getEntriesByType: () => [{ name: 'https://aihub.top/api/v1/usage?page=2&page_size=20&sort_by=created_at&sort_order=desc' }] },
+    fetch: async (url) => {
+      requestedUrl = url;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { items: [{
+          id: 9,
+          model: 'gpt-5.6-sol',
+          group: { name: 'A003-Plus' },
+          rate_multiplier: 0.11,
+          input_tokens: 1,
+          output_tokens: 2,
+          cache_read_tokens: 3,
+          actual_cost: 0.00001,
+          billing_mode: 'token',
+          api_key: { key: 'sk-must-not-appear' },
+        }] } }),
+      };
+    },
+  };
+
+  try {
+    const items = await core.fetchCurrentUsageAuditItems();
+    assert.equal(requestedUrl, '/api/v1/usage?page=2&page_size=20&sort_by=created_at&sort_order=desc');
+    assert.deepEqual(items, [{
+      id: '9',
+      model: 'gpt-5.6-sol',
+      groupName: 'a003-plus',
+      rateMultiplier: 0.11,
+      tokens: { inputTokens: 1, outputTokens: 2, cacheInputTokens: 3 },
+      actualCost: 0.00001,
+      billingMode: 'token',
+    }]);
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = originalLocalStorage;
+  }
+});
+
 test('skips disabled, non-metered, incomplete, and historical-rate-mismatched usage', () => {
   const index = core.buildUsageModelPriceIndex([{
     planType: 'A003-Plus',

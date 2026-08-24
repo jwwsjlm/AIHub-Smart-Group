@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.11.0
+// @version      0.11.1
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.11.0';
+  const SCRIPT_VERSION = '0.11.1';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const API_REQUEST_TIMEOUT_MS = 15_000;
@@ -820,6 +820,15 @@
     };
   }
 
+  function normalizeUsageTokenBreakdown(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const inputTokens = nonNegativeNumberOrNull(value.inputTokens ?? value.input_tokens);
+    const outputTokens = nonNegativeNumberOrNull(value.outputTokens ?? value.output_tokens);
+    const cacheInputTokens = nonNegativeNumberOrNull(value.cacheInputTokens ?? value.cache_input_tokens ?? value.cacheReadTokens ?? value.cache_read_tokens);
+    if ([inputTokens, outputTokens, cacheInputTokens].some((item) => item === null)) return null;
+    return { inputTokens, outputTokens, cacheInputTokens };
+  }
+
   function getUsageModelVariant(value) {
     const normalized = String(value ?? '').trim().toLocaleLowerCase();
     const variants = [...normalized.matchAll(/(?:^|[-_/])(sol|terra|luna)(?=$|[-_/])/g)].map((match) => match[1]);
@@ -831,6 +840,18 @@
     const match = String(value ?? '').trim().replaceAll(',', '').match(/^\$\s*([0-9]+(?:\.[0-9]+)?)$/);
     if (!match) return null;
     return nonNegativeNumberOrNull(match[1]);
+  }
+
+  function parseUsageActualCost(value) {
+    return nonNegativeNumberOrNull(value) ?? parseUsageCost(value);
+  }
+
+  function parseUsageGroupMultiplier(value) {
+    return nonNegativeNumberOrNull(value) ?? parseGroupOptionMultiplier(value);
+  }
+
+  function isMeteredUsageBillingMode(value) {
+    return ['按量', 'token', 'metered'].includes(String(value ?? '').trim().toLocaleLowerCase());
   }
 
   function calculateUsageCost(tokens, price) {
@@ -881,19 +902,20 @@
   function auditUsageCostRecord(record, priceIndex, config = DEFAULT_CONFIG) {
     const normalizedConfig = normalizeConfig(config);
     if (!normalizedConfig.usageCostAuditEnabled) return { status: 'skipped', reason: 'disabled' };
-    if (String(record?.billingMode || '').trim() !== '按量') return { status: 'skipped', reason: 'billing_mode' };
+    if (!isMeteredUsageBillingMode(record?.billingMode)) return { status: 'skipped', reason: 'billing_mode' };
     const model = getUsageModelVariant(record?.model);
-    const multiplier = parseGroupOptionMultiplier(record?.groupMultiplier ?? record?.groupText);
-    const tokens = parseUsageTokenBreakdown(record?.tokenValues ?? record?.tokenText);
-    const actualCost = parseUsageCost(record?.actualCost);
+    const multiplier = parseUsageGroupMultiplier(record?.groupMultiplier ?? record?.groupText);
+    const exactTokens = normalizeUsageTokenBreakdown(record?.tokens);
+    const tokens = exactTokens || parseUsageTokenBreakdown(record?.tokenValues ?? record?.tokenText);
+    const actualCost = parseUsageActualCost(record?.actualCost);
     const price = findUsageModelPrice(priceIndex, record?.groupName, multiplier, model);
     if (!model || multiplier === null || !tokens || actualCost === null || !price) return { status: 'skipped', reason: 'missing_data' };
     const estimatedCost = calculateUsageCost(tokens, price);
-    const roundingTolerance = calculateUsageCostRoundingTolerance(record?.tokenValues ?? record?.tokenText, price);
+    const roundingTolerance = exactTokens ? 0 : calculateUsageCostRoundingTolerance(record?.tokenValues ?? record?.tokenText, price);
     const absoluteTolerance = Math.max(0.000005, roundingTolerance || 0);
     const deviation = classifyUsageCostDeviation(actualCost, estimatedCost, normalizedConfig.usageCostAuditTolerancePercent, absoluteTolerance);
     if (!deviation) return { status: 'skipped', reason: 'invalid_cost' };
-    return { status: deviation.anomaly ? 'anomaly' : 'ok', model, multiplier, tokens, price, roundingTolerance, ...deviation };
+    return { status: deviation.anomaly ? 'anomaly' : 'ok', model, multiplier, tokens, price, exactTokens: Boolean(exactTokens), roundingTolerance, ...deviation };
   }
 
   function formatUsageCost(value) {
@@ -1245,6 +1267,72 @@
 
   async function fetchCurrentBalance() {
     return apiRequest('/auth/me?timezone=Asia%2FShanghai');
+  }
+
+  function getCurrentUsageRequestPath(entries, pageWindow = getPageWindow()) {
+    const resourceEntries = entries ?? pageWindow?.performance?.getEntriesByType?.('resource');
+    const pageOrigin = pageWindow?.location?.origin || (typeof location !== 'undefined' ? location.origin : '');
+    const baseUrl = pageWindow?.location?.href || (typeof location !== 'undefined' ? location.href : 'https://aihub.top/usage');
+    const URLCtor = pageWindow?.URL;
+    if (typeof URLCtor !== 'function') return null;
+    for (const entry of [...(resourceEntries || [])].reverse()) {
+      try {
+        const url = new URLCtor(String(entry?.name || ''), baseUrl);
+        if (pageOrigin && url.origin !== pageOrigin) continue;
+        if (url.pathname !== '/api/v1/usage') continue;
+        return `${url.pathname.slice('/api/v1'.length)}${url.search}`;
+      } catch {
+        // Ignore malformed resource entries and continue with older requests.
+      }
+    }
+    return null;
+  }
+
+  function projectUsageAuditItems(items) {
+    const projected = [];
+    for (const item of Array.isArray(items) ? items : []) {
+      const id = String(item?.id ?? '').trim();
+      const tokens = normalizeUsageTokenBreakdown({
+        input_tokens: item?.input_tokens,
+        output_tokens: item?.output_tokens,
+        cache_read_tokens: item?.cache_read_tokens,
+      });
+      const actualCost = nonNegativeNumberOrNull(item?.actual_cost);
+      const rateMultiplier = nonNegativeNumberOrNull(item?.rate_multiplier);
+      if (!id || !tokens || actualCost === null || rateMultiplier === null) continue;
+      projected.push({
+        id,
+        model: String(item?.model ?? ''),
+        groupName: normalizeGroupName(item?.group?.name ?? item?.group_name),
+        rateMultiplier,
+        tokens,
+        actualCost,
+        billingMode: String(item?.billing_mode ?? item?.billingMode ?? item?.billing_type ?? ''),
+      });
+    }
+    return projected;
+  }
+
+  function buildUsageAuditRecordFromApiItem(item) {
+    if (!item || typeof item !== 'object') return null;
+    return {
+      groupName: item.groupName,
+      groupMultiplier: item.rateMultiplier,
+      model: item.model,
+      billingMode: item.billingMode,
+      tokens: item.tokens,
+      actualCost: item.actualCost,
+    };
+  }
+
+  async function fetchCurrentUsageAuditItems(options = {}) {
+    const path = getCurrentUsageRequestPath();
+    if (!path) return null;
+    const payload = await apiRequest(path, options);
+    const items = Array.isArray(payload?.data?.items)
+      ? payload.data.items
+      : (Array.isArray(payload?.items) ? payload.items : []);
+    return projectUsageAuditItems(items);
   }
 
   async function fetchAllKeys() {
@@ -2481,6 +2569,7 @@
     constructor() {
       this.multiplierByGroup = new Map();
       this.modelPriceIndex = buildUsageModelPriceIndex([]);
+      this.usageItemsById = new Map();
       this.summaryByTable = new Map();
       this.observer = null;
       this.renderQueued = false;
@@ -2491,6 +2580,8 @@
       this.lastRefreshCompletedAt = 0;
       this.hasMonitorData = false;
       this.loadFailed = false;
+      this.usageDataAvailable = false;
+      this.usageLoadFailed = false;
       this.config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
       this.onConfigChanged = () => {
         this.config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
@@ -2540,16 +2631,28 @@
       if (!force && !isRefreshDue(Date.now(), this.lastRefreshCompletedAt, USAGE_REFRESH_INTERVAL_MS)) return;
       this.loading = true;
       try {
-        const summary = await fetchMonitorSummary();
+        const [monitorResult, usageResult] = await Promise.allSettled([
+          fetchMonitorSummary(),
+          fetchCurrentUsageAuditItems(),
+        ]);
         if (!this.active) return;
-        this.multiplierByGroup = buildGroupMultiplierMap(summary?.apis);
-        this.modelPriceIndex = buildUsageModelPriceIndex(summary?.apis);
-        this.hasMonitorData = true;
-        this.loadFailed = false;
-        this.render();
-      } catch {
-        if (!this.active) return;
-        this.loadFailed = !this.hasMonitorData;
+        if (monitorResult.status === 'fulfilled') {
+          this.multiplierByGroup = buildGroupMultiplierMap(monitorResult.value?.apis);
+          this.modelPriceIndex = buildUsageModelPriceIndex(monitorResult.value?.apis);
+          this.hasMonitorData = true;
+          this.loadFailed = false;
+        } else {
+          this.loadFailed = !this.hasMonitorData;
+        }
+        if (usageResult.status === 'fulfilled' && Array.isArray(usageResult.value)) {
+          this.usageItemsById = new Map(usageResult.value.map((item) => [item.id, item]));
+          this.usageDataAvailable = true;
+          this.usageLoadFailed = false;
+        } else {
+          this.usageItemsById.clear();
+          this.usageDataAvailable = false;
+          this.usageLoadFailed = usageResult.status === 'rejected';
+        }
         this.render();
       } finally {
         this.loading = false;
@@ -2673,6 +2776,11 @@
       };
     }
 
+    getUsageApiAuditRecord(row) {
+      const item = this.usageItemsById.get(String(row?.dataset?.rowId || '').trim());
+      return item ? buildUsageAuditRecordFromApiItem(item) : null;
+    }
+
     ensureCostSummary(table) {
       let summary = this.summaryByTable.get(table);
       if (summary?.isConnected) return summary;
@@ -2709,17 +2817,21 @@
         cost: headers.indexOf('费用'),
       };
       const counts = { ok: 0, anomaly: 0, skipped: 0 };
+      let estimatedFromPage = 0;
       for (const row of rows) {
         const extracted = this.getCostAuditRecord(row, indexes);
         if (!extracted) {
           counts.skipped += 1;
           continue;
         }
-        const result = auditUsageCostRecord(extracted.record, this.modelPriceIndex, this.config);
+        const apiRecord = this.getUsageApiAuditRecord(row);
+        const result = auditUsageCostRecord(apiRecord || extracted.record, this.modelPriceIndex, this.config);
+        if (!apiRecord) estimatedFromPage += 1;
         counts[result.status] = (counts[result.status] || 0) + 1;
         this.renderCostAuditResult(extracted.costCell, result);
       }
-      summary.textContent = `费用校验：${counts.ok} 条正常 · ${counts.anomaly} 条异常 · ${counts.skipped} 条跳过`;
+      const sourceSuffix = estimatedFromPage > 0 ? ` · ${estimatedFromPage} 条按页面显示值估算` : '';
+      summary.textContent = `费用校验：${counts.ok} 条正常 · ${counts.anomaly} 条异常 · ${counts.skipped} 条跳过${sourceSuffix}`;
       summary.classList.toggle('asg-usage-cost-summary-warning', counts.anomaly > 0);
     }
 
@@ -3009,8 +3121,12 @@
     parseCompactTokenCount,
     getCompactTokenRoundingUncertainty,
     parseUsageTokenBreakdown,
+    normalizeUsageTokenBreakdown,
     getUsageModelVariant,
     parseUsageCost,
+    parseUsageActualCost,
+    parseUsageGroupMultiplier,
+    isMeteredUsageBillingMode,
     calculateUsageCost,
     calculateUsageCostRoundingTolerance,
     classifyUsageCostDeviation,
@@ -3037,6 +3153,10 @@
     isPageVisible,
     fetchMonitorSummary,
     clearMonitorSummaryCache,
+    getCurrentUsageRequestPath,
+    projectUsageAuditItems,
+    buildUsageAuditRecordFromApiItem,
+    fetchCurrentUsageAuditItems,
     appendLogEntries,
     formatLogLine,
     start() {
