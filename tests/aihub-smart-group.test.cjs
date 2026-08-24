@@ -434,6 +434,10 @@ test('normalizes model price and usage cost audit settings', () => {
   assert.equal(core.DEFAULT_CONFIG.minSla, 0);
   assert.equal(core.normalizeConfig({ minSla: 0.82 }).minSla, 0.82);
   assert.equal(core.normalizeConfig({ minSla: 2 }).minSla, 1);
+  assert.equal(core.DEFAULT_CONFIG.minOutputTokensPerSecond, 0);
+  assert.equal(core.normalizeConfig({ minOutputTokensPerSecond: '120' }).minOutputTokensPerSecond, 120);
+  assert.equal(core.normalizeConfig({ minOutputTokensPerSecond: -1 }).minOutputTokensPerSecond, 0);
+  assert.equal(core.normalizeConfig({ minOutputTokensPerSecond: 999_999 }).minOutputTokensPerSecond, 100_000);
 });
 
 test('defaults provider hall auto sorting to multiplier priority', () => {
@@ -526,6 +530,13 @@ test('exposes the optional historical SLA threshold in reliability settings', ()
   assert.match(userscriptSource, /最低历史 SLA（0 表示不筛选）/);
 });
 
+test('exposes the optional output throughput threshold in reliability settings', () => {
+  assert.match(userscriptSource, /data-setting="minOutputTokensPerSecond"/);
+  assert.match(userscriptSource, /最低输出速度（0 表示不筛选）/);
+  assert.match(userscriptSource, /输出速度无数据排除/);
+  assert.match(userscriptSource, /输出速度不足排除/);
+});
+
 test('updates only settings previews affected by the edited field', () => {
   assert.deepEqual(core.getSettingsPreviewTargets(), {
     recommendation: true,
@@ -598,6 +609,10 @@ test('marks the price preview pending for unsaved candidate filters only', () =>
   assert.notEqual(signature, core.getRecommendationPricePreviewSignature({
     ...core.DEFAULT_CONFIG,
     excludedGroupKeywords: 'free',
+  }));
+  assert.notEqual(signature, core.getRecommendationPricePreviewSignature({
+    ...core.DEFAULT_CONFIG,
+    minOutputTokensPerSecond: 120,
   }));
   assert.equal(signature, core.getRecommendationPricePreviewSignature({
     ...core.DEFAULT_CONFIG,
@@ -2351,6 +2366,8 @@ test('reports mutually exclusive candidate diagnostics', () => {
     keywords: 1,
     slaUnavailable: 0,
     slaLow: 0,
+    outputTpsUnavailable: 0,
+    outputTpsLow: 0,
     priceMetricUnavailable: 0,
     priceMetricUnavailableReasons: { notReady: 0, stale: 0, missing: 0 },
     userLatencySampleFallbacks: 0,
@@ -2371,6 +2388,23 @@ test('filters candidates by optional historical SLA without changing the default
   assert.deepEqual(filtered.candidates.map((row) => row.name), ['high-sla']);
   assert.equal(filtered.counts.slaLow, 1);
   assert.equal(filtered.counts.slaUnavailable, 1);
+});
+
+test('filters candidates by optional output throughput without changing the default', () => {
+  const rows = [
+    { planType: 'above', group_id: 1, priceMultiplier: 0.01, available: true, outputTokensPerSecond: 121, successRates: { '10m': 1 }, warningReasons: [] },
+    { planType: 'equal', group_id: 2, priceMultiplier: 0.01, available: true, outputTps: 120, successRates: { '10m': 1 }, warningReasons: [] },
+    { planType: 'below', group_id: 3, priceMultiplier: 0.01, available: true, output_tps: 119.9, successRates: { '10m': 1 }, warningReasons: [] },
+    { planType: 'zero', group_id: 4, priceMultiplier: 0.01, available: true, outputTokensPerSecond: 0, successRates: { '10m': 1 }, warningReasons: [] },
+    { planType: 'missing', group_id: 5, priceMultiplier: 0.01, available: true, successRates: { '10m': 1 }, warningReasons: [] },
+  ];
+  const baseline = core.analyzeCandidates(rows, core.DEFAULT_CONFIG);
+  assert.equal(baseline.candidates.length, 5);
+
+  const filtered = core.analyzeCandidates(rows, { ...core.DEFAULT_CONFIG, minOutputTokensPerSecond: 120 });
+  assert.deepEqual(filtered.candidates.map((row) => row.name), ['above', 'equal']);
+  assert.equal(filtered.counts.outputTpsLow, 1);
+  assert.equal(filtered.counts.outputTpsUnavailable, 2);
 });
 
 test('formats monitor freshness and treats invalid timestamps as stale', () => {
@@ -2624,6 +2658,7 @@ test('binds reusable candidate analyses to the current rows and relevant normali
     { ...config, mode: 'price', recommendationPriceBasis: 'effectiveInput1h' },
     { ...config, availabilityMode: 'successes', minSuccessPoints10m: 2 },
     { ...config, minSuccess10m: 0.5 },
+    { ...config, minOutputTokensPerSecond: 120 },
     { ...config, requireNoWarnings: false },
     { ...config, excludedGroupKeywords: 'cached' },
     { ...config, latencySource: 'user' },
