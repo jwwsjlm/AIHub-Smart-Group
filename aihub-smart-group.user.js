@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.12.2
+// @version      0.12.3
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,12 +29,15 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.12.2';
+  const SCRIPT_VERSION = '0.12.3';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
   const API_REQUEST_TIMEOUT_MS = 15_000;
   const MONITOR_SUMMARY_CACHE_TTL_MS = 2_000;
+  const MONITOR_SERIES_CACHE_TTL_MS = 60_000;
+  const MONITOR_SAMPLE_CLOCK_SKEW_MS = 60_000;
+  const MONITOR_HISTORY_SAMPLE_COUNT_CAP = 60;
   const ENHANCER_RENDER_DEBOUNCE_MS = 50;
   const ROUTER_SYNC_INTERVAL_MS = 2_000;
   const USAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
@@ -69,6 +72,13 @@
     sol: 'Sol',
     terra: 'Terra',
     luna: 'Luna',
+  });
+  const EFFECTIVE_MULTIPLIER_REASON_LABELS = Object.freeze({
+    insufficient_samples: '样本不足',
+    runtime_window_not_ready: '数据未就绪',
+    runtime_metrics_stale: '数据已过期',
+    openrouter_reference_unavailable: '参考价格不可用',
+    openrouter_reference_stale: '参考价格已过期',
   });
   const MODEL_PRICE_CURRENCY_FORMATTER = new Intl.NumberFormat('en-US', {
     style: 'currency',
@@ -325,6 +335,86 @@
     return normalized === null ? '缓存命中率暂无数据' : `缓存命中率 ${(normalized * 100).toFixed(1)}%`;
   }
 
+  function booleanOrNull(value) {
+    if (value === true || value === false) return value;
+    const normalized = String(value ?? '').trim().toLocaleLowerCase();
+    if (normalized === 'true' || normalized === '1') return true;
+    if (normalized === 'false' || normalized === '0') return false;
+    return null;
+  }
+
+  function normalizeRuntimeCache1h(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const normalized = {
+      usageRecords: nonNegativeNumberOrNull(value.usageRecords ?? value.usage_records),
+      inputTokens: nonNegativeNumberOrNull(value.inputTokens ?? value.input_tokens),
+      cacheReadTokens: nonNegativeNumberOrNull(value.cacheReadTokens ?? value.cache_read_tokens),
+      cacheCreationTokens: nonNegativeNumberOrNull(value.cacheCreationTokens ?? value.cache_creation_tokens),
+      inputCost: nonNegativeNumberOrNull(value.inputCost ?? value.input_cost),
+      cacheReadCost: nonNegativeNumberOrNull(value.cacheReadCost ?? value.cache_read_cost),
+      cacheCreationCost: nonNegativeNumberOrNull(value.cacheCreationCost ?? value.cache_creation_cost),
+      cacheHitRate: normalizeCacheHitRate(value.cacheHitRate ?? value.cache_hit_rate),
+      refreshedAt: String(value.refreshedAt ?? value.refreshed_at ?? '').trim() || null,
+      ready: booleanOrNull(value.ready),
+      stale: booleanOrNull(value.stale),
+    };
+    return Object.values(normalized).some((item) => item !== null) ? normalized : null;
+  }
+
+  function getEffectivePricing(rowOrPricing) {
+    const nested = rowOrPricing?.effectivePricing;
+    const source = nested && typeof nested === 'object' ? nested : (rowOrPricing || {});
+    const runtimeCache1h = normalizeRuntimeCache1h(
+      source.runtimeCache1h
+      ?? source.runtime_cache_1h
+      ?? rowOrPricing?.runtimeCache1h
+      ?? rowOrPricing?.runtime_cache_1h,
+    );
+    const inputPricePerMillion = nonNegativeNumberOrNull(
+      source.inputPricePerMillion
+      ?? source.effectiveInputPricePerMillion1h
+      ?? source.effective_input_price_per_million_1h,
+    );
+    const multiplier = nonNegativeNumberOrNull(source.multiplier ?? source.effectiveMultiplier ?? source.effective_multiplier);
+    const readyFlag = booleanOrNull(source.ready ?? source.effectiveMultiplierReady ?? source.effective_multiplier_ready);
+    const reason = String(source.reason ?? source.effectiveMultiplierReason ?? source.effective_multiplier_reason ?? '').trim() || null;
+    const stale = runtimeCache1h?.stale === true;
+    const hasData = inputPricePerMillion !== null || multiplier !== null || readyFlag !== null || Boolean(reason);
+    return {
+      inputPricePerMillion,
+      multiplier,
+      ready: readyFlag === true && !stale && inputPricePerMillion !== null && multiplier !== null,
+      reason: stale ? 'runtime_metrics_stale' : reason,
+      runtimeCache1h,
+      hasData,
+    };
+  }
+
+  function getEffectiveMultiplierReasonLabel(reason) {
+    const normalized = String(reason || '').trim().toLocaleLowerCase();
+    return EFFECTIVE_MULTIPLIER_REASON_LABELS[normalized] || (normalized ? '暂不可用' : '暂无数据');
+  }
+
+  function formatEffectivePricingSummary(rowOrPricing, compact = false, includeUnavailable = false) {
+    const pricing = getEffectivePricing(rowOrPricing);
+    if (!pricing.ready) {
+      if (!includeUnavailable || !pricing.hasData) return '';
+      return `暂不可用（${getEffectiveMultiplierReasonLabel(pricing.reason)}）`;
+    }
+    const price = formatModelPriceAmount(pricing.inputPricePerMillion);
+    const multiplier = formatMultiplier(pricing.multiplier);
+    return compact
+      ? `真实 ${price}/1M · 预测 ${multiplier}`
+      : `真实输入 ${price} / 1M · 预测倍率 ${multiplier}`;
+  }
+
+  function formatOutputThroughput(row, compact = false) {
+    const value = nonNegativeNumberOrNull(row?.outputTokensPerSecond ?? row?.outputTps ?? row?.output_tps);
+    if (value === null || value <= 0) return '';
+    const formatted = value >= 100 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/, '');
+    return `${compact ? '输出' : '输出速度'} ${formatted} tok/s`;
+  }
+
   function normalizeModelPrices(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
     const result = {};
@@ -498,6 +588,38 @@
     return `首 Token ${valueText}`;
   }
 
+  function normalizeMonitorHistory(value) {
+    const byTimestamp = new Map();
+    for (const item of Array.isArray(value) ? value : []) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+      const probedAt = item.probedAt ?? item.probed_at ?? item.at ?? item.timestamp;
+      const timestamp = typeof probedAt === 'number' ? probedAt : Date.parse(probedAt);
+      if (!Number.isFinite(timestamp)) continue;
+      const normalized = {
+        ...item,
+        probedAt,
+        timestamp,
+        status: String(item.status ?? '').trim().toLocaleLowerCase(),
+        sampleCount: nonNegativeNumberOrNull(item.sampleCount ?? item.sample_count),
+      };
+      const existing = byTimestamp.get(timestamp);
+      if (!existing) {
+        byTimestamp.set(timestamp, normalized);
+        continue;
+      }
+      const existingAvailability = monitorHistoryStatusToAvailability(existing.status);
+      const nextAvailability = monitorHistoryStatusToAvailability(normalized.status);
+      const existingCount = numberOr(existing.sampleCount, 0);
+      const nextCount = numberOr(normalized.sampleCount, 0);
+      if ((nextAvailability === 0 && existingAvailability !== 0)
+        || (existingAvailability === null && nextAvailability === 1)
+        || (existingAvailability === nextAvailability && nextCount > existingCount)) {
+        byTimestamp.set(timestamp, normalized);
+      }
+    }
+    return [...byTimestamp.values()].sort((left, right) => left.timestamp - right.timestamp);
+  }
+
   function normalizeMonitorRow(row) {
     const source = row && typeof row === 'object' ? row : {};
     const groupId = Number(source.group_id ?? source.groupId ?? source.id);
@@ -505,7 +627,7 @@
     const warningReasons = Array.isArray(source.warningReasons)
       ? source.warningReasons.slice()
       : (Array.isArray(source.warning_reasons) ? source.warning_reasons.slice() : []);
-    if (source.response_valid === false && !warningReasons.includes('response_invalid')) warningReasons.push('response_invalid');
+    if ((source.response_valid ?? source.responseValid) === false && !warningReasons.includes('response_invalid')) warningReasons.push('response_invalid');
     const modelDetection = normalizeModelDetection(source.modelDetection ?? source.model_detection);
     if (isModelDetectionWarning(modelDetection)) {
       const reason = `model_detection_${modelDetection.status || 'unknown'}`;
@@ -513,7 +635,17 @@
     }
     const modelHealth = normalizeModelHealth(source.modelHealth ?? source.model_health);
     const modelPrices = normalizeModelPrices(source.modelPrices ?? source.model_prices);
-    const cacheHitRate = normalizeCacheHitRate(source.cacheHitRate ?? source.cache_hit_rate);
+    const runtimeCache1h = normalizeRuntimeCache1h(source.runtimeCache1h ?? source.runtime_cache_1h);
+    const directCacheHitRate = normalizeCacheHitRate(source.cacheHitRate ?? source.cache_hit_rate);
+    const cacheHitRate = directCacheHitRate !== null
+      ? directCacheHitRate
+      : (runtimeCache1h?.ready === true && runtimeCache1h.stale !== true ? runtimeCache1h.cacheHitRate : null);
+    const effectiveMultiplier = nonNegativeNumberOrNull(source.effectiveMultiplier ?? source.effective_multiplier);
+    const effectiveInputPricePerMillion1h = nonNegativeNumberOrNull(
+      source.effectiveInputPricePerMillion1h ?? source.effective_input_price_per_million_1h,
+    );
+    const effectiveMultiplierReady = booleanOrNull(source.effectiveMultiplierReady ?? source.effective_multiplier_ready);
+    const effectiveMultiplierReason = String(source.effectiveMultiplierReason ?? source.effective_multiplier_reason ?? '').trim() || null;
     return {
       ...source,
       id: source.id ?? (Number.isInteger(groupId) ? groupId : undefined),
@@ -529,6 +661,11 @@
       modelHealth,
       modelPrices,
       cacheHitRate,
+      runtimeCache1h,
+      effectiveMultiplier,
+      effectiveInputPricePerMillion1h,
+      effectiveMultiplierReady,
+      effectiveMultiplierReason,
       checkedAt: source.checkedAt ?? source.last_probed_at ?? source.lastProbedAt,
       probeFirstTokenLatencyMs: source.probeFirstTokenLatencyMs
         ?? source.probe_ttft_ms
@@ -538,6 +675,10 @@
       userAvgTtftMs: source.userAvgTtftMs ?? source.user_avg_ttft_ms,
       userSampleCount: source.userSampleCount ?? source.user_sample_count,
       userHasData: source.userHasData ?? source.user_has_data,
+      outputTokensPerSecond: nonNegativeNumberOrNull(source.outputTokensPerSecond ?? source.outputTps ?? source.output_tps),
+      supportWs: booleanOrNull(source.supportWs ?? source.support_ws),
+      subscriptionType: String(source.subscriptionType ?? source.subscription_type ?? '').trim() || null,
+      history: normalizeMonitorHistory(source.history ?? source.monitorHistory ?? source.monitor_history),
     };
   }
 
@@ -553,18 +694,103 @@
 
   function normalizeMonitorSeriesPayload(payload) {
     const data = payload?.data && typeof payload.data === 'object' ? payload.data : payload;
-    if (data?.seriesByApiId && typeof data.seriesByApiId === 'object') return data;
+    const directSeries = data?.seriesByApiId ?? data?.series_by_api_id;
+    const directUserTtft = data?.userTtftByGroupId
+      ?? data?.userTTFTByGroupId
+      ?? data?.userTtftByApiId
+      ?? data?.userTTFTByApiId
+      ?? data?.user_ttft_by_group_id
+      ?? data?.user_ttft_by_api_id;
     const seriesByApiId = {};
     const userTtftByGroupId = {};
+    if (directSeries && typeof directSeries === 'object' && !Array.isArray(directSeries)) {
+      for (const [groupId, samples] of Object.entries(directSeries)) {
+        if (Array.isArray(samples)) seriesByApiId[String(groupId)] = samples;
+      }
+    }
+    if (directUserTtft && typeof directUserTtft === 'object' && !Array.isArray(directUserTtft)) {
+      for (const [groupId, samples] of Object.entries(directUserTtft)) {
+        if (Array.isArray(samples)) userTtftByGroupId[String(groupId)] = samples;
+      }
+    }
     for (const item of Array.isArray(data?.items) ? data.items : []) {
-      const groupId = String(item?.group_id ?? item?.groupId ?? '');
+      const groupId = String(item?.group_id ?? item?.groupId ?? item?.id ?? '');
       if (!groupId) continue;
-      seriesByApiId[groupId] = Array.isArray(item?.probe) ? item.probe : [];
-      userTtftByGroupId[groupId] = Array.isArray(item?.user_ttft) ? item.user_ttft : [];
+      const probe = item?.probe ?? item?.probeSeries ?? item?.probe_series;
+      const userTtft = item?.userTtft ?? item?.userTTFT ?? item?.user_ttft;
+      if ((!Array.isArray(seriesByApiId[groupId]) || !seriesByApiId[groupId].length) && Array.isArray(probe)) {
+        seriesByApiId[groupId] = probe;
+      }
+      if ((!Array.isArray(userTtftByGroupId[groupId]) || !userTtftByGroupId[groupId].length) && Array.isArray(userTtft)) {
+        userTtftByGroupId[groupId] = userTtft;
+      }
     }
     return {
       ...data,
       generatedAt: data?.generatedAt ?? data?.generated_at ?? null,
+      range: data?.range ?? null,
+      seriesByApiId,
+      userTtftByGroupId,
+    };
+  }
+
+  function monitorHistoryStatusToAvailability(status) {
+    const normalized = String(status || '').trim().toLocaleLowerCase();
+    if (['operational', 'success', 'healthy', 'up', 'available', 'passed', 'ok'].includes(normalized)) return 1;
+    if (['degraded', 'failed', 'error', 'down', 'unavailable'].includes(normalized)) return 0;
+    return null;
+  }
+
+  function buildMonitorSeriesFromSummary(summary) {
+    const seriesByApiId = {};
+    for (const row of Array.isArray(summary?.apis) ? summary.apis : []) {
+      const groupId = String(row?.id ?? row?.group_id ?? '');
+      if (!groupId) continue;
+      const samples = [];
+      for (const item of Array.isArray(row?.history) ? row.history : []) {
+        const availability = monitorHistoryStatusToAvailability(item.status);
+        if (availability === null) continue;
+        const rawSampleCount = nonNegativeNumberOrNull(item.sampleCount);
+        if (rawSampleCount === 0) continue;
+        const sampleCount = Math.floor(clamp(rawSampleCount ?? 1, 1, MONITOR_HISTORY_SAMPLE_COUNT_CAP));
+        for (let index = 0; index < sampleCount; index += 1) samples.push([item.timestamp, availability]);
+      }
+      if (samples.length) seriesByApiId[groupId] = samples;
+    }
+    return {
+      generatedAt: summary?.generatedAt ?? null,
+      range: 'summary-history',
+      seriesByApiId,
+      userTtftByGroupId: {},
+    };
+  }
+
+  function hasMonitorSeriesData(series) {
+    return Object.values(series?.seriesByApiId || {}).some((samples) => Array.isArray(samples) && samples.length > 0);
+  }
+
+  function latestMonitorGeneratedAt(left, right) {
+    const values = [left, right].map((value) => ({ value, parsed: typeof value === 'number' ? value : Date.parse(value) }));
+    const valid = values.filter((item) => Number.isFinite(item.parsed)).sort((a, b) => b.parsed - a.parsed);
+    return valid[0]?.value ?? left ?? right ?? null;
+  }
+
+  function mergeMonitorSeries(primary, fallback) {
+    const normalizedPrimary = normalizeMonitorSeriesPayload(primary || {});
+    const normalizedFallback = normalizeMonitorSeriesPayload(fallback || {});
+    const seriesByApiId = { ...normalizedPrimary.seriesByApiId };
+    const userTtftByGroupId = { ...normalizedPrimary.userTtftByGroupId };
+    for (const [groupId, samples] of Object.entries(normalizedFallback.seriesByApiId)) {
+      if (!Array.isArray(seriesByApiId[groupId]) || !seriesByApiId[groupId].length) seriesByApiId[groupId] = samples;
+    }
+    for (const [groupId, samples] of Object.entries(normalizedFallback.userTtftByGroupId)) {
+      if (!Array.isArray(userTtftByGroupId[groupId]) || !userTtftByGroupId[groupId].length) userTtftByGroupId[groupId] = samples;
+    }
+    return {
+      ...normalizedFallback,
+      ...normalizedPrimary,
+      generatedAt: latestMonitorGeneratedAt(normalizedPrimary.generatedAt, normalizedFallback.generatedAt),
+      range: normalizedPrimary.range || normalizedFallback.range || null,
       seriesByApiId,
       userTtftByGroupId,
     };
@@ -702,21 +928,42 @@
     };
   }
 
-  function getLatestMonitorSampleAt(seriesPayload) {
+  function getLatestMonitorSampleAt(seriesPayload, maxTimestamp = Number.POSITIVE_INFINITY) {
     let latest = null;
+    const upperBound = Number(maxTimestamp);
     for (const samples of Object.values(seriesPayload?.seriesByApiId || {})) {
       for (const sample of Array.isArray(samples) ? samples : []) {
         const timestamp = Number(sample?.[0]);
-        if (Number.isFinite(timestamp) && (latest === null || timestamp > latest)) latest = timestamp;
+        if (Number.isFinite(timestamp)
+          && timestamp <= upperBound
+          && (latest === null || timestamp > latest)) latest = timestamp;
       }
     }
     for (const samples of Object.values(seriesPayload?.userTtftByGroupId || {})) {
       for (const sample of Array.isArray(samples) ? samples : []) {
-        const timestamp = Date.parse(sample?.at);
-        if (Number.isFinite(timestamp) && (latest === null || timestamp > latest)) latest = timestamp;
+        const value = sample?.at ?? sample?.probedAt ?? sample?.probed_at ?? sample?.timestamp;
+        const timestamp = typeof value === 'number' ? value : Date.parse(value);
+        if (Number.isFinite(timestamp)
+          && timestamp <= upperBound
+          && (latest === null || timestamp > latest)) latest = timestamp;
       }
     }
     return latest;
+  }
+
+  function getMonitorSeriesWindowAnchor(seriesPayload, wallNow = Date.now()) {
+    const generatedAt = Date.parse(seriesPayload?.generatedAt);
+    if (Number.isFinite(generatedAt)) {
+      const latestSampleAt = getLatestMonitorSampleAt(seriesPayload, generatedAt + MONITOR_SAMPLE_CLOCK_SKEW_MS);
+      return latestSampleAt === null ? generatedAt : Math.max(generatedAt, latestSampleAt);
+    }
+    const current = Number(wallNow);
+    const latestSampleAt = getLatestMonitorSampleAt(
+      seriesPayload,
+      Number.isFinite(current) ? current + MONITOR_SAMPLE_CLOCK_SKEW_MS : Number.POSITIVE_INFINITY,
+    );
+    if (latestSampleAt !== null) return latestSampleAt;
+    return null;
   }
 
   function formatRemainingTime(remainingMs) {
@@ -735,20 +982,25 @@
   }
 
   function attachRecentAvailability(rows, seriesPayload, windowMs = 10 * 60 * 1000) {
-    const generatedAt = Date.parse(seriesPayload?.generatedAt);
-    const now = Number.isFinite(generatedAt) ? generatedAt : Date.now();
+    const anchor = getMonitorSeriesWindowAnchor(seriesPayload);
+    const now = anchor === null ? Date.now() : anchor;
     const cutoff = now - Math.max(1, Number(windowMs) || 1);
     const seriesByApiId = seriesPayload?.seriesByApiId || {};
     return (Array.isArray(rows) ? rows : []).map((row) => {
-      const samples = Array.isArray(seriesByApiId[row?.id]) ? seriesByApiId[row.id] : [];
-      const recent = samples.filter((sample) => {
+      const groupId = String(row?.id ?? row?.group_id ?? '');
+      const samples = Array.isArray(seriesByApiId[groupId]) ? seriesByApiId[groupId] : [];
+      const recent = [];
+      let successes = 0;
+      for (const sample of samples) {
         const at = Number(sample?.[0]);
-        return Number.isFinite(at) && at >= cutoff && at <= now && (sample?.[1] === 0 || sample?.[1] === 1);
-      });
-      const successes = recent.filter((sample) => sample[1] === 1).length;
-      const orderedRecent = recent.slice().sort((left, right) => Number(left[0]) - Number(right[0]));
+        const status = sample?.[1];
+        if (!Number.isFinite(at) || at < cutoff || at > now || (status !== 0 && status !== 1)) continue;
+        recent.push(sample);
+        if (status === 1) successes += 1;
+      }
+      recent.sort((left, right) => Number(left[0]) - Number(right[0]));
       let trailingSuccesses = 0;
-      for (let index = orderedRecent.length - 1; index >= 0 && orderedRecent[index][1] === 1; index -= 1) trailingSuccesses += 1;
+      for (let index = recent.length - 1; index >= 0 && recent[index][1] === 1; index -= 1) trailingSuccesses += 1;
       return {
         ...row,
         successRates: {
@@ -800,6 +1052,10 @@
       if (health) metric.modelHealth = health;
       const modelPrices = normalizeModelPrices(row?.modelPrices ?? row?.model_prices);
       if (modelPrices) metric.modelPrices = modelPrices;
+      const effectivePricing = getEffectivePricing(row);
+      if (effectivePricing.hasData) metric.effectivePricing = effectivePricing;
+      const outputTokensPerSecond = nonNegativeNumberOrNull(row?.outputTokensPerSecond ?? row?.outputTps ?? row?.output_tps);
+      if (outputTokensPerSecond !== null) metric.outputTokensPerSecond = outputTokensPerSecond;
       result.set(groupId, metric);
     }
     return result;
@@ -1304,10 +1560,20 @@
     fetchedAt: 0,
     pending: null,
   };
+  const monitorSeriesCache = {
+    value: null,
+    fetchedAt: 0,
+    pending: null,
+  };
 
   function clearMonitorSummaryCache() {
     monitorSummaryCache.value = null;
     monitorSummaryCache.fetchedAt = 0;
+  }
+
+  function clearMonitorSeriesCache() {
+    monitorSeriesCache.value = null;
+    monitorSeriesCache.fetchedAt = 0;
   }
 
   async function requestMonitorSummary(options = {}) {
@@ -1345,17 +1611,40 @@
     return pending;
   }
 
-  async function fetchMonitorSeries() {
+  async function requestMonitorSeries(options = {}) {
     try {
-      const payload = await apiRequest('/public/providers/series?range=6h&timezone=Asia%2FShanghai');
+      const payload = await apiRequest('/public/providers/series?range=6h&timezone=Asia%2FShanghai', options);
       return normalizeMonitorSeriesPayload(payload);
     } catch (primaryError) {
+      if (![404, 410].includes(Number(primaryError?.status))) throw primaryError;
       try {
-        return normalizeMonitorSeriesPayload(await apiRequest('/public/monitor/series/6h'));
+        return normalizeMonitorSeriesPayload(await apiRequest('/public/monitor/series/6h', options));
       } catch {
         throw primaryError;
       }
     }
+  }
+
+  function fetchMonitorSeries(options = {}) {
+    const force = options?.force === true;
+    const now = Date.now();
+    if (monitorSeriesCache.pending) return monitorSeriesCache.pending;
+    if (!force
+      && monitorSeriesCache.value
+      && now - monitorSeriesCache.fetchedAt < MONITOR_SERIES_CACHE_TTL_MS) {
+      return Promise.resolve(monitorSeriesCache.value);
+    }
+    const pending = requestMonitorSeries({ timeoutMs: options?.timeoutMs })
+      .then((series) => {
+        monitorSeriesCache.value = series;
+        monitorSeriesCache.fetchedAt = Date.now();
+        return series;
+      })
+      .finally(() => {
+        if (monitorSeriesCache.pending === pending) monitorSeriesCache.pending = null;
+      });
+    monitorSeriesCache.pending = pending;
+    return pending;
   }
 
   async function fetchCurrentBalance() {
@@ -1680,6 +1969,7 @@
       this.keySelectSignature = '';
       this.lastDetectionLogSignature = null;
       this.lastMonitorStaleLogState = null;
+      this.lastSeriesFallbackLogState = null;
       this.lastAuthLogSignature = '';
       this.lastErrorLogSignature = '';
       this.lastAutoSkipLogSignature = '';
@@ -1772,6 +2062,8 @@
               <div class="asg-key-detail"><span data-key-detail-label="latency">最新首 Token</span><strong class="asg-key-metric" data-key-detail="latency"></strong></div>
               <div class="asg-key-detail"><span>模型检测</span><strong data-key-detail="detection"></strong></div>
               <div class="asg-key-detail" data-key-detail-row="model-price"><span data-key-detail-label="model-price">Sol 价格 / 1M</span><strong class="asg-key-metric" data-key-detail="model-price"></strong></div>
+              <div class="asg-key-detail"><span>真实价格 / 预测倍率</span><strong class="asg-key-metric" data-key-detail="effective-price"></strong></div>
+              <div class="asg-key-detail"><span>输出速度</span><strong class="asg-key-metric" data-key-detail="output-tps"></strong></div>
               <div class="asg-key-detail"><span>缓存命中率</span><strong class="asg-key-metric" data-key-detail="cache"></strong></div>
             </div>
             <div class="asg-actions"><button data-action="refresh">检测</button><button data-action="switch" disabled>切换到推荐分组</button></div>
@@ -2112,12 +2404,28 @@
       this.setStatus('检测中...');
       this.renderActionState();
       try {
-        const [summary, series, balanceResult] = await Promise.all([
+        const [summary, seriesResult, balanceResult] = await Promise.all([
           fetchMonitorSummary({ force: forceLog }),
-          fetchMonitorSeries(),
+          fetchMonitorSeries({ force: forceLog })
+            .then((value) => ({ value }))
+            .catch((error) => ({ error })),
           fetchCurrentBalance().then((payload) => ({ payload })).catch((error) => ({ error })),
         ]);
         if (!this.active) return;
+        const fallbackSeries = buildMonitorSeriesFromSummary(summary);
+        const series = seriesResult.value
+          ? mergeMonitorSeries(seriesResult.value, fallbackSeries)
+          : fallbackSeries;
+        const usingSeriesFallback = Boolean(seriesResult.error);
+        if (usingSeriesFallback && this.lastSeriesFallbackLogState !== true) {
+          const hasFallbackData = hasMonitorSeriesData(fallbackSeries);
+          this.log(hasFallbackData ? 'info' : 'error', hasFallbackData
+            ? '监控序列接口暂不可用，已使用供应商概览历史继续检测'
+            : '监控序列接口暂不可用，供应商概览也没有可用于推荐的历史点');
+        } else if (!usingSeriesFallback && this.lastSeriesFallbackLogState === true) {
+          this.log('info', '监控序列接口已恢复');
+        }
+        this.lastSeriesFallbackLogState = usingSeriesFallback;
         if (balanceResult.error) {
           this.balanceError = balanceResult.error instanceof Error ? balanceResult.error.message : '余额读取失败';
         } else {
@@ -2148,7 +2456,7 @@
         }
         this.lastAuthLogSignature = this.authError;
         this.rows = attachRecentAvailability(summary?.apis, series);
-        this.monitorGeneratedAt = getLatestMonitorSampleAt(series) || series?.generatedAt || summary?.generatedAt || null;
+        this.monitorGeneratedAt = getMonitorSeriesWindowAnchor(series) ?? summary?.generatedAt ?? null;
         this.updateMonitorFreshness();
         this.recordMonitorFreshnessState();
         this.candidateDiagnostics = analyzeCandidates(this.rows, this.config);
@@ -2334,10 +2642,12 @@
         const detectionText = getModelDetectionLabel(winner);
         const healthText = formatModelHealthSummary(winner.modelHealth ?? winner.model_health);
         const modelPriceText = formatModelPriceSummary(winner, this.config.modelPriceModel);
+        const effectivePriceText = formatEffectivePricingSummary(winner);
+        const outputTpsText = formatOutputThroughput(winner);
         const cacheText = normalizeCacheHitRate(winner.cacheHitRate ?? winner.cache_hit_rate) === null
           ? ''
           : ` · ${formatCacheHitRate(winner.cacheHitRate ?? winner.cache_hit_rate)}`;
-        metrics.textContent = `10m ${availabilityText} · ${winner.recentSampleCount}次探测 · ${formatLatencyMetric(winner, this.config.latencySource)}${detectionText ? ` · 模型${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${modelPriceText ? ` · ${modelPriceText}` : ''}${cacheText}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
+        metrics.textContent = `10m ${availabilityText} · ${winner.recentSampleCount}次探测 · ${formatLatencyMetric(winner, this.config.latencySource)}${detectionText ? ` · 模型${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${modelPriceText ? ` · ${modelPriceText}` : ''}${effectivePriceText ? ` · ${effectivePriceText}` : ''}${outputTpsText ? ` · ${outputTpsText}` : ''}${cacheText}${this.stability.stable ? ' · 已稳定' : ` · ${this.stability.count}/${this.config.consecutiveChecks} 次`}`;
         recommend.append(title, metrics);
         if (this.config.mode === 'balance') {
           const reason = document.createElement('div');
@@ -2420,6 +2730,8 @@
       const latencyMs = nonNegativeNumberOrNull(metric?.latencyMs);
       const detectionText = metric?.detectionStatus ? getModelDetectionLabel({ modelDetection: { status: metric.detectionStatus } }) : '暂无数据';
       const modelPriceText = formatModelPriceSummary(metric?.modelPrices, this.config.modelPriceModel, true);
+      const effectivePriceText = formatEffectivePricingSummary(metric?.effectivePricing, true, true);
+      const outputTpsText = formatOutputThroughput(metric, true);
       const cacheHitRate = normalizeCacheHitRate(metric?.cacheHitRate);
       const latencyLabel = details.querySelector('[data-key-detail-label="latency"]');
       const modelPriceRow = details.querySelector('[data-key-detail-row="model-price"]');
@@ -2433,6 +2745,8 @@
       details.querySelector('[data-key-detail="latency"]').textContent = latencyMs === null ? '暂无数据' : formatLatency(latencyMs);
       details.querySelector('[data-key-detail="detection"]').textContent = detectionText;
       details.querySelector('[data-key-detail="model-price"]').textContent = modelPriceText || '暂无数据';
+      details.querySelector('[data-key-detail="effective-price"]').textContent = effectivePriceText || '暂无数据';
+      details.querySelector('[data-key-detail="output-tps"]').textContent = outputTpsText || '暂无数据';
       details.querySelector('[data-key-detail="cache"]').textContent = cacheHitRate === null ? '暂无数据' : `${(cacheHitRate * 100).toFixed(1)}%`;
     }
 
@@ -2448,7 +2762,9 @@
         const cacheHitRate = normalizeCacheHitRate(candidate.cacheHitRate ?? candidate.cache_hit_rate);
         const healthText = formatModelHealthSummary(candidate.modelHealth ?? candidate.model_health);
         const modelPriceText = formatModelPriceSummary(candidate, this.config.modelPriceModel, true);
-        metrics.textContent = `${candidate.price}x · 10m ${formatPercent(candidate.success10m)}${detectionText ? ` · ${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${modelPriceText ? ` · ${modelPriceText}` : ''}${cacheHitRate === null ? '' : ` · 缓存 ${(cacheHitRate * 100).toFixed(1)}%`}`;
+        const effectivePriceText = formatEffectivePricingSummary(candidate, true);
+        const outputTpsText = formatOutputThroughput(candidate, true);
+        metrics.textContent = `${candidate.price}x · 10m ${formatPercent(candidate.success10m)}${detectionText ? ` · ${detectionText}` : ''}${healthText ? ` · ${healthText}` : ''}${modelPriceText ? ` · ${modelPriceText}` : ''}${effectivePriceText ? ` · ${effectivePriceText}` : ''}${outputTpsText ? ` · ${outputTpsText}` : ''}${cacheHitRate === null ? '' : ` · 缓存 ${(cacheHitRate * 100).toFixed(1)}%`}`;
         item.append(name, metrics);
         list.appendChild(item);
       }
@@ -3495,6 +3811,11 @@
     isProviderRefreshButtonDisabled,
     normalizeCacheHitRate,
     formatCacheHitRate,
+    normalizeRuntimeCache1h,
+    getEffectivePricing,
+    getEffectiveMultiplierReasonLabel,
+    formatEffectivePricingSummary,
+    formatOutputThroughput,
     normalizeModelPrices,
     getModelPrices,
     getSelectedModelPrice,
@@ -3513,6 +3834,11 @@
     normalizeMonitorRow,
     normalizeMonitorSummaryPayload,
     normalizeMonitorSeriesPayload,
+    normalizeMonitorHistory,
+    monitorHistoryStatusToAvailability,
+    buildMonitorSeriesFromSummary,
+    hasMonitorSeriesData,
+    mergeMonitorSeries,
     getBalanceAmount,
     formatBalance,
     getExcludedGroupInfo,
@@ -3520,6 +3846,7 @@
     rankCandidates,
     getMonitorFreshness,
     getLatestMonitorSampleAt,
+    getMonitorSeriesWindowAnchor,
     getCooldownInfo,
     attachRecentAvailability,
     normalizeGroupName,
@@ -3568,6 +3895,8 @@
     isPageVisible,
     fetchMonitorSummary,
     clearMonitorSummaryCache,
+    fetchMonitorSeries,
+    clearMonitorSeriesCache,
     getCurrentUsageRequestPath,
     buildUsageAuditViewKey,
     shouldLoadUsageAuditView,

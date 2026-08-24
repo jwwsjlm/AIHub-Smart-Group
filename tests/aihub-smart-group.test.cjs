@@ -341,6 +341,127 @@ test('normalizes the new cache, model health, and model detection fields', () =>
   });
 });
 
+test('normalizes effective pricing, runtime cache, throughput, and provider capability fields', () => {
+  const summary = core.normalizeMonitorSummaryPayload({ data: {
+    items: [{
+      group_id: 34,
+      code: 'A001-Plus',
+      rate_multiplier: 0.06,
+      cache_hit_rate: null,
+      runtime_cache_1h: {
+        usage_records: 12,
+        input_tokens: 1_000,
+        cache_read_tokens: 250,
+        cache_creation_tokens: 10,
+        input_cost: 0.5,
+        cache_read_cost: 0.05,
+        cache_creation_cost: 0.01,
+        cache_hit_rate: 0.25,
+        refreshed_at: '2026-08-24T02:20:00Z',
+        ready: true,
+        stale: false,
+      },
+      effective_input_price_per_million_1h: '0.42',
+      effective_multiplier: 0.07,
+      effective_multiplier_ready: true,
+      output_tps: 87.25,
+      support_ws: true,
+      subscription_type: 'standard',
+    }],
+  } });
+  const row = summary.apis[0];
+
+  assert.deepEqual(row.runtimeCache1h, {
+    usageRecords: 12,
+    inputTokens: 1_000,
+    cacheReadTokens: 250,
+    cacheCreationTokens: 10,
+    inputCost: 0.5,
+    cacheReadCost: 0.05,
+    cacheCreationCost: 0.01,
+    cacheHitRate: 0.25,
+    refreshedAt: '2026-08-24T02:20:00Z',
+    ready: true,
+    stale: false,
+  });
+  assert.equal(row.cacheHitRate, 0.25);
+  assert.equal(row.effectiveInputPricePerMillion1h, 0.42);
+  assert.equal(row.effectiveMultiplier, 0.07);
+  assert.equal(row.effectiveMultiplierReady, true);
+  assert.equal(row.outputTokensPerSecond, 87.25);
+  assert.equal(row.supportWs, true);
+  assert.equal(row.subscriptionType, 'standard');
+  assert.deepEqual(core.getEffectivePricing(row), {
+    inputPricePerMillion: 0.42,
+    multiplier: 0.07,
+    ready: true,
+    reason: null,
+    runtimeCache1h: row.runtimeCache1h,
+    hasData: true,
+  });
+  assert.equal(core.formatEffectivePricingSummary(row), '真实输入 $0.42 / 1M · 预测倍率 ×0.07');
+  assert.equal(core.formatOutputThroughput(row), '输出速度 87.3 tok/s');
+});
+
+test('keeps nominal multiplier separate and rejects stale or incomplete effective pricing', () => {
+  const summary = core.normalizeMonitorSummaryPayload({ data: { items: [{
+    groupId: 9,
+    planType: 'Camel',
+    rateMultiplier: 0.04,
+    cacheHitRate: '80%',
+    runtimeCache1h: { ready: true, stale: true, cacheHitRate: 0.5 },
+    effectiveInputPricePerMillion1h: 0.2,
+    effectiveMultiplier: 0.09,
+    effectiveMultiplierReady: true,
+    effectiveMultiplierReason: '',
+    outputTokensPerSecond: 120,
+  }] } });
+  const row = summary.apis[0];
+
+  assert.equal(row.priceMultiplier, 0.04);
+  assert.equal(row.cacheHitRate, 0.8);
+  assert.equal(core.getEffectivePricing(row).ready, false);
+  assert.equal(core.getEffectivePricing(row).reason, 'runtime_metrics_stale');
+  assert.equal(core.formatEffectivePricingSummary(row, true), '');
+  assert.equal(core.formatEffectivePricingSummary(row, true, true), '暂不可用（数据已过期）');
+  assert.equal(core.formatOutputThroughput(row, true), '输出 120 tok/s');
+
+  const incomplete = core.getEffectivePricing({
+    effectiveMultiplier: 0.08,
+    effectiveMultiplierReady: true,
+    effectiveMultiplierReason: 'insufficient_samples',
+  });
+  assert.equal(incomplete.ready, false);
+  assert.equal(core.formatEffectivePricingSummary(incomplete, false, true), '暂不可用（样本不足）');
+  assert.equal(core.getEffectivePricing({ runtimeCache1h: { ready: true, stale: false } }).hasData, false);
+
+  const ranked = core.rankCandidates([
+    {
+      group_id: 1,
+      planType: 'lower-nominal',
+      priceMultiplier: 0.04,
+      effectiveInputPricePerMillion1h: 1.2,
+      effectiveMultiplier: 0.2,
+      effectiveMultiplierReady: true,
+      available: true,
+      visibleInHall: true,
+      successRates: { '10m': 1 },
+    },
+    {
+      group_id: 2,
+      planType: 'lower-effective',
+      priceMultiplier: 0.05,
+      effectiveInputPricePerMillion1h: 0.2,
+      effectiveMultiplier: 0.03,
+      effectiveMultiplierReady: true,
+      available: true,
+      visibleInHall: true,
+      successRates: { '10m': 1 },
+    },
+  ], { mode: 'price', requireNoWarnings: false });
+  assert.equal(ranked[0].groupId, 1);
+});
+
 test('keeps insufficient model health distinct from healthy and failed states', () => {
   const health = core.normalizeModelHealth({ sol: 'insufficient', terra: 'insufficient', luna: 'insufficient' });
 
@@ -429,6 +550,115 @@ test('normalizes the new provider series response for availability and user fres
   assert.equal(core.getLatestMonitorSampleAt(series), at);
 });
 
+test('normalizes provider series aliases and fills empty direct maps from items', () => {
+  const series = core.normalizeMonitorSeriesPayload({ data: {
+    generatedAt: '2026-08-24T02:20:00Z',
+    series_by_api_id: { 3: [], 4: [[10, 1]] },
+    userTTFTByApiId: { 4: [{ at: '2026-08-24T02:19:00Z', avgTtftMs: 500 }] },
+    items: [
+      { groupId: 3, probeSeries: [[20, 0]], userTtft: [{ probedAt: '2026-08-24T02:18:00Z' }] },
+      { groupId: 4, probeSeries: [[30, 0]], userTtft: [{ at: '2026-08-24T02:17:00Z' }] },
+    ],
+  } });
+
+  assert.deepEqual(series.seriesByApiId['3'], [[20, 0]]);
+  assert.deepEqual(series.seriesByApiId['4'], [[10, 1]]);
+  assert.equal(series.userTtftByGroupId['3'][0].probedAt, '2026-08-24T02:18:00Z');
+  assert.equal(series.userTtftByGroupId['4'][0].at, '2026-08-24T02:19:00Z');
+  assert.equal(core.getLatestMonitorSampleAt(series), Date.parse('2026-08-24T02:19:00Z'));
+});
+
+test('builds a weighted conservative provider series fallback from summary history', () => {
+  const summary = core.normalizeMonitorSummaryPayload({ data: {
+    generated_at: '2026-08-24T02:20:00Z',
+    items: [{
+      group_id: 7,
+      history: [
+        { probed_at: '2026-08-24T02:10:00Z', status: 'operational', sample_count: 3 },
+        { probed_at: '2026-08-24T02:11:00Z', status: 'degraded', sample_count: 2 },
+        { probed_at: '2026-08-24T02:12:00Z', status: 'unknown', sample_count: 0 },
+        { probed_at: '2026-08-24T02:13:00Z', status: 'operational', sample_count: 1 },
+        { probed_at: '2026-08-24T02:13:00Z', status: 'failed', sample_count: 1 },
+        { probed_at: '2026-08-24T02:14:00Z', status: 'operational', sample_count: 0 },
+        { probed_at: 'invalid', status: 'operational', sample_count: 1 },
+      ],
+    }],
+  } });
+  const fallback = core.buildMonitorSeriesFromSummary(summary);
+  const operationalAt = Date.parse('2026-08-24T02:10:00Z');
+  const degradedAt = Date.parse('2026-08-24T02:11:00Z');
+  const failedAt = Date.parse('2026-08-24T02:13:00Z');
+
+  assert.deepEqual(fallback.seriesByApiId['7'], [
+    [operationalAt, 1],
+    [operationalAt, 1],
+    [operationalAt, 1],
+    [degradedAt, 0],
+    [degradedAt, 0],
+    [failedAt, 0],
+  ]);
+  assert.equal(fallback.range, 'summary-history');
+  assert.equal(core.hasMonitorSeriesData(fallback), true);
+  assert.equal(core.monitorHistoryStatusToAvailability('degraded'), 0);
+  assert.equal(core.monitorHistoryStatusToAvailability('unknown'), null);
+});
+
+test('keeps slightly newer summary history samples inside the availability window', () => {
+  const generatedAt = '2026-08-24T03:30:51.265Z';
+  const latestAt = Date.parse('2026-08-24T03:31:02Z');
+  const summary = core.normalizeMonitorSummaryPayload({ data: {
+    generated_at: generatedAt,
+    items: [{
+      group_id: 8,
+      history: [{ probed_at: '2026-08-24T03:31:02Z', status: 'failed', sample_count: 2 }],
+    }],
+  } });
+  const fallback = core.buildMonitorSeriesFromSummary(summary);
+  const rows = core.attachRecentAvailability([{ id: 8, successRates: {} }], fallback);
+
+  assert.equal(core.getMonitorSeriesWindowAnchor(fallback), latestAt);
+  assert.equal(rows[0].recentSampleCount, 2);
+  assert.equal(rows[0].recentSuccessCount, 0);
+  assert.equal(rows[0].successRates['10m'], 0);
+
+  const farFuture = {
+    generatedAt,
+    seriesByApiId: { 8: [
+      [latestAt, 0],
+      [Date.parse('2026-08-24T04:00:00Z'), 1],
+    ] },
+    userTtftByGroupId: {},
+  };
+  assert.equal(core.getMonitorSeriesWindowAnchor(farFuture), latestAt);
+  assert.equal(core.getMonitorSeriesWindowAnchor({ seriesByApiId: {}, userTtftByGroupId: {} }), null);
+});
+
+test('merges provider series by filling only missing or empty groups from summary history', () => {
+  const primary = core.normalizeMonitorSeriesPayload({ data: {
+    generated_at: '2026-08-24T02:20:00Z',
+    range: '6h',
+    items: [
+      { group_id: 1, probe: [[100, 1]], user_ttft: [{ at: '2026-08-24T02:19:00Z' }] },
+      { group_id: 2, probe: [] },
+    ],
+  } });
+  const fallback = {
+    generatedAt: '2026-08-24T02:21:00Z',
+    range: 'summary-history',
+    seriesByApiId: { 1: [[50, 0]], 2: [[60, 1]], 3: [[70, 0]] },
+    userTtftByGroupId: { 2: [{ at: '2026-08-24T02:17:00Z' }] },
+  };
+  const merged = core.mergeMonitorSeries(primary, fallback);
+
+  assert.deepEqual(merged.seriesByApiId['1'], [[100, 1]]);
+  assert.deepEqual(merged.seriesByApiId['2'], [[60, 1]]);
+  assert.deepEqual(merged.seriesByApiId['3'], [[70, 0]]);
+  assert.equal(merged.userTtftByGroupId['1'][0].at, '2026-08-24T02:19:00Z');
+  assert.equal(merged.userTtftByGroupId['2'][0].at, '2026-08-24T02:17:00Z');
+  assert.equal(merged.range, '6h');
+  assert.equal(merged.generatedAt, '2026-08-24T02:21:00Z');
+});
+
 test('deduplicates concurrent and short-lived provider summary requests', async () => {
   const originalWindow = globalThis.window;
   const originalLocalStorage = globalThis.localStorage;
@@ -459,6 +689,83 @@ test('deduplicates concurrent and short-lived provider summary requests', async 
     assert.equal(requestCount, 2);
   } finally {
     core.clearMonitorSummaryCache();
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = originalLocalStorage;
+  }
+});
+
+test('deduplicates and caches provider series requests independently', async () => {
+  const originalWindow = globalThis.window;
+  const originalLocalStorage = globalThis.localStorage;
+  const originalDateNow = Date.now;
+  let requestCount = 0;
+  let now = 10_000;
+  const storage = { getItem: () => '' };
+  globalThis.localStorage = storage;
+  globalThis.window = {
+    localStorage: storage,
+    fetch: async () => {
+      requestCount += 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ data: { items: [{ group_id: 1, probe: [[requestCount, 1]], user_ttft: [] }] } }),
+      };
+    },
+  };
+  Date.now = () => now;
+  core.clearMonitorSeriesCache();
+
+  try {
+    const [left, right] = await Promise.all([core.fetchMonitorSeries(), core.fetchMonitorSeries()]);
+    const cached = await core.fetchMonitorSeries();
+    assert.equal(requestCount, 1);
+    assert.equal(left, right);
+    assert.equal(cached, left);
+
+    const forced = await core.fetchMonitorSeries({ force: true });
+    assert.equal(requestCount, 2);
+    assert.notEqual(forced, left);
+
+    now += 60_001;
+    const fresh = await core.fetchMonitorSeries();
+    assert.equal(requestCount, 3);
+    assert.notEqual(fresh, forced);
+  } finally {
+    Date.now = originalDateNow;
+    core.clearMonitorSeriesCache();
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = originalLocalStorage;
+  }
+});
+
+test('clears a failed provider series request so a later call can retry', async () => {
+  const originalWindow = globalThis.window;
+  const originalLocalStorage = globalThis.localStorage;
+  let requestCount = 0;
+  const storage = { getItem: () => '' };
+  globalThis.localStorage = storage;
+  globalThis.window = {
+    localStorage: storage,
+    fetch: async () => {
+      requestCount += 1;
+      if (requestCount === 1) return { ok: false, status: 500, json: async () => ({ message: 'temporary' }) };
+      return { ok: true, status: 200, json: async () => ({ data: { items: [{ group_id: 1, probe: [[1, 1]] }] } }) };
+    },
+  };
+  core.clearMonitorSeriesCache();
+
+  try {
+    await assert.rejects(core.fetchMonitorSeries(), /temporary/);
+    const recovered = await core.fetchMonitorSeries();
+    assert.equal(requestCount, 2);
+    assert.deepEqual(recovered.seriesByApiId['1'], [[1, 1]]);
+  } finally {
+    core.clearMonitorSeriesCache();
     if (originalWindow === undefined) delete globalThis.window;
     else globalThis.window = originalWindow;
     if (originalLocalStorage === undefined) delete globalThis.localStorage;
@@ -1293,13 +1600,35 @@ test('builds current multiplier lookup by normalized group name', () => {
 test('maps current group metrics by group id without filtering unavailable rows', () => {
   const metrics = core.buildGroupMetricMap([
     { group_id: 14, planType: 'same-name', priceMultiplier: '0.04', firstTokenLatencyMs: '1141', available: false },
-    { group_id: 20, planType: 'same-name', priceMultiplier: 0.08, firstTokenLatencyMs: 320, available: true },
+    {
+      group_id: 20,
+      planType: 'same-name',
+      priceMultiplier: 0.08,
+      firstTokenLatencyMs: 320,
+      available: true,
+      effectiveInputPricePerMillion1h: 0.3,
+      effectiveMultiplier: 0.05,
+      effectiveMultiplierReady: true,
+      outputTps: 55,
+    },
     { group_id: 21, priceMultiplier: null, firstTokenLatencyMs: null },
     { group_id: 'invalid', priceMultiplier: 0.01, firstTokenLatencyMs: 10 },
   ]);
 
   assert.deepEqual(metrics.get(14), { multiplier: 0.04, latencyMs: 1141 });
-  assert.deepEqual(metrics.get(20), { multiplier: 0.08, latencyMs: 320 });
+  assert.deepEqual(metrics.get(20), {
+    multiplier: 0.08,
+    latencyMs: 320,
+    effectivePricing: {
+      inputPricePerMillion: 0.3,
+      multiplier: 0.05,
+      ready: true,
+      reason: null,
+      runtimeCache1h: null,
+      hasData: true,
+    },
+    outputTokensPerSecond: 55,
+  });
   assert.deepEqual(metrics.get(21), { multiplier: null, latencyMs: null });
   assert.equal(metrics.has('same-name'), false);
   assert.equal(metrics.size, 3);
