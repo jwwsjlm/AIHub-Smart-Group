@@ -330,6 +330,12 @@ test('normalizes model price and usage cost audit settings', () => {
 
 test('defaults provider hall auto sorting to multiplier priority', () => {
   assert.equal(core.DEFAULT_CONFIG.providerSortPreference, 'rate');
+  assert.deepEqual(core.getProviderCustomWeights(core.DEFAULT_CONFIG), {
+    rate: 25,
+    user: 25,
+    cacheHit: 25,
+    successRate: 25,
+  });
   assert.equal(core.DEFAULT_CONFIG.providerRangePreference, 'default');
   assert.equal(core.DEFAULT_CONFIG.providerAutoRefresh, true);
   assert.equal(core.DEFAULT_CONFIG.providerRefreshIntervalSeconds, 60);
@@ -341,6 +347,25 @@ test('defaults provider hall auto sorting to multiplier priority', () => {
   assert.equal(core.normalizeProviderSortPreference('successRate'), 'successRate');
   assert.equal(core.normalizeProviderSortPreference('custom'), 'custom');
   assert.equal(core.normalizeProviderSortPreference('unexpected'), 'rate');
+  assert.deepEqual(core.normalizeProviderCustomWeights({
+    providerCustomWeightRate: -1,
+    providerCustomWeightUser: 33.6,
+    providerCustomWeightCacheHit: 101,
+    providerCustomWeightSuccessRate: '12',
+  }), {
+    rate: 0,
+    user: 34,
+    cacheHit: 100,
+    successRate: 12,
+  });
+  assert.deepEqual(core.normalizeProviderCustomWeights({
+    rate: 0, user: 0, cacheHit: 0, successRate: 0,
+  }), {
+    rate: 25,
+    user: 25,
+    cacheHit: 25,
+    successRate: 25,
+  });
   assert.equal(core.normalizeProviderRangePreference('6h'), '6h');
   assert.equal(core.normalizeProviderRangePreference('24h'), '24h');
   assert.equal(core.normalizeProviderRangePreference('7d'), '7d');
@@ -371,6 +396,16 @@ test('finds and identifies the current provider time range controls', () => {
 test('exposes the provider time range preference in settings', () => {
   assert.match(userscriptSource, /data-setting="providerRangePreference"/);
   assert.match(userscriptSource, /<option value="default">跟随网站默认<\/option><option value="6h">6 小时<\/option><option value="24h">24 小时<\/option><option value="7d">7 天<\/option><option value="30d">30 天<\/option>/);
+});
+
+test('exposes saved custom provider weights only for custom sorting', () => {
+  assert.match(userscriptSource, /data-setting="providerCustomWeightRate"/);
+  assert.match(userscriptSource, /data-setting="providerCustomWeightUser"/);
+  assert.match(userscriptSource, /data-setting="providerCustomWeightCacheHit"/);
+  assert.match(userscriptSource, /data-setting="providerCustomWeightSuccessRate"/);
+  assert.match(userscriptSource, /\[data-provider-custom-weight-setting\]\[hidden\]\{display:none !important\}/);
+  assert.match(userscriptSource, /syncProviderSortInputs\(\)/);
+  assert.match(userscriptSource, /field\.hidden = preference !== 'custom'/);
 });
 
 test('exposes selectable real-user TTFT windows in settings', () => {
@@ -536,6 +571,75 @@ test('matches semantic provider sort controls without relying on visible text', 
   assert.equal(core.findProviderSortButton(buttons, 'cacheHit'), buttons[4]);
   assert.equal(core.findProviderSortButton(buttons, 'successRate'), buttons[5]);
   assert.equal(core.findProviderSortButton(buttons, 'custom'), buttons[6]);
+});
+
+test('maps and applies the current provider custom-weight range controls', () => {
+  class FakeEvent {
+    constructor(type, options = {}) {
+      this.type = type;
+      this.bubbles = options.bubbles === true;
+    }
+  }
+  const makeInput = (label, value = 25, attributes = {}) => {
+    const span = { textContent: label };
+    const labelNode = {
+      textContent: `${label} ${value}%`,
+      querySelector: (selector) => (selector === 'span' ? span : null),
+    };
+    return {
+      value: String(value),
+      events: [],
+      getAttribute: (name) => attributes[name] || null,
+      closest: (selector) => (selector === 'label' ? labelNode : null),
+      dispatchEvent(event) {
+        this.events.push({ type: event.type, bubbles: event.bubbles });
+        return true;
+      },
+    };
+  };
+  const inputs = [
+    makeInput('Success rate'),
+    makeInput('倍率'),
+    makeInput('缓存命中率'),
+    makeInput('用户速度'),
+  ];
+  const panel = {
+    matches: (selector) => selector.includes('monitor-weight-panel'),
+    querySelectorAll: () => inputs,
+  };
+
+  assert.equal(core.getProviderCustomWeightKey(inputs[0], 0), 'successRate');
+  assert.equal(core.getProviderCustomWeightKey(inputs[1], 1), 'rate');
+  assert.deepEqual([...core.findProviderCustomWeightInputs(panel).keys()].sort(), ['cacheHit', 'rate', 'successRate', 'user']);
+  assert.deepEqual(core.applyProviderCustomWeights(panel, {
+    rate: 10,
+    user: 20,
+    cacheHit: 30,
+    successRate: 40,
+  }, { Event: FakeEvent }), {
+    available: true,
+    changed: true,
+    matched: true,
+  });
+  assert.deepEqual(inputs.map((input) => Number(input.value)), [40, 10, 30, 20]);
+  assert.deepEqual(inputs.flatMap((input) => input.events.map((event) => event.type)), [
+    'input', 'change', 'input', 'change', 'input', 'change', 'input', 'change',
+  ]);
+  assert.deepEqual(core.applyProviderCustomWeights(panel, {
+    rate: 10,
+    user: 20,
+    cacheHit: 30,
+    successRate: 40,
+  }, { Event: FakeEvent }), {
+    available: true,
+    changed: false,
+    matched: true,
+  });
+  assert.deepEqual(core.applyProviderCustomWeights({ querySelector: () => null }, core.DEFAULT_CONFIG), {
+    available: false,
+    changed: false,
+    matched: false,
+  });
 });
 
 test('keeps the legacy provider sort control fallback outside the new sort container', () => {
@@ -3156,6 +3260,10 @@ test('invalidates provider sorting and refresh scheduling only for their own set
   const originalLocalStorage = globalThis.localStorage;
   let storedConfig = {
     providerSortPreference: 'rate',
+    providerCustomWeightRate: 25,
+    providerCustomWeightUser: 25,
+    providerCustomWeightCacheHit: 25,
+    providerCustomWeightSuccessRate: 25,
     providerRangePreference: 'default',
     providerAutoRefresh: true,
     providerRefreshIntervalSeconds: 60,
@@ -3187,6 +3295,13 @@ test('invalidates provider sorting and refresh scheduling only for their own set
     assert.equal(applyQueues, 0);
     assert.equal(refreshSchedules, 0);
 
+    storedConfig = { ...storedConfig, providerCustomWeightRate: 40 };
+    enhancer.onConfigChanged();
+    assert.equal(enhancer.applied, true);
+    assert.equal(observerStarts, 0);
+    assert.equal(applyQueues, 0);
+    assert.equal(refreshSchedules, 0);
+
     storedConfig = { ...storedConfig, providerSortPreference: 'user' };
     enhancer.onConfigChanged();
     assert.equal(enhancer.providerSortPreference, 'user');
@@ -3205,24 +3320,130 @@ test('invalidates provider sorting and refresh scheduling only for their own set
     assert.equal(refreshSchedules, 0);
 
     enhancer.applied = true;
+    storedConfig = { ...storedConfig, providerSortPreference: 'custom' };
+    enhancer.onConfigChanged();
+    assert.equal(enhancer.providerSortPreference, 'custom');
+    assert.equal(enhancer.applied, false);
+    assert.equal(observerStarts, 3);
+    assert.equal(applyQueues, 3);
+
+    enhancer.applied = true;
+    storedConfig = { ...storedConfig, providerCustomWeightUser: 35 };
+    enhancer.onConfigChanged();
+    assert.equal(enhancer.providerCustomWeights.user, 35);
+    assert.equal(enhancer.applied, false);
+    assert.equal(observerStarts, 4);
+    assert.equal(applyQueues, 4);
+
+    enhancer.applied = true;
     storedConfig = { ...storedConfig, providerAutoRefresh: false };
     enhancer.onConfigChanged();
     assert.equal(enhancer.providerAutoRefresh, false);
     assert.equal(enhancer.applied, true);
-    assert.equal(observerStarts, 2);
-    assert.equal(applyQueues, 2);
+    assert.equal(observerStarts, 4);
+    assert.equal(applyQueues, 4);
     assert.equal(refreshSchedules, 1);
 
     storedConfig = { ...storedConfig, providerRefreshIntervalSeconds: 90 };
     enhancer.onConfigChanged();
     assert.equal(enhancer.providerRefreshIntervalSeconds, 90);
-    assert.equal(observerStarts, 2);
-    assert.equal(applyQueues, 2);
+    assert.equal(observerStarts, 4);
+    assert.equal(applyQueues, 4);
     assert.equal(refreshSchedules, 2);
-    assert.equal(storageReads, 6);
+    assert.equal(storageReads, 9);
   } finally {
     if (originalLocalStorage === undefined) delete globalThis.localStorage;
     else globalThis.localStorage = originalLocalStorage;
+  }
+});
+
+test('opens the native custom panel and applies every saved provider weight before completing', () => {
+  const originalWindow = globalThis.window;
+  const originalDocument = globalThis.document;
+  let state = 'default';
+  let panelOpen = false;
+  let customClicks = 0;
+  const makeInput = (label) => {
+    const span = { textContent: label };
+    const labelNode = { textContent: `${label} 25%`, querySelector: () => span };
+    return {
+      value: '25',
+      getAttribute: () => null,
+      closest: () => labelNode,
+      dispatchEvent: () => true,
+    };
+  };
+  const inputs = ['倍率', '用户速度', '缓存命中率', '成功率'].map(makeInput);
+  const panel = {
+    matches: (selector) => selector.includes('monitor-weight-panel'),
+    querySelectorAll: () => inputs,
+  };
+  const sortRoot = {
+    isConnected: true,
+    querySelector: (selector) => (selector.includes('monitor-weight-panel') && panelOpen ? panel : null),
+  };
+  const makeButton = (kind) => ({
+    get textContent() {
+      if (kind === 'default') return state === 'default' ? '默认 ↓' : '默认';
+      return state === 'custom' ? '自定义 ↓' : '自定义';
+    },
+    get className() {
+      return state === kind ? 'monitor-sort-head active' : 'monitor-sort-head';
+    },
+    closest: () => sortRoot,
+    click() {
+      if (kind !== 'custom') return;
+      customClicks += 1;
+      if (state !== 'custom') {
+        state = 'custom';
+        panelOpen = true;
+      } else {
+        panelOpen = !panelOpen;
+      }
+    },
+  });
+  const buttons = [makeButton('default'), makeButton('custom')];
+  globalThis.document = {
+    querySelectorAll: (selector) => (selector.includes('monitor-range') ? [] : buttons),
+  };
+  globalThis.window = {
+    Event: class {
+      constructor(type, options = {}) {
+        this.type = type;
+        this.bubbles = options.bubbles === true;
+      }
+    },
+    clearTimeout: () => {},
+    clearInterval: () => {},
+  };
+
+  try {
+    const enhancer = new core.ProviderSortEnhancer();
+    enhancer.active = true;
+    enhancer.sortRoot = sortRoot;
+    enhancer.providerConfigLoaded = true;
+    enhancer.providerSortPreference = 'custom';
+    enhancer.providerCustomWeights = { rate: 10, user: 20, cacheHit: 30, successRate: 40 };
+    enhancer.queueSortVerification = () => {};
+
+    assert.equal(enhancer.apply(), false);
+    assert.equal(customClicks, 1);
+    assert.equal(panelOpen, true);
+    assert.equal(enhancer.applied, false);
+
+    assert.equal(enhancer.apply(), false);
+    assert.deepEqual(inputs.map((input) => Number(input.value)), [10, 20, 30, 40]);
+    assert.equal(enhancer.applied, false);
+
+    assert.equal(enhancer.apply(), true);
+    assert.equal(enhancer.applied, true);
+    assert.equal(customClicks, 2);
+    assert.equal(panelOpen, false);
+  } finally {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
   }
 });
 

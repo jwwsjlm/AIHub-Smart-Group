@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.23
+// @version      0.14.24
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.23';
+  const SCRIPT_VERSION = '0.14.24';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -48,6 +48,7 @@
   const USAGE_AUDIT_RETRY_MS = 15_000;
   const USAGE_AUDIT_CACHE_LIMIT = 8;
   const PROVIDER_SORT_MAX_CLICKS = 2;
+  const PROVIDER_CUSTOM_WEIGHT_MAX_ATTEMPTS = 4;
   const PROVIDER_RANGE_MAX_CLICKS = 1;
   const PROVIDER_SORT_VERIFY_DELAY_MS = 250;
   const PROVIDER_RANGE_CONTROL_RETRY_MS = 250;
@@ -78,6 +79,8 @@
     PROVIDER_SORT_BUTTON_SELECTOR,
     '.monitor-range-tabs button',
     '[data-testid^="monitor-range-"]',
+    '.monitor-weight-panel',
+    '[data-testid="monitor-weight-panel"]',
   ].join(',');
   const PROVIDER_SORT_OBSERVED_ATTRIBUTES = Object.freeze([
     'class',
@@ -210,6 +213,34 @@
     successRate: Object.freeze(['success-rate', 'successrate', 'availability']),
     custom: Object.freeze(['custom']),
   });
+  const PROVIDER_CUSTOM_WEIGHT_DEFAULTS = Object.freeze({
+    rate: 25,
+    user: 25,
+    cacheHit: 25,
+    successRate: 25,
+  });
+  const PROVIDER_CUSTOM_WEIGHT_DEFINITIONS = Object.freeze([
+    Object.freeze({
+      key: 'rate',
+      configKey: 'providerCustomWeightRate',
+      aliases: Object.freeze(['倍率', 'rate', 'multiplier', 'price multiplier']),
+    }),
+    Object.freeze({
+      key: 'user',
+      configKey: 'providerCustomWeightUser',
+      aliases: Object.freeze(['用户速度', 'user', 'user speed', 'user average']),
+    }),
+    Object.freeze({
+      key: 'cacheHit',
+      configKey: 'providerCustomWeightCacheHit',
+      aliases: Object.freeze(['缓存命中', '缓存命中率', 'cache hit', 'cache hit rate']),
+    }),
+    Object.freeze({
+      key: 'successRate',
+      configKey: 'providerCustomWeightSuccessRate',
+      aliases: Object.freeze(['成功率', '可用率', 'success rate', 'availability']),
+    }),
+  ]);
   const PROVIDER_RANGE_LABELS = Object.freeze({
     default: '跟随网站默认',
     '6h': '6 小时',
@@ -258,6 +289,10 @@
     usageCostAuditTolerancePercent: 1,
     recommendationPriceBasis: 'nominal',
     providerSortPreference: 'rate',
+    providerCustomWeightRate: PROVIDER_CUSTOM_WEIGHT_DEFAULTS.rate,
+    providerCustomWeightUser: PROVIDER_CUSTOM_WEIGHT_DEFAULTS.user,
+    providerCustomWeightCacheHit: PROVIDER_CUSTOM_WEIGHT_DEFAULTS.cacheHit,
+    providerCustomWeightSuccessRate: PROVIDER_CUSTOM_WEIGHT_DEFAULTS.successRate,
     providerRangePreference: 'default',
     providerAutoRefresh: true,
     providerRefreshIntervalSeconds: 60,
@@ -443,6 +478,7 @@
 
   function normalizeConfig(input = {}) {
     const source = input && typeof input === 'object' ? input : {};
+    const providerCustomWeights = normalizeProviderCustomWeights(source);
     return {
       minSuccess10m: clamp(numberOr(source.minSuccess10m, DEFAULT_CONFIG.minSuccess10m), 0, 1),
       requireNoWarnings: source.requireNoWarnings !== false,
@@ -466,6 +502,10 @@
       usageCostAuditTolerancePercent: clamp(numberOr(source.usageCostAuditTolerancePercent, DEFAULT_CONFIG.usageCostAuditTolerancePercent), 0.1, 100),
       recommendationPriceBasis: normalizeRecommendationPriceBasis(source.recommendationPriceBasis),
       providerSortPreference: normalizeProviderSortPreference(source.providerSortPreference),
+      providerCustomWeightRate: providerCustomWeights.rate,
+      providerCustomWeightUser: providerCustomWeights.user,
+      providerCustomWeightCacheHit: providerCustomWeights.cacheHit,
+      providerCustomWeightSuccessRate: providerCustomWeights.successRate,
       providerRangePreference: normalizeProviderRangePreference(source.providerRangePreference),
       providerAutoRefresh: source.providerAutoRefresh !== false,
       providerRefreshIntervalSeconds: Math.round(clamp(numberOr(source.providerRefreshIntervalSeconds, DEFAULT_CONFIG.providerRefreshIntervalSeconds), 15, 3600)),
@@ -529,6 +569,21 @@
     return Object.prototype.hasOwnProperty.call(PROVIDER_SORT_LABELS, value) ? value : 'rate';
   }
 
+  function normalizeProviderCustomWeights(input = {}) {
+    const source = input && typeof input === 'object' ? input : {};
+    const weights = Object.fromEntries(PROVIDER_CUSTOM_WEIGHT_DEFINITIONS.map(({ key, configKey }) => [
+      key,
+      Math.round(clamp(numberOr(source[configKey] ?? source[key], PROVIDER_CUSTOM_WEIGHT_DEFAULTS[key]), 0, 100)),
+    ]));
+    return Object.values(weights).some((value) => value > 0)
+      ? weights
+      : { ...PROVIDER_CUSTOM_WEIGHT_DEFAULTS };
+  }
+
+  function getProviderCustomWeights(config = DEFAULT_CONFIG) {
+    return normalizeProviderCustomWeights(config);
+  }
+
   function normalizeProviderRangePreference(value) {
     return Object.prototype.hasOwnProperty.call(PROVIDER_RANGE_LABELS, value) ? value : 'default';
   }
@@ -549,6 +604,72 @@
 
   function getProviderSortDirection(preference) {
     return PROVIDER_SORT_DIRECTIONS[normalizeProviderSortPreference(preference)];
+  }
+
+  function normalizeProviderCustomWeightSemantic(value) {
+    return String(value || '')
+      .trim()
+      .replace(/([a-z\d])([A-Z])/g, '$1 $2')
+      .replace(/[\d.%％]+/g, ' ')
+      .replace(/[_-]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLocaleLowerCase();
+  }
+
+  function getProviderCustomWeightKey(input, fallbackIndex = -1) {
+    const candidates = [
+      input?.getAttribute?.('data-weight-key'),
+      input?.getAttribute?.('data-key'),
+      input?.getAttribute?.('name'),
+      input?.getAttribute?.('aria-label'),
+      input?.closest?.('label')?.querySelector?.('span')?.textContent,
+      input?.closest?.('label')?.textContent,
+    ].map(normalizeProviderCustomWeightSemantic).filter(Boolean);
+    const semanticMatch = PROVIDER_CUSTOM_WEIGHT_DEFINITIONS.find(({ aliases }) => candidates.some((candidate) => aliases.includes(candidate)));
+    return semanticMatch?.key || PROVIDER_CUSTOM_WEIGHT_DEFINITIONS[fallbackIndex]?.key || '';
+  }
+
+  function findProviderCustomWeightInputs(root) {
+    const panel = root?.matches?.('.monitor-weight-panel,[data-testid="monitor-weight-panel"]')
+      ? root
+      : root?.querySelector?.('.monitor-weight-panel,[data-testid="monitor-weight-panel"]');
+    const inputs = [...(panel?.querySelectorAll?.('input[type="range"],input[data-weight-key]') || [])];
+    const result = new Map();
+    inputs.forEach((input, index) => {
+      const key = getProviderCustomWeightKey(input, index);
+      if (key && !result.has(key)) result.set(key, input);
+    });
+    return result;
+  }
+
+  function setProviderCustomWeightInput(input, value, pageWindow = typeof window !== 'undefined' ? window : null) {
+    if (!input) return false;
+    const nextValue = String(value);
+    if (String(input.value) === nextValue) return false;
+    const InputCtor = input.ownerDocument?.defaultView?.HTMLInputElement || pageWindow?.HTMLInputElement;
+    const setter = InputCtor && Object.getOwnPropertyDescriptor(InputCtor.prototype, 'value')?.set;
+    if (setter) setter.call(input, nextValue);
+    else input.value = nextValue;
+    const EventCtor = input.ownerDocument?.defaultView?.Event || pageWindow?.Event;
+    if (typeof input.dispatchEvent === 'function' && typeof EventCtor === 'function') {
+      input.dispatchEvent(new EventCtor('input', { bubbles: true }));
+      input.dispatchEvent(new EventCtor('change', { bubbles: true }));
+    }
+    return true;
+  }
+
+  function applyProviderCustomWeights(root, weights, pageWindow = typeof window !== 'undefined' ? window : null) {
+    const normalized = normalizeProviderCustomWeights(weights);
+    const inputs = findProviderCustomWeightInputs(root);
+    const available = PROVIDER_CUSTOM_WEIGHT_DEFINITIONS.every(({ key }) => inputs.has(key));
+    if (!available) return { available: false, changed: false, matched: false };
+    let changed = false;
+    for (const { key } of PROVIDER_CUSTOM_WEIGHT_DEFINITIONS) {
+      changed = setProviderCustomWeightInput(inputs.get(key), normalized[key], pageWindow) || changed;
+    }
+    const matched = PROVIDER_CUSTOM_WEIGHT_DEFINITIONS.every(({ key }) => Number(inputs.get(key)?.value) === normalized[key]);
+    return { available: true, changed, matched };
   }
 
   function normalizeProviderSortSemanticKey(value) {
@@ -2950,6 +3071,7 @@
     #${ROOT_ID} label{display:block;color:#475467;font-size:12px;margin:8px 0 4px}
     #${ROOT_ID} [data-availability-setting][hidden]{display:none !important}
     #${ROOT_ID} [data-latency-setting][hidden]{display:none !important}
+    #${ROOT_ID} [data-provider-custom-weight-setting][hidden]{display:none !important}
     #${ROOT_ID} select,#${ROOT_ID} input[type=number],#${ROOT_ID} input[type=text]{width:100%;border:1px solid #cfd5df;border-radius:6px;padding:6px;background:#fff;color:#172033;font:inherit}
     #${ROOT_ID} .asg-key-details[hidden]{display:none}
     #${ROOT_ID} .asg-key-details{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px 10px;margin-top:5px;padding:6px 0 2px;border-bottom:1px solid #eef0f3}
@@ -3296,6 +3418,11 @@
                 <div class="asg-settings-head"><div class="asg-settings-title">供应商大厅</div><label class="asg-settings-inline-label" for="asg-provider-sort-setting">打开页面后自动应用大厅偏好</label></div>
                 <div class="asg-settings-grid">
                   <label class="asg-setting-wide">自动排序<select id="asg-provider-sort-setting" data-setting="providerSortPreference"><option value="rate">倍率优先（从低到高）</option><option value="realPrice">真实价格优先</option><option value="user">用户速度排序</option><option value="cacheHit">缓存命中优先</option><option value="successRate">成功率优先</option><option value="custom">自定义排序</option><option value="default">默认排序</option></select></label>
+                  <label data-provider-custom-weight-setting>倍率权重<input type="number" min="0" max="100" step="1" data-setting="providerCustomWeightRate"></label>
+                  <label data-provider-custom-weight-setting>用户速度权重<input type="number" min="0" max="100" step="1" data-setting="providerCustomWeightUser"></label>
+                  <label data-provider-custom-weight-setting>缓存命中权重<input type="number" min="0" max="100" step="1" data-setting="providerCustomWeightCacheHit"></label>
+                  <label data-provider-custom-weight-setting>成功率权重<input type="number" min="0" max="100" step="1" data-setting="providerCustomWeightSuccessRate"></label>
+                  <span class="asg-setting-preview asg-setting-wide" data-provider-custom-weight-setting>权重范围 0–100，AIHub 会按总权重自动归一化；全部为 0 时恢复为各 25。</span>
                   <label class="asg-setting-wide">大厅时间维度<select data-setting="providerRangePreference"><option value="default">跟随网站默认</option><option value="6h">6 小时</option><option value="24h">24 小时</option><option value="7d">7 天</option><option value="30d">30 天</option></select></label>
                   <label class="asg-setting-compact asg-auto"><input type="checkbox" data-setting="providerAutoRefresh"> 定时自动刷新</label>
                   <label>刷新间隔（秒）<input type="number" min="15" max="3600" step="1" data-setting="providerRefreshIntervalSeconds"></label>
@@ -3401,6 +3528,9 @@
           this.syncLatencyInputs();
           this.renderSettingsPreviews('latencySource');
         }
+        if (event.target.matches('[data-setting="providerSortPreference"]')) {
+          this.syncProviderSortInputs();
+        }
       });
     }
 
@@ -3443,6 +3573,7 @@
       this.panel.querySelector('[data-field="mode"]').value = this.config.mode;
       this.syncAvailabilityInputs();
       this.syncLatencyInputs();
+      this.syncProviderSortInputs();
       this.renderSettingsPreviews();
     }
 
@@ -3457,6 +3588,13 @@
       const source = normalizeLatencySource(this.panel?.querySelector('[data-setting="latencySource"]')?.value);
       for (const field of this.panel?.querySelectorAll('[data-latency-setting]') || []) {
         field.hidden = field.dataset.latencySetting !== source;
+      }
+    }
+
+    syncProviderSortInputs() {
+      const preference = normalizeProviderSortPreference(this.panel?.querySelector('[data-setting="providerSortPreference"]')?.value);
+      for (const field of this.panel?.querySelectorAll('[data-provider-custom-weight-setting]') || []) {
+        field.hidden = preference !== 'custom';
       }
     }
 
@@ -5056,6 +5194,7 @@
       this.sortConvergenceExhausted = false;
       this.sortClickPending = false;
       this.sortPendingStateSignature = '';
+      this.customWeightAttemptCount = 0;
       this.rangeClickCount = 0;
       this.rangeConvergenceExhausted = false;
       this.rangeRetryTimer = null;
@@ -5065,6 +5204,7 @@
       this.sortRoot = null;
       this.providerConfigLoaded = false;
       this.providerSortPreference = DEFAULT_CONFIG.providerSortPreference;
+      this.providerCustomWeights = getProviderCustomWeights(DEFAULT_CONFIG);
       this.providerRangePreference = DEFAULT_CONFIG.providerRangePreference;
       this.providerAutoRefresh = DEFAULT_CONFIG.providerAutoRefresh;
       this.providerRefreshIntervalSeconds = DEFAULT_CONFIG.providerRefreshIntervalSeconds;
@@ -5085,10 +5225,11 @@
         const previous = this.getProviderConfig();
         const next = this.loadProviderConfig();
         const sortChanged = next.providerSortPreference !== previous.providerSortPreference;
+        const customWeightsChanged = JSON.stringify(next.providerCustomWeights) !== JSON.stringify(previous.providerCustomWeights);
         const rangeChanged = next.providerRangePreference !== previous.providerRangePreference;
         const refreshChanged = next.providerAutoRefresh !== previous.providerAutoRefresh
           || next.providerRefreshIntervalSeconds !== previous.providerRefreshIntervalSeconds;
-        if (sortChanged || rangeChanged) {
+        if (sortChanged || rangeChanged || (customWeightsChanged && next.providerSortPreference === 'custom')) {
           this.resetPreferenceApplication();
           this.observeUntilApplied();
           this.queueApply();
@@ -5116,6 +5257,7 @@
     loadProviderConfig() {
       const config = normalizeConfig(storageGet('config', DEFAULT_CONFIG));
       this.providerSortPreference = config.providerSortPreference;
+      this.providerCustomWeights = getProviderCustomWeights(config);
       this.providerRangePreference = config.providerRangePreference;
       this.providerAutoRefresh = config.providerAutoRefresh;
       this.providerRefreshIntervalSeconds = config.providerRefreshIntervalSeconds;
@@ -5127,6 +5269,7 @@
       if (!this.providerConfigLoaded) return this.loadProviderConfig();
       return {
         providerSortPreference: this.providerSortPreference,
+        providerCustomWeights: { ...this.providerCustomWeights },
         providerRangePreference: this.providerRangePreference,
         providerAutoRefresh: this.providerAutoRefresh,
         providerRefreshIntervalSeconds: this.providerRefreshIntervalSeconds,
@@ -5154,6 +5297,7 @@
       this.sortConvergenceExhausted = false;
       this.sortClickPending = false;
       this.sortPendingStateSignature = '';
+      this.customWeightAttemptCount = 0;
       this.rangeClickCount = 0;
       this.rangeConvergenceExhausted = false;
     }
@@ -5311,6 +5455,7 @@
         this.queueSortVerification();
         return false;
       }
+      if (preference === 'custom' && !this.applyCustomWeightPreference(target, config.providerCustomWeights)) return false;
       if (this.rangeWaitingForControl) return false;
       this.applied = true;
       this.sortClickCount = 0;
@@ -5318,6 +5463,21 @@
       this.sortPendingStateSignature = '';
       this.stopSortRetries();
       return true;
+    }
+
+    applyCustomWeightPreference(target, weights) {
+      const root = this.sortRoot || target?.closest?.('.monitor-sort-controls,[data-testid="monitor-sort-controls"]');
+      const result = applyProviderCustomWeights(root, weights);
+      if (result.available && result.matched && !result.changed) {
+        this.customWeightAttemptCount = 0;
+        target?.click?.();
+        return true;
+      }
+      if (this.customWeightAttemptCount >= PROVIDER_CUSTOM_WEIGHT_MAX_ATTEMPTS) return true;
+      this.customWeightAttemptCount += 1;
+      if (!result.available) target?.click?.();
+      this.queueSortVerification();
+      return false;
     }
 
     applyRangePreference(preference) {
@@ -5637,11 +5797,16 @@
     normalizeModelPriceModel,
     normalizeRecommendationPriceBasis,
     normalizeProviderSortPreference,
+    normalizeProviderCustomWeights,
+    getProviderCustomWeights,
     normalizeProviderRangePreference,
     getProviderSortButtonText,
     getProviderSortButtonTexts,
     getProviderSortDirection,
     getProviderSortButtonDirection,
+    getProviderCustomWeightKey,
+    findProviderCustomWeightInputs,
+    applyProviderCustomWeights,
     isProviderControlActive,
     findActiveProviderSortButton,
     shouldActivateProviderSort,
