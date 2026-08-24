@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.34
+// @version      0.14.35
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.34';
+  const SCRIPT_VERSION = '0.14.35';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -46,6 +46,7 @@
   const MONITOR_SERIES_FALLBACK_OVERLAP_MS = 3 * 60 * 1000;
   const USER_TTFT_SAMPLE_COUNT_MAX = 1_000_000;
   const ENHANCER_RENDER_DEBOUNCE_MS = 50;
+  const KEY_GROUP_REFRESH_INTERVAL_MS = 60_000;
   const ROUTER_SYNC_INTERVAL_MS = 10_000;
   const USAGE_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
   const USAGE_AUDIT_RETRY_MS = 15_000;
@@ -4486,9 +4487,6 @@
       // New AIHub group pickers are portaled directly under <body>, outside <main>.
       this.observer.observe(document.body, { childList: true, subtree: true });
       this.queueRender();
-      this.refreshTimer = window.setInterval(() => {
-        if (isPageVisible() && this.findMenus().length && Date.now() - this.lastAttemptAt >= 60_000) this.refresh();
-      }, 60_000);
     }
 
     stop() {
@@ -4500,7 +4498,7 @@
       for (const observer of this.menuObservers.values()) observer.disconnect();
       this.menuObservers.clear();
       if (this.renderTimer) window.clearTimeout(this.renderTimer);
-      if (this.refreshTimer) window.clearInterval(this.refreshTimer);
+      if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
       this.renderTimer = null;
       this.refreshTimer = null;
       this.summaryRows = [];
@@ -4592,9 +4590,37 @@
     }
 
     handleVisibilityChange() {
-      if (!this.active || !isPageVisible()) return;
-      if (this.findMenus().length && Date.now() - this.lastAttemptAt >= 60_000) this.refresh();
-      else this.queueRender();
+      if (!this.active) return;
+      if (!isPageVisible()) {
+        if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
+        this.refreshTimer = null;
+        return;
+      }
+      const menus = this.findMenus();
+      if (menus.length && Date.now() - this.lastAttemptAt >= KEY_GROUP_REFRESH_INTERVAL_MS) this.refresh();
+      else {
+        this.syncRefreshTimer(menus.length > 0);
+        this.queueRender();
+      }
+    }
+
+    syncRefreshTimer(hasMenus) {
+      if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
+      if (!this.active || !hasMenus || !isPageVisible()) return;
+      const elapsed = Math.max(0, Date.now() - this.lastAttemptAt);
+      const delay = Math.max(250, KEY_GROUP_REFRESH_INTERVAL_MS - elapsed);
+      this.refreshTimer = window.setTimeout(() => {
+        this.refreshTimer = null;
+        if (!this.active || !isPageVisible()) return;
+        const menus = this.findMenus();
+        if (!menus.length) {
+          this.syncMenuObservers([]);
+          return;
+        }
+        if (Date.now() - this.lastAttemptAt >= KEY_GROUP_REFRESH_INTERVAL_MS) this.refresh();
+        else this.syncRefreshTimer(true);
+      }, delay);
     }
 
     queueRender() {
@@ -4609,7 +4635,7 @@
 
     async refresh(bypassThrottle = false) {
       if (!this.active || !isPageVisible() || this.loading
-        || (!bypassThrottle && Date.now() - this.lastAttemptAt < 60_000)) return;
+        || (!bypassThrottle && Date.now() - this.lastAttemptAt < KEY_GROUP_REFRESH_INTERVAL_MS)) return;
       this.loading = true;
       this.loadFailed = false;
       this.lastAttemptAt = Date.now();
@@ -4666,11 +4692,12 @@
       }
       const menus = this.findMenus();
       this.syncMenuObservers(menus);
-      if (!menus.length) return;
-      const missingWindowSeries = shouldUseUserTtftSeries(this.config) && !this.monitorSeries;
-      if ((!this.hasMonitorData || missingWindowSeries)
-        && !this.loading
-        && Date.now() - this.lastAttemptAt >= 60_000) this.refresh();
+      if (!menus.length) {
+        this.syncRefreshTimer(false);
+        return;
+      }
+      if (!this.loading && Date.now() - this.lastAttemptAt >= KEY_GROUP_REFRESH_INTERVAL_MS) this.refresh();
+      this.syncRefreshTimer(true);
       for (const { optionList } of menus) {
         for (const option of optionList.querySelectorAll('button,[role="option"]')) this.renderOption(option);
       }
@@ -6182,6 +6209,7 @@
     projectUsageAuditItems,
     buildUsageAuditRecordFromApiItem,
     fetchCurrentUsageAuditItems,
+    KeyGroupDropdownEnhancer,
     UsageMultiplierEnhancer,
     ProviderSortEnhancer,
     appendLogEntries,

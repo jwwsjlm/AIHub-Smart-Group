@@ -281,6 +281,19 @@ test('loads provider series for the native key group picker only when a real-use
   assert.match(dropdownSource, /密钥分组真实用户序列读取失败，已回退主动探测/);
 });
 
+test('refreshes key group monitor data only while the native picker is open', () => {
+  const dropdownSource = userscriptSource.slice(userscriptSource.indexOf('class KeyGroupDropdownEnhancer'), userscriptSource.indexOf('class UsageMultiplierEnhancer'));
+
+  assert.match(dropdownSource, /syncRefreshTimer\(hasMenus\) \{/);
+  assert.match(dropdownSource, /if \(!this\.active \|\| !hasMenus \|\| !isPageVisible\(\)\) return;/);
+  assert.match(dropdownSource, /this\.syncRefreshTimer\(menus\.length > 0\);/);
+  assert.match(dropdownSource, /this\.refreshTimer = window\.setTimeout\(/);
+  assert.match(dropdownSource, /if \(this\.refreshTimer\) window\.clearTimeout\(this\.refreshTimer\);/);
+  assert.match(dropdownSource, /if \(!menus\.length\) \{\s*this\.syncRefreshTimer\(false\);\s*return;/);
+  assert.doesNotMatch(dropdownSource, /this\.refreshTimer = window\.setInterval/);
+  assert.doesNotMatch(dropdownSource, /clearInterval\(this\.refreshTimer\)/);
+});
+
 test('forces a fresh balance only for manual controller checks', () => {
   const controllerSource = userscriptSource.slice(userscriptSource.indexOf('class Controller'), userscriptSource.indexOf('class KeyGroupDropdownEnhancer'));
 
