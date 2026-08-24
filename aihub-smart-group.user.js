@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.31
+// @version      0.14.32
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.31';
+  const SCRIPT_VERSION = '0.14.32';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -1594,16 +1594,17 @@
       const average = nonNegativeNumberOrNull(source?.[1] ?? sample?.avgTtftMs ?? sample?.avg_ttft_ms);
       const rawSampleCount = nonNegativeNumberOrNull(source?.[2] ?? sample?.sampleCount ?? sample?.sample_count);
       const sampleCount = rawSampleCount === null
-        ? null
+        ? 1
         : Math.floor(clamp(rawSampleCount, 0, USER_TTFT_SAMPLE_COUNT_MAX));
-      const hasData = booleanOrNull(source?.[3] ?? sample?.hasData ?? sample?.has_data);
-      return source?.length === 4
+      const explicitHasData = booleanOrNull(source?.[3] ?? sample?.hasData ?? sample?.has_data);
+      const hasData = explicitHasData ?? (average !== null && average > 0 && sampleCount > 0);
+      if (!hasData || average === null || average <= 0 || sampleCount <= 0) return null;
+      return source?.length === 3
         && source[0] === timestamp
         && source[1] === average
         && source[2] === sampleCount
-        && source[3] === hasData
         ? source
-        : [timestamp, average, sampleCount, hasData];
+        : [timestamp, average, sampleCount];
     });
   }
 
@@ -1626,7 +1627,9 @@
     }
     if (directUserTtft && typeof directUserTtft === 'object' && !Array.isArray(directUserTtft)) {
       for (const [groupId, samples] of Object.entries(directUserTtft)) {
-        if (Array.isArray(samples)) userTtftByGroupId[String(groupId)] = normalizeMonitorUserTtftSamples(samples);
+        if (!Array.isArray(samples)) continue;
+        const normalized = normalizeMonitorUserTtftSamples(samples);
+        if (normalized.length) userTtftByGroupId[String(groupId)] = normalized;
       }
     }
     for (const item of Array.isArray(data?.items) ? data.items : []) {
@@ -1638,7 +1641,8 @@
         seriesByApiId[groupId] = normalizeMonitorProbeSamples(probe, weightedProbeSamples);
       }
       if ((!Array.isArray(userTtftByGroupId[groupId]) || !userTtftByGroupId[groupId].length) && Array.isArray(userTtft)) {
-        userTtftByGroupId[groupId] = normalizeMonitorUserTtftSamples(userTtft);
+        const normalized = normalizeMonitorUserTtftSamples(userTtft);
+        if (normalized.length) userTtftByGroupId[groupId] = normalized;
       }
     }
     const metadata = data && typeof data === 'object' && !Array.isArray(data) ? { ...data } : {};
@@ -2003,22 +2007,11 @@
           && (latest === null || timestamp > latest)) latest = timestamp;
       }
     }
-    for (const samples of Object.values(seriesPayload?.userTtftByGroupId || {})) {
-      for (const sample of Array.isArray(samples) ? samples : []) {
-        const value = Array.isArray(sample)
-          ? sample[0]
-          : (sample?.at ?? sample?.probedAt ?? sample?.probed_at ?? sample?.timestamp);
-        const timestamp = parseMonitorSampleTimestamp(value);
-        if (Number.isFinite(timestamp)
-          && timestamp <= upperBound
-          && (latest === null || timestamp > latest)) latest = timestamp;
-      }
-    }
     return latest;
   }
 
   function getMonitorSeriesWindowAnchor(seriesPayload, wallNow = Date.now()) {
-    const generatedAt = Date.parse(seriesPayload?.generatedAt);
+    const generatedAt = parseMonitorSampleTimestamp(seriesPayload?.generatedAt);
     if (Number.isFinite(generatedAt)) {
       const latestSampleAt = getLatestMonitorSampleAt(seriesPayload, generatedAt + MONITOR_SAMPLE_CLOCK_SKEW_MS);
       return latestSampleAt === null ? generatedAt : Math.max(generatedAt, latestSampleAt);
@@ -2030,6 +2023,14 @@
     );
     if (latestSampleAt !== null) return latestSampleAt;
     return null;
+  }
+
+  function getMonitorFreshnessTimestamp(seriesPayload, fallbackGeneratedAt = null) {
+    const generatedAt = parseMonitorSampleTimestamp(seriesPayload?.generatedAt);
+    return getLatestMonitorSampleAt(
+      seriesPayload,
+      Number.isFinite(generatedAt) ? generatedAt + MONITOR_SAMPLE_CLOCK_SKEW_MS : Number.POSITIVE_INFINITY,
+    ) ?? seriesPayload?.generatedAt ?? fallbackGeneratedAt ?? null;
   }
 
   function formatRemainingTime(remainingMs) {
@@ -3914,7 +3915,7 @@
           this.monitorSeries,
           this.config,
         );
-        this.monitorGeneratedAt = getMonitorSeriesWindowAnchor(series) ?? summary?.generatedAt ?? null;
+        this.monitorGeneratedAt = getMonitorFreshnessTimestamp(series, summary?.generatedAt);
         this.updateMonitorFreshness();
         this.recordMonitorFreshnessState();
         this.candidateDiagnostics = analyzeCandidates(this.rows, this.config);
@@ -6022,6 +6023,7 @@
     getMonitorFreshness,
     getLatestMonitorSampleAt,
     getMonitorSeriesWindowAnchor,
+    getMonitorFreshnessTimestamp,
     getCooldownInfo,
     attachRecentAvailability,
     attachUserTtftWindow,
