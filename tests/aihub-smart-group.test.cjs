@@ -500,6 +500,8 @@ test('finds and identifies the current provider time range controls', () => {
   assert.equal(core.findProviderRangeButton(buttons, '24h'), buttons[1]);
   assert.equal(core.findProviderRangeButton(buttons, '30d'), buttons[3]);
   assert.equal(core.findProviderRangeButton(buttons, 'default'), null);
+  assert.equal(core.getProviderRangeButtonPreference(buttons[0]), '6h');
+  assert.equal(core.getProviderRangeButtonPreference({ textContent: 'unknown', getAttribute: () => null }), null);
   assert.equal(core.findActiveProviderRangeButton(buttons), buttons[0]);
   assert.equal(core.shouldActivateProviderRange(buttons[1], buttons[0]), true);
   assert.equal(core.shouldActivateProviderRange(buttons[0], buttons[0]), false);
@@ -3971,6 +3973,54 @@ test('applies the provider time range before completing the saved sort preferenc
     assert.equal(rangeClicks, 1);
     assert.equal(queuedVerifications, 1);
     assert.equal(enhancer.applied, true);
+  } finally {
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+});
+
+test('restores the initial provider range when returning to the website default', () => {
+  const originalDocument = globalThis.document;
+  let activeRange = '6h';
+  const rangeClicks = [];
+  const rangeButtons = () => ['6h', '24h', '7d', '30d'].map((range) => ({
+    textContent: range,
+    className: range === activeRange ? 'active' : '',
+    getAttribute: (name) => (name === 'data-testid' ? `monitor-range-${range}` : null),
+    click: () => {
+      rangeClicks.push(range);
+      activeRange = range;
+    },
+  }));
+  const controls = {};
+  const sortButtons = () => [{
+    textContent: '倍率 ↑',
+    className: 'monitor-sort-head active',
+    closest: (selector) => (selector.includes('monitor-sort-controls') ? controls : null),
+  }];
+  globalThis.document = {
+    querySelectorAll: (selector) => (selector.includes('monitor-range') ? rangeButtons() : sortButtons()),
+  };
+
+  try {
+    const enhancer = new core.ProviderSortEnhancer();
+    enhancer.active = true;
+    enhancer.providerConfigLoaded = true;
+    enhancer.providerSortPreference = 'rate';
+    enhancer.providerRangePreference = '24h';
+    enhancer.queueSortVerification = () => {};
+
+    assert.equal(enhancer.apply(), false);
+    assert.equal(enhancer.providerDefaultRangePreference, '6h');
+    assert.deepEqual(rangeClicks, ['24h']);
+    assert.equal(enhancer.apply(), true);
+
+    enhancer.resetPreferenceApplication();
+    enhancer.providerRangePreference = 'default';
+    assert.equal(enhancer.apply(), false);
+    assert.deepEqual(rangeClicks, ['24h', '6h']);
+    assert.equal(enhancer.apply(), true);
+    assert.equal(activeRange, '6h');
   } finally {
     if (originalDocument === undefined) delete globalThis.document;
     else globalThis.document = originalDocument;

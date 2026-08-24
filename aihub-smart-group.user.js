@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.40
+// @version      0.14.41
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.40';
+  const SCRIPT_VERSION = '0.14.41';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -808,9 +808,15 @@
     const normalized = normalizeProviderRangePreference(preference);
     if (normalized === 'default') return null;
     const candidates = [...(buttons || [])];
-    return candidates.find((button) => String(button?.getAttribute?.('data-testid') || '').trim() === `monitor-range-${normalized}`)
-      || candidates.find((button) => String(button?.textContent || '').trim().toLocaleLowerCase() === normalized)
-      || null;
+    return candidates.find((button) => getProviderRangeButtonPreference(button) === normalized) || null;
+  }
+
+  function getProviderRangeButtonPreference(button) {
+    const testId = String(button?.getAttribute?.('data-testid') || '').trim().toLocaleLowerCase();
+    const semanticRange = testId.match(/^monitor-range-(6h|24h|7d|30d)$/)?.[1];
+    const textRange = String(button?.textContent || '').trim().toLocaleLowerCase();
+    const normalized = normalizeProviderRangePreference(semanticRange || textRange);
+    return normalized === 'default' ? null : normalized;
   }
 
   function findActiveProviderRangeButton(buttons) {
@@ -5553,6 +5559,7 @@
       this.providerSortPreference = DEFAULT_CONFIG.providerSortPreference;
       this.providerCustomWeights = getProviderCustomWeights(DEFAULT_CONFIG);
       this.providerRangePreference = DEFAULT_CONFIG.providerRangePreference;
+      this.providerDefaultRangePreference = null;
       this.providerAutoRefresh = DEFAULT_CONFIG.providerAutoRefresh;
       this.providerRefreshIntervalSeconds = DEFAULT_CONFIG.providerRefreshIntervalSeconds;
       this.onPageClick = (event) => {
@@ -5761,6 +5768,7 @@
       this.stopSortRetries();
       this.stopRefreshTracking();
       this.sortRoot = null;
+      this.providerDefaultRangePreference = null;
       document.removeEventListener('click', this.onPageClick, true);
       window.removeEventListener(CONFIG_CHANGE_EVENT, this.onConfigChanged);
     }
@@ -5838,7 +5846,7 @@
 
     applyRangePreference(preference) {
       const normalized = normalizeProviderRangePreference(preference);
-      if (normalized === 'default' || this.rangeConvergenceExhausted) {
+      if (this.rangeConvergenceExhausted) {
         this.clearRangeControlWait();
         return true;
       }
@@ -5846,13 +5854,25 @@
       const buttons = scopedButtons.length
         ? scopedButtons
         : document.querySelectorAll('.monitor-range-tabs button,[data-testid^="monitor-range-"]');
-      const target = findProviderRangeButton(buttons, normalized);
+      const activeButton = findActiveProviderRangeButton(buttons);
+      if (!this.providerDefaultRangePreference) {
+        this.providerDefaultRangePreference = getProviderRangeButtonPreference(activeButton);
+      }
+      const targetPreference = normalized === 'default' ? this.providerDefaultRangePreference : normalized;
+      if (!targetPreference) {
+        this.clearRangeControlWait();
+        return true;
+      }
+      const target = findProviderRangeButton(buttons, targetPreference);
       if (!target) {
+        if (normalized === 'default') {
+          this.clearRangeControlWait();
+          return true;
+        }
         if (!this.rangeControlUnavailable) this.scheduleRangeControlRetry();
         return true;
       }
       this.clearRangeControlWait();
-      const activeButton = findActiveProviderRangeButton(buttons);
       if (!shouldActivateProviderRange(target, activeButton)) {
         this.rangeClickCount = 0;
         return true;
@@ -6185,6 +6205,7 @@
     shouldActivateProviderSort,
     findProviderSortButton,
     findProviderRangeButton,
+    getProviderRangeButtonPreference,
     findActiveProviderRangeButton,
     shouldActivateProviderRange,
     findProviderRefreshButton,
