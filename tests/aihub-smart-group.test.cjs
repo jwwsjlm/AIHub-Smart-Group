@@ -902,9 +902,11 @@ test('falls back to provider rows when the update marker is unchanged', () => {
   let generatedText = '更新于 2026/08/24 18:00:01';
   let rowText = 'A001 0.1x 可用';
   let rowScans = 0;
+  let rowSelector = '';
   const root = {
     querySelector: () => ({ get textContent() { return generatedText; } }),
-    querySelectorAll: () => {
+    querySelectorAll: (selector) => {
+      rowSelector = selector;
       rowScans += 1;
       return [{
         get textContent() { return rowText; },
@@ -919,6 +921,7 @@ test('falls back to provider rows when the update marker is unchanged', () => {
     rows: 'provider-a001:A001 0.1x 可用',
   });
   assert.equal(rowScans, 1);
+  assert.match(rowSelector, /\.decision-row\.ledger-row/);
   assert.equal(core.hasProviderRefreshDataChanged(baseline, root), false);
   assert.equal(rowScans, 2);
 

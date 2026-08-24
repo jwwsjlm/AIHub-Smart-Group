@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.26
+// @version      0.14.27
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.26';
+  const SCRIPT_VERSION = '0.14.27';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -65,6 +65,16 @@
   ].join(',');
   const PROVIDER_REFRESH_SIGNAL_ROOT_SELECTOR = '.monitor-refresh-group,[data-testid="monitor-refresh-group"]';
   const PROVIDER_REFRESH_GENERATED_SELECTOR = '.monitor-generated-at,[data-testid="monitor-generated-at"]';
+  // The current decision-table layout renders provider rows as `.decision-row.ledger-row`.
+  // Keep the row selector separate so refresh completion can detect data changes even when
+  // the minute-level "updated at" label does not change during a refresh.
+  const PROVIDER_REFRESH_ROW_SELECTOR = [
+    '.decision-entry',
+    '.decision-row.ledger-row',
+    '[data-testid^="monitor-provider-"]',
+    '[data-provider-id]',
+    'table tbody tr',
+  ].join(',');
   const PROVIDER_SORT_BUTTON_SELECTOR = [
     'button.monitor-sort-head',
     'button[data-testid^="monitor-sort-"]',
@@ -844,7 +854,7 @@
   }
 
   function getProviderRefreshRowsSignature(root) {
-    const entries = [...(root?.querySelectorAll?.('.decision-entry,[data-testid^="monitor-provider-"],table tbody tr') || [])];
+    const entries = [...(root?.querySelectorAll?.(PROVIDER_REFRESH_ROW_SELECTOR) || [])];
     if (!entries.length) return '';
     return entries.slice(0, 100).map((entry, index) => {
       const identity = String(entry?.getAttribute?.('data-testid') || entry?.getAttribute?.('data-provider-id') || index);
