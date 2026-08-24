@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.12.1
+// @version      0.12.2
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.12.1';
+  const SCRIPT_VERSION = '0.12.2';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -42,6 +42,10 @@
   const USAGE_AUDIT_CACHE_LIMIT = 8;
   const PROVIDER_REFRESH_RETRY_MS = 1_000;
   const PROVIDER_REFRESH_UNAVAILABLE_RETRY_MS = 5_000;
+  const PROVIDER_REFRESH_BUTTON_SELECTOR = [
+    'button.monitor-icon-button[title="刷新监测数据"]',
+    'button.monitor-icon-button[title="Refresh monitoring data"]',
+  ].join(',');
   const USAGE_DETAIL_REQUIRED_HEADERS = Object.freeze([
     'API 密钥',
     '模型',
@@ -280,7 +284,31 @@
   }
 
   function findProviderRefreshButton(buttons) {
-    return [...(buttons || [])].find((button) => String(button?.textContent || '').trim() === '刷新') || null;
+    const candidates = [...(buttons || [])];
+    const semanticButton = candidates.find((button) => {
+      const title = String(button?.getAttribute?.('title') ?? button?.title ?? '').trim().toLocaleLowerCase();
+      const className = String(button?.className || '').split(/\s+/);
+      const isMonitorIconButton = button?.classList?.contains?.('monitor-icon-button') === true
+        || className.includes('monitor-icon-button');
+      return isMonitorIconButton && (title === '刷新监测数据' || title === 'refresh monitoring data');
+    });
+    if (semanticButton) return semanticButton;
+    const textButtons = candidates.filter((button) => {
+      const text = String(button?.textContent || '').trim().toLocaleLowerCase();
+      return text === '刷新' || text === 'refresh';
+    });
+    return textButtons.length === 1 ? textButtons[0] : null;
+  }
+
+  function findProviderRefreshButtonInRoot(root) {
+    const semanticButton = root?.querySelector?.(PROVIDER_REFRESH_BUTTON_SELECTOR);
+    if (semanticButton) return semanticButton;
+    return findProviderRefreshButton(root?.querySelectorAll?.('button'));
+  }
+
+  function isProviderRefreshButtonDisabled(button) {
+    return button?.disabled === true
+      || String(button?.getAttribute?.('aria-disabled') || '').trim().toLocaleLowerCase() === 'true';
   }
 
   function normalizeCacheHitRate(value) {
@@ -3187,7 +3215,10 @@
       this.refreshing = false;
       this.onPageClick = (event) => {
         const button = event.target?.closest?.('button');
-        if (button?.closest('main') && findProviderRefreshButton([button]) === button) {
+        const root = button?.closest?.('[data-testid="llm-monitor-panel"]') || button?.closest?.('main');
+        if (root
+          && findProviderRefreshButtonInRoot(root) === button
+          && !isProviderRefreshButtonDisabled(button)) {
           this.lastRefreshAt = Date.now();
           if (!this.refreshing) this.syncRefreshTimer(false);
         }
@@ -3315,8 +3346,8 @@
       const currentConfig = config || normalizeConfig(storageGet('config', DEFAULT_CONFIG));
       if (!currentConfig.providerAutoRefresh
         || !isRefreshDue(now, this.lastRefreshAt, currentConfig.providerRefreshIntervalSeconds * 1000)) return false;
-      const button = findProviderRefreshButton(document.querySelectorAll('main button'));
-      if (!button || button.disabled) return false;
+      const button = findProviderRefreshButtonInRoot(document.querySelector('main'));
+      if (!button || isProviderRefreshButtonDisabled(button)) return false;
       this.refreshing = true;
       try {
         button.click();
@@ -3460,6 +3491,8 @@
     shouldActivateProviderSort,
     findProviderSortButton,
     findProviderRefreshButton,
+    findProviderRefreshButtonInRoot,
+    isProviderRefreshButtonDisabled,
     normalizeCacheHitRate,
     formatCacheHitRate,
     normalizeModelPrices,

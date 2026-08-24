@@ -218,13 +218,67 @@ test('uses the native low-to-high or high-to-low direction for every provider so
 });
 
 test('finds only the native provider hall refresh button', () => {
+  const timeRange = { textContent: '6h', className: 'active' };
+  const otherIcon = {
+    textContent: '',
+    className: 'monitor-icon-button',
+    getAttribute: (name) => (name === 'title' ? '切换主题' : null),
+  };
+  const currentIcon = {
+    textContent: '',
+    className: 'monitor-icon-button',
+    getAttribute: (name) => (name === 'title' ? '刷新监测数据' : null),
+  };
+  const englishIcon = {
+    textContent: '',
+    className: 'monitor-icon-button',
+    getAttribute: (name) => (name === 'title' ? 'Refresh monitoring data' : null),
+  };
   const buttons = [
-    { textContent: '检测' },
+    timeRange,
+    otherIcon,
+    currentIcon,
     { textContent: '刷新' },
     { textContent: ' 刷新中 ' },
   ];
-  assert.equal(core.findProviderRefreshButton(buttons), buttons[1]);
+  assert.equal(core.findProviderRefreshButton(buttons), currentIcon);
+  assert.equal(core.findProviderRefreshButton([timeRange, englishIcon]), englishIcon);
+  assert.equal(core.findProviderRefreshButton([{ textContent: 'Refresh' }]).textContent, 'Refresh');
+  assert.equal(core.findProviderRefreshButton([{ textContent: '刷新' }]).textContent, '刷新');
   assert.equal(core.findProviderRefreshButton([{ textContent: '检测' }]), null);
+  assert.equal(core.findProviderRefreshButton([timeRange, otherIcon]), null);
+  assert.equal(core.findProviderRefreshButton([{ textContent: '刷新' }, { textContent: '刷新' }]), null);
+});
+
+test('uses the new provider refresh semantic selector before scanning every button', () => {
+  const icon = { textContent: '', className: 'monitor-icon-button' };
+  let fallbackScans = 0;
+  const root = {
+    querySelector: (selector) => {
+      assert.match(selector, /monitor-icon-button\[title="刷新监测数据"\]/);
+      assert.match(selector, /monitor-icon-button\[title="Refresh monitoring data"\]/);
+      return icon;
+    },
+    querySelectorAll: () => {
+      fallbackScans += 1;
+      return [];
+    },
+  };
+
+  assert.equal(core.findProviderRefreshButtonInRoot(root), icon);
+  assert.equal(fallbackScans, 0);
+});
+
+test('treats native and ARIA-disabled provider refresh buttons as unavailable', () => {
+  assert.equal(core.isProviderRefreshButtonDisabled({ disabled: true }), true);
+  assert.equal(core.isProviderRefreshButtonDisabled({
+    disabled: false,
+    getAttribute: (name) => (name === 'aria-disabled' ? 'TRUE' : null),
+  }), true);
+  assert.equal(core.isProviderRefreshButtonDisabled({
+    disabled: false,
+    getAttribute: () => null,
+  }), false);
 });
 
 test('normalizes the new provider summary response and keeps both TTFT metrics', () => {
@@ -944,10 +998,25 @@ test('backs off provider DOM scans only while the native refresh button is unava
   const config = JSON.stringify({ providerAutoRefresh: true, providerRefreshIntervalSeconds: 60 });
   let now = 60_000;
   let buttons = [];
+  let semanticButton = null;
   let scheduledDelay = null;
   let storageReads = 0;
-  let domScans = 0;
+  let mainLookups = 0;
+  let semanticScans = 0;
+  let fallbackScans = 0;
   let clicks = 0;
+  const main = {
+    querySelector: (selector) => {
+      assert.match(selector, /monitor-icon-button\[title="刷新监测数据"\]/);
+      semanticScans += 1;
+      return semanticButton;
+    },
+    querySelectorAll: (selector) => {
+      assert.equal(selector, 'button');
+      fallbackScans += 1;
+      return buttons;
+    },
+  };
   globalThis.localStorage = {
     getItem: () => {
       storageReads += 1;
@@ -956,10 +1025,10 @@ test('backs off provider DOM scans only while the native refresh button is unava
   };
   globalThis.document = {
     hidden: false,
-    querySelectorAll: (selector) => {
-      assert.equal(selector, 'main button');
-      domScans += 1;
-      return buttons;
+    querySelector: (selector) => {
+      assert.equal(selector, 'main');
+      mainLookups += 1;
+      return main;
     },
   };
   globalThis.window = {
@@ -978,42 +1047,82 @@ test('backs off provider DOM scans only while the native refresh button is unava
     enhancer.syncRefreshTimer(true);
     assert.equal(scheduledDelay, 5_000);
     assert.equal(storageReads, 1);
-    assert.equal(domScans, 1);
+    assert.equal(mainLookups, 1);
+    assert.equal(semanticScans, 1);
+    assert.equal(fallbackScans, 1);
 
-    buttons = [{ textContent: '刷新', disabled: true }];
+    semanticButton = {
+      textContent: '',
+      className: 'monitor-icon-button',
+      disabled: true,
+    };
     scheduledDelay = null;
     storageReads = 0;
-    domScans = 0;
+    mainLookups = 0;
+    semanticScans = 0;
+    fallbackScans = 0;
     enhancer.lastRefreshAt = 0;
     enhancer.syncRefreshTimer(true);
     assert.equal(scheduledDelay, 5_000);
     assert.equal(storageReads, 1);
-    assert.equal(domScans, 1);
+    assert.equal(mainLookups, 1);
+    assert.equal(semanticScans, 1);
+    assert.equal(fallbackScans, 0);
 
-    buttons = [{
-      textContent: '刷新',
+    semanticButton = {
+      textContent: '',
+      className: 'monitor-icon-button',
       disabled: false,
+      getAttribute: (name) => (name === 'aria-disabled' ? 'true' : null),
       click: () => { clicks += 1; },
-    }];
+    };
     scheduledDelay = null;
     storageReads = 0;
-    domScans = 0;
+    mainLookups = 0;
+    semanticScans = 0;
+    fallbackScans = 0;
+    enhancer.lastRefreshAt = 0;
+    enhancer.syncRefreshTimer(true);
+    assert.equal(clicks, 0);
+    assert.equal(scheduledDelay, 5_000);
+    assert.equal(storageReads, 1);
+    assert.equal(mainLookups, 1);
+    assert.equal(semanticScans, 1);
+    assert.equal(fallbackScans, 0);
+
+    semanticButton = {
+      textContent: '',
+      className: 'monitor-icon-button',
+      disabled: false,
+      click: () => { clicks += 1; },
+    };
+    scheduledDelay = null;
+    storageReads = 0;
+    mainLookups = 0;
+    semanticScans = 0;
+    fallbackScans = 0;
     enhancer.lastRefreshAt = 0;
     enhancer.syncRefreshTimer(true);
     assert.equal(clicks, 1);
     assert.equal(enhancer.lastRefreshAt, 60_000);
     assert.equal(scheduledDelay, 60_000);
     assert.equal(storageReads, 1);
-    assert.equal(domScans, 1);
+    assert.equal(mainLookups, 1);
+    assert.equal(semanticScans, 1);
+    assert.equal(fallbackScans, 0);
 
     scheduledDelay = null;
     storageReads = 0;
-    domScans = 0;
+    mainLookups = 0;
+    semanticScans = 0;
+    fallbackScans = 0;
     enhancer.lastRefreshAt = 1_000;
     enhancer.syncRefreshTimer(true);
     assert.equal(scheduledDelay, 1_000);
     assert.equal(storageReads, 1);
-    assert.equal(domScans, 0);
+    assert.equal(mainLookups, 0);
+    assert.equal(semanticScans, 0);
+    assert.equal(fallbackScans, 0);
   } finally {
     Date.now = originalDateNow;
     if (originalWindow === undefined) delete globalThis.window;
@@ -1023,6 +1132,80 @@ test('backs off provider DOM scans only while the native refresh button is unava
     if (originalLocalStorage === undefined) delete globalThis.localStorage;
     else globalThis.localStorage = originalLocalStorage;
   }
+});
+
+test('recognizes a manual click from inside the new provider refresh icon', () => {
+  const originalDateNow = Date.now;
+  let button;
+  const root = {
+    querySelector: () => button,
+    querySelectorAll: () => [button],
+  };
+  button = {
+    textContent: '',
+    className: 'monitor-icon-button',
+    getAttribute: (name) => (name === 'title' ? '刷新监测数据' : null),
+    closest: (selector) => (selector === '[data-testid="llm-monitor-panel"]' || selector === 'main' ? root : null),
+  };
+  const nestedIcon = { closest: (selector) => (selector === 'button' ? button : null) };
+  let refreshIfDue = null;
+  Date.now = () => 42_000;
+
+  try {
+    const enhancer = new core.ProviderSortEnhancer();
+    enhancer.syncRefreshTimer = (value) => { refreshIfDue = value; };
+    enhancer.onPageClick({ target: nestedIcon });
+
+    assert.equal(enhancer.lastRefreshAt, 42_000);
+    assert.equal(refreshIfDue, false);
+  } finally {
+    Date.now = originalDateNow;
+  }
+});
+
+test('ignores a manual click inside an ARIA-disabled provider refresh icon', () => {
+  let button;
+  const root = {
+    querySelector: () => button,
+    querySelectorAll: () => [button],
+  };
+  button = {
+    textContent: '',
+    className: 'monitor-icon-button',
+    disabled: false,
+    getAttribute: (name) => {
+      if (name === 'title') return '刷新监测数据';
+      if (name === 'aria-disabled') return 'true';
+      return null;
+    },
+    closest: (selector) => (selector === '[data-testid="llm-monitor-panel"]' || selector === 'main' ? root : null),
+  };
+  const nestedIcon = { closest: (selector) => (selector === 'button' ? button : null) };
+  const enhancer = new core.ProviderSortEnhancer();
+  enhancer.lastRefreshAt = 7_000;
+  enhancer.syncRefreshTimer = () => assert.fail('disabled refresh must not reschedule the provider timer');
+
+  enhancer.onPageClick({ target: nestedIcon });
+
+  assert.equal(enhancer.lastRefreshAt, 7_000);
+});
+
+test('does not reset provider timing for an unrelated local refresh button', () => {
+  const semanticButton = { textContent: '', className: 'monitor-icon-button' };
+  const localRefresh = { textContent: '刷新' };
+  const root = {
+    querySelector: () => semanticButton,
+    querySelectorAll: () => [localRefresh, semanticButton],
+  };
+  localRefresh.closest = (selector) => (selector === '[data-testid="llm-monitor-panel"]' || selector === 'main' ? root : null);
+  const nested = { closest: (selector) => (selector === 'button' ? localRefresh : null) };
+  const enhancer = new core.ProviderSortEnhancer();
+  enhancer.lastRefreshAt = 7_000;
+  enhancer.syncRefreshTimer = () => assert.fail('unrelated refresh must not reschedule the provider timer');
+
+  enhancer.onPageClick({ target: nested });
+
+  assert.equal(enhancer.lastRefreshAt, 7_000);
 });
 
 test('runs controller polling when expanded and due', () => {
