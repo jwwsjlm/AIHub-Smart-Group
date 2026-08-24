@@ -36,7 +36,16 @@ test('supports the portaled role=listbox group picker used by the current keys p
   assert.match(userscriptSource, /this\.observer\.observe\(document\.body, \{ childList: true, subtree: true \}\);/);
   assert.match(userscriptSource, /const portal = input\.closest\?\.\('\[role="listbox"\]'\);/);
   assert.match(userscriptSource, /portal\.querySelector\('\.select-options'\) \|\| portal/);
+  assert.match(userscriptSource, /const searchArea = input\.parentElement\?\.parentElement;/);
+  assert.match(userscriptSource, /const optionList = searchArea\?\.nextElementSibling;/);
   assert.match(userscriptSource, /optionList\.querySelectorAll\('button,\[role="option"\]'\)/);
+});
+
+test('filters native group picker mutations before scheduling another render', () => {
+  assert.match(userscriptSource, /menuMutationsNeedRender\(records\)/);
+  assert.match(userscriptSource, /if \(this\.menuMutationsNeedRender\(records\)\) this\.queueRender\(\);/);
+  assert.match(userscriptSource, /observer\.observe\(optionList, \{ childList: true, subtree: true \}\);/);
+  assert.doesNotMatch(userscriptSource, /observer\.observe\(optionList, \{ childList: true, subtree: true, characterData: true \}\);/);
 });
 
 test('reduces idle router polling while syncing browser history navigation immediately', () => {

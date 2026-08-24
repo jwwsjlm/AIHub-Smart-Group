@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.11.5
+// @version      0.11.6
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -28,7 +28,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.11.5';
+  const SCRIPT_VERSION = '0.11.6';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const API_REQUEST_TIMEOUT_MS = 15_000;
@@ -2447,10 +2447,27 @@
       }
       for (const optionList of optionLists) {
         if (this.menuObservers.has(optionList)) continue;
-        const observer = new MutationObserver(() => this.queueRender());
-        observer.observe(optionList, { childList: true, subtree: true, characterData: true });
+        const observer = new MutationObserver((records) => {
+          if (this.menuMutationsNeedRender(records)) this.queueRender();
+        });
+        observer.observe(optionList, { childList: true, subtree: true });
         this.menuObservers.set(optionList, observer);
       }
+    }
+
+    menuMutationsNeedRender(records) {
+      return [...(records || [])].some((record) => {
+        const target = record.target?.nodeType === 1 ? record.target : record.target?.parentElement;
+        if (target?.closest?.('.asg-key-group-status,.asg-key-group-latency')) return false;
+        return [...record.addedNodes, ...record.removedNodes].some((node) => {
+          if (node.nodeType !== 1) return false;
+          if (node.matches?.('.asg-key-group-status,.asg-key-group-latency')
+            || node.querySelector?.('.asg-key-group-status,.asg-key-group-latency')) return false;
+          return Boolean(target?.closest?.('button,[role="option"]')
+            || node.matches?.('button,[role="option"]')
+            || node.querySelector?.('button,[role="option"]'));
+        });
+      });
     }
 
     handleVisibilityChange() {
