@@ -203,7 +203,7 @@ test('normalizes selectable availability criteria', () => {
 test('normalizes the selectable TTFT source and preserves the legacy default', () => {
   assert.equal(core.DEFAULT_CONFIG.latencySource, 'probe');
   assert.equal(core.DEFAULT_CONFIG.minUserTtftSamples, 1);
-  assert.equal(core.LATENCY_SOURCE_LABELS.user, '运行时 P50 TTFT');
+  assert.equal(core.LATENCY_SOURCE_LABELS.user, '真实用户平均 TTFT');
   assert.equal(core.normalizeConfig({}).latencySource, 'probe');
   assert.equal(core.normalizeConfig({ latencySource: 'user' }).latencySource, 'user');
   assert.equal(core.normalizeConfig({ minUserTtftSamples: '12' }).minUserTtftSamples, 12);
@@ -1660,8 +1660,8 @@ test('selects real-user TTFT when sampled and falls back to probe TTFT without s
   assert.deepEqual(core.getLatencyMetric(empty, 'user'), { value: 900, source: 'probe', fallback: true });
   assert.equal(core.getUserLatencySampleCount(sampled), 8);
   assert.equal(core.getUserLatencySampleCount(empty), null);
-  assert.equal(core.formatLatencyMetric(sampled, 'user'), '运行时 P50 TTFT 1200 ms（8 条）');
-  assert.equal(core.formatLatencyMetric(empty, 'user'), '运行时 P50 TTFT 900 ms（回退探测）');
+  assert.equal(core.formatLatencyMetric(sampled, 'user'), '真实用户平均 TTFT 1200 ms（8 条）');
+  assert.equal(core.formatLatencyMetric(empty, 'user'), '真实用户平均 TTFT 900 ms（回退探测）');
 });
 
 test('falls back from low-sample real-user TTFT with an explicit confidence reason', () => {
@@ -1677,8 +1677,8 @@ test('falls back from low-sample real-user TTFT with an explicit confidence reas
     userSampleCount: 3,
     minUserTtftSamples: 5,
   });
-  assert.equal(core.formatLatencyMetric(lowSample, 'user', 5), '运行时 P50 TTFT 900 ms（样本不足 3/5，回退探测）');
-  assert.equal(core.formatLatencyMetric(lowSampleWithoutProbe, 'user', 5), '运行时 P50 TTFT 暂无数据（样本不足 3/5，回退探测）');
+  assert.equal(core.formatLatencyMetric(lowSample, 'user', 5), '真实用户平均 TTFT 900 ms（样本不足 3/5，回退探测）');
+  assert.equal(core.formatLatencyMetric(lowSampleWithoutProbe, 'user', 5), '真实用户平均 TTFT 暂无数据（样本不足 3/5，回退探测）');
 });
 
 test('normalizes the monitor freshness limit', () => {
@@ -3488,20 +3488,20 @@ test('formats dropdown and key labels with the real-user TTFT source', () => {
   assert.deepEqual(core.formatGroupDropdownMonitor(row, 'user'), {
     statusText: '可用',
     statusTone: 'available',
-    latencyText: '运行时 P50 TTFT 1385 ms（12 条）',
+    latencyText: '真实用户平均 TTFT 1385 ms（12 条）',
     latencyValueText: '1385 ms（12 条）',
   });
   assert.equal(core.formatKeyOptionLabel(
     { name: 'main', groupName: 'A001' },
     { multiplier: 0.05, latencyMs: 1384.6, latencySampleCount: 12 },
     'user',
-  ), 'main · A001 · ×0.05 · 运行时 P50 TTFT 1385 ms（12 条）');
+  ), 'main · A001 · ×0.05 · 真实用户平均 TTFT 1385 ms（12 条）');
 
   const lowSample = { available: true, firstTokenLatencyMs: 900, userAvgTtftMs: 300, userSampleCount: 3, userHasData: true };
   assert.deepEqual(core.formatGroupDropdownMonitor(lowSample, 'user', 10), {
     statusText: '可用',
     statusTone: 'available',
-    latencyText: '运行时 P50 TTFT（样本不足 3/10，回退探测） 900 ms',
+    latencyText: '真实用户平均 TTFT（样本不足 3/10，回退探测） 900 ms',
     latencyValueText: '900 ms',
   });
   assert.equal(core.formatKeyOptionLabel(
@@ -3516,7 +3516,7 @@ test('formats dropdown and key labels with the real-user TTFT source', () => {
       minUserTtftSamples: 10,
     },
     'user',
-  ), 'main · A001 · ×0.05 · 运行时 P50 TTFT（样本不足 3/10，回退探测） 900 ms');
+  ), 'main · A001 · ×0.05 · 真实用户平均 TTFT（样本不足 3/10，回退探测） 900 ms');
 });
 
 test('formats target key options with current group metrics and safe placeholders', () => {

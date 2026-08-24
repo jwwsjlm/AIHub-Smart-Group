@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.11
+// @version      0.14.12
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.11';
+  const SCRIPT_VERSION = '0.14.12';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -106,7 +106,7 @@
   });
   const LATENCY_SOURCE_LABELS = Object.freeze({
     probe: '主动探测首 Token',
-    user: '运行时 P50 TTFT',
+    user: '真实用户平均 TTFT',
   });
   const MODEL_PRICE_MODEL_LABELS = Object.freeze({
     none: '不显示',
@@ -1091,7 +1091,7 @@
   function getLatencyMetricLabel(source = 'probe', metric = null) {
     if (normalizeLatencySource(source) !== 'user') return '首 Token';
     const fallbackText = getUserTtftFallbackText(metric);
-    return fallbackText ? `运行时 P50 TTFT（${fallbackText}）` : '运行时 P50 TTFT';
+    return fallbackText ? `真实用户平均 TTFT（${fallbackText}）` : '真实用户平均 TTFT';
   }
 
   function formatLatencyMetric(row, source = 'probe', minUserTtftSamples = DEFAULT_CONFIG.minUserTtftSamples) {
@@ -1102,8 +1102,8 @@
       const sampleText = sampleCount === null ? '' : `（${sampleCount} 条）`;
       const fallbackText = getUserTtftFallbackText(metric);
       return fallbackText
-        ? `运行时 P50 TTFT ${valueText}（${fallbackText}）`
-        : `运行时 P50 TTFT ${valueText}${sampleText}`;
+        ? `真实用户平均 TTFT ${valueText}（${fallbackText}）`
+        : `真实用户平均 TTFT ${valueText}${sampleText}`;
     }
     return `首 Token ${valueText}`;
   }
@@ -2833,8 +2833,8 @@
               <section class="asg-settings-section">
                 <div class="asg-settings-head"><div class="asg-settings-title">TTFT 采集</div><label class="asg-settings-inline-label" for="asg-latency-source-setting">推荐、密钥详情和分组下拉使用的延迟指标</label></div>
                 <div class="asg-settings-grid">
-                  <label class="asg-setting-wide">采集指标<select id="asg-latency-source-setting" data-setting="latencySource"><option value="probe">主动探测首 Token</option><option value="user">运行时 P50 TTFT（无样本时回退探测）</option></select></label>
-                  <label class="asg-setting-wide" data-latency-setting="user" title="运行时 P50 样本不足时改用主动探测，避免少量真实请求影响推荐">运行时 P50 最低有效样本数<input type="number" min="1" max="1000000" step="1" data-setting="minUserTtftSamples"></label>
+                  <label class="asg-setting-wide">采集指标<select id="asg-latency-source-setting" data-setting="latencySource"><option value="probe">主动探测首 Token</option><option value="user">真实用户平均 TTFT（无样本时回退探测）</option></select></label>
+                  <label class="asg-setting-wide" data-latency-setting="user" title="真实用户平均 TTFT 样本不足时改用主动探测，避免少量真实请求影响推荐">真实用户平均 TTFT 最低有效样本数<input type="number" min="1" max="1000000" step="1" data-setting="minUserTtftSamples"></label>
                 </div>
               </section>
               <section class="asg-settings-section">
@@ -3520,7 +3520,7 @@
       const userLatencySampleFallbacks = this.config.latencySource === 'user'
         ? Number(diagnostics.userLatencySampleFallbacks) || 0
         : 0;
-      diagnostic.textContent = `参与比较 ${this.ranked.length} · 排除关键词 ${diagnostics.keywords || 0} · 不可用 ${diagnostics.unavailable || 0} · 可用率不足 ${diagnostics.lowSuccess || 0} · 监控警告 ${diagnostics.warnings || 0}${detectionWarnings ? `（模型检测异常 ${detectionWarnings}）` : ''}${userLatencySampleFallbacks ? ` · 运行时样本不足回退 ${userLatencySampleFallbacks}` : ''}${priceUnavailable ? ` · 价格数据不可用 ${priceUnavailable}${priceUnavailableReasons ? `（${priceUnavailableReasons}）` : ''}` : ''}${overLimit ? ` · 超过倍率上限 ${overLimit}` : ''}`;
+      diagnostic.textContent = `参与比较 ${this.ranked.length} · 排除关键词 ${diagnostics.keywords || 0} · 不可用 ${diagnostics.unavailable || 0} · 可用率不足 ${diagnostics.lowSuccess || 0} · 监控警告 ${diagnostics.warnings || 0}${detectionWarnings ? `（模型检测异常 ${detectionWarnings}）` : ''}${userLatencySampleFallbacks ? ` · 真实用户样本不足回退 ${userLatencySampleFallbacks}` : ''}${priceUnavailable ? ` · 价格数据不可用 ${priceUnavailable}${priceUnavailableReasons ? `（${priceUnavailableReasons}）` : ''}` : ''}${overLimit ? ` · 超过倍率上限 ${overLimit}` : ''}`;
       recommend.appendChild(diagnostic);
       const freshness = document.createElement('div');
       freshness.className = `asg-monitor-age${this.monitorFreshness.stale ? ' asg-stale' : ''}`;
@@ -3867,7 +3867,7 @@
       if (this.loadFailed) {
         info = { ...formatGroupDropdownMonitor(null, this.latencySource), statusText: '监控读取失败', statusTone: 'error' };
       } else if (!this.hasMonitorData) {
-        const latencyLabel = this.latencySource === 'user' ? '运行时 P50 TTFT' : '首 Token';
+        const latencyLabel = this.latencySource === 'user' ? '真实用户平均 TTFT' : '首 Token';
         info = { statusText: '监控读取中', statusTone: 'unknown', latencyText: `${latencyLabel} --`, latencyValueText: '' };
       } else {
         const multiplier = parseGroupOptionMultiplier(multiplierNode.textContent);
