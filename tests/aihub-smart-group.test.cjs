@@ -258,6 +258,20 @@ test('refreshes usage prices without repeatedly reloading exact usage rows', () 
   assert.match(usageSource, /this\.syncUsageAuditView\(detailTables, mobileContexts\);/);
 });
 
+test('anchors usage price refreshes to completion time and pauses them in the background', () => {
+  const usageSource = userscriptSource.slice(userscriptSource.indexOf('class UsageMultiplierEnhancer'), userscriptSource.indexOf('class ProviderSortEnhancer'));
+
+  assert.equal(core.getUsageRefreshTimerDelay(10_001, 10_000), 299_999);
+  assert.equal(core.getUsageRefreshTimerDelay(310_000, 10_000), 1_000);
+  assert.equal(core.getUsageRefreshTimerDelay(10_000, 0), 1_000);
+  assert.match(usageSource, /syncRefreshTimer\(\) \{/);
+  assert.match(usageSource, /this\.lastRefreshCompletedAt = Date\.now\(\);\s*if \(this\.active\) this\.syncRefreshTimer\(\);/);
+  assert.match(usageSource, /if \(!isPageVisible\(\)\) \{\s*if \(this\.refreshTimer\) window\.clearTimeout\(this\.refreshTimer\);/);
+  assert.match(usageSource, /this\.refreshTimer = window\.setTimeout\(/);
+  assert.doesNotMatch(usageSource, /this\.refreshTimer = window\.setInterval/);
+  assert.doesNotMatch(usageSource, /clearInterval\(this\.refreshTimer\)/);
+});
+
 test('lets passive provider displays share the longer monitor summary cache', () => {
   const dropdownSource = userscriptSource.slice(userscriptSource.indexOf('class KeyGroupDropdownEnhancer'), userscriptSource.indexOf('class UsageMultiplierEnhancer'));
   const usageSource = userscriptSource.slice(userscriptSource.indexOf('class UsageMultiplierEnhancer'), userscriptSource.indexOf('class ProviderSortEnhancer'));

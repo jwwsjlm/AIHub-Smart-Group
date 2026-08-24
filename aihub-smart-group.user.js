@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.35
+// @version      0.14.36
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.35';
+  const SCRIPT_VERSION = '0.14.36';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -462,6 +462,12 @@
       ? PROVIDER_REFRESH_UNAVAILABLE_RETRY_MS
       : PROVIDER_REFRESH_RETRY_MS;
     return Math.max(minimumDelay, getProviderRefreshDelay(now, lastRefreshAt, intervalMs));
+  }
+
+  function getUsageRefreshTimerDelay(now, lastCompletedAt) {
+    const completedAt = Number(lastCompletedAt);
+    if (!Number.isFinite(completedAt) || completedAt <= 0) return 1_000;
+    return Math.max(1_000, getProviderRefreshDelay(now, completedAt, USAGE_REFRESH_INTERVAL_MS));
   }
 
   function shouldRunControllerRefresh({
@@ -4839,9 +4845,7 @@
       });
       this.syncObserverRoot();
       this.refresh(true);
-      this.refreshTimer = window.setInterval(() => {
-        if (isPageVisible() && isRefreshDue(Date.now(), this.lastRefreshCompletedAt, USAGE_REFRESH_INTERVAL_MS)) this.refresh();
-      }, USAGE_REFRESH_INTERVAL_MS);
+      this.syncRefreshTimer();
     }
 
     stop() {
@@ -4852,7 +4856,7 @@
       this.observedRoot = null;
       this.disconnectUsageDetailObserver();
       this.detailObserver = null;
-      if (this.refreshTimer) window.clearInterval(this.refreshTimer);
+      if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
       if (this.renderTimer) window.clearTimeout(this.renderTimer);
       if (this.usageRetryTimer !== null) window.clearTimeout(this.usageRetryTimer);
       this.refreshTimer = null;
@@ -4946,6 +4950,8 @@
     async refresh(force = false) {
       if (!this.active || !isPageVisible() || this.loading) return;
       if (!force && !isRefreshDue(Date.now(), this.lastRefreshCompletedAt, USAGE_REFRESH_INTERVAL_MS)) return;
+      if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
       this.loading = true;
       try {
         const [monitorResult] = await Promise.allSettled([
@@ -4964,13 +4970,35 @@
       } finally {
         this.loading = false;
         this.lastRefreshCompletedAt = Date.now();
+        if (this.active) this.syncRefreshTimer();
       }
     }
 
     handleVisibilityChange() {
-      if (!this.active || !isPageVisible()) return;
+      if (!this.active) return;
+      if (!isPageVisible()) {
+        if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
+        this.refreshTimer = null;
+        return;
+      }
       if (isRefreshDue(Date.now(), this.lastRefreshCompletedAt, USAGE_REFRESH_INTERVAL_MS)) this.refresh();
-      else this.queueRender();
+      else {
+        this.queueRender();
+        this.syncRefreshTimer();
+      }
+    }
+
+    syncRefreshTimer() {
+      if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
+      if (!this.active || !isPageVisible() || this.loading) return;
+      const delay = getUsageRefreshTimerDelay(Date.now(), this.lastRefreshCompletedAt);
+      this.refreshTimer = window.setTimeout(() => {
+        this.refreshTimer = null;
+        if (!this.active || !isPageVisible()) return;
+        if (isRefreshDue(Date.now(), this.lastRefreshCompletedAt, USAGE_REFRESH_INTERVAL_MS)) this.refresh();
+        else this.syncRefreshTimer();
+      }, delay);
     }
 
     queueRender() {
@@ -6194,6 +6222,7 @@
     isRefreshDue,
     getProviderRefreshDelay,
     getProviderRefreshTimerDelay,
+    getUsageRefreshTimerDelay,
     shouldRunControllerRefresh,
     installHistoryChangeListener,
     isPageVisible,
