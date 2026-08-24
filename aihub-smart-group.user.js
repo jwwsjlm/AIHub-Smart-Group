@@ -2,7 +2,7 @@
 // @name         AIHub Smart Group
 // @name:zh-CN   AIHub 智能分组
 // @namespace    local.aihub.smart-group
-// @version      0.14.39
+// @version      0.14.40
 // @description  Recommend reliable low-cost groups on AIHub.
 // @description:zh-CN 按价格、速度和可用性推荐 AIHub 分组
 // @license      MIT
@@ -29,7 +29,7 @@
 
   const ROOT_ID = 'aihub-smart-group-panel';
   const TOGGLE_ID = 'aihub-smart-group-toggle';
-  const SCRIPT_VERSION = '0.14.39';
+  const SCRIPT_VERSION = '0.14.40';
   const STORAGE_PREFIX = 'aihub-smart-group:';
   const CONFIG_CHANGE_EVENT = 'aihub-smart-group:config-changed';
   const ROUTER_REPLACE_EVENT = 'aihub-smart-group:router-replace';
@@ -1540,13 +1540,7 @@
       generatedAt: data?.generatedAt ?? data?.generated_at ?? null,
       apis: sourceRows.map(normalizeMonitorRow),
     };
-    const compactedHistory = compactMonitorProbeSeries(buildMonitorSeriesFromSummary(summary));
-    for (const row of summary.apis) {
-      const groupId = String(row?.id ?? row?.group_id ?? '');
-      row.history = Array.isArray(compactedHistory.seriesByApiId?.[groupId])
-        ? compactedHistory.seriesByApiId[groupId]
-        : [];
-    }
+    compactMonitorSummaryHistories(summary.apis, summary.generatedAt);
     return summary;
   }
 
@@ -2059,6 +2053,49 @@
     );
     if (latestSampleAt !== null) return latestSampleAt;
     return null;
+  }
+
+  function compactMonitorSummaryHistories(rows, generatedAt, windowMs = MONITOR_AVAILABILITY_WINDOW_MS) {
+    const sourceRows = Array.isArray(rows) ? rows : [];
+    const generatedTimestamp = parseMonitorSampleTimestamp(generatedAt);
+    const maxTimestamp = Number.isFinite(generatedTimestamp)
+      ? generatedTimestamp + MONITOR_SAMPLE_CLOCK_SKEW_MS
+      : Number.POSITIVE_INFINITY;
+    let latestSampleAt = null;
+    for (const row of sourceRows) {
+      for (const sample of Array.isArray(row?.history) ? row.history : []) {
+        const timestamp = Number(sample?.[0]);
+        if (Number.isFinite(timestamp)
+          && timestamp <= maxTimestamp
+          && (latestSampleAt === null || timestamp > latestSampleAt)) latestSampleAt = timestamp;
+      }
+    }
+    const anchor = Number.isFinite(generatedTimestamp)
+      ? Math.max(generatedTimestamp, latestSampleAt ?? generatedTimestamp)
+      : latestSampleAt;
+    if (anchor === null) return sourceRows;
+
+    const cutoff = anchor - Math.max(1, Number(windowMs) || 1);
+    let latestOlderSample = null;
+    let latestOlderRow = null;
+    let recentSampleCount = 0;
+    for (const row of sourceRows) {
+      const recent = [];
+      for (const sample of Array.isArray(row?.history) ? row.history : []) {
+        const timestamp = Number(sample?.[0]);
+        if (!Number.isFinite(timestamp) || timestamp > anchor) continue;
+        if (timestamp >= cutoff) {
+          recent.push(sample);
+          recentSampleCount += 1;
+        } else if (!latestOlderSample || timestamp > Number(latestOlderSample[0])) {
+          latestOlderSample = sample;
+          latestOlderRow = row;
+        }
+      }
+      row.history = recent;
+    }
+    if (!recentSampleCount && latestOlderSample && latestOlderRow) latestOlderRow.history = [latestOlderSample];
+    return sourceRows;
   }
 
   function compactMonitorProbeSeries(seriesPayload, windowMs = MONITOR_AVAILABILITY_WINDOW_MS) {
